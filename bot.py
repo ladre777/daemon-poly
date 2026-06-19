@@ -17,6 +17,7 @@ Required Secrets (set in Replit Secrets panel):
 
 import os
 import json
+import math
 import time
 import threading
 from datetime import datetime, timezone, date as dt
@@ -1024,6 +1025,93 @@ def send_leaderboard():
         + "\n-----------------------------"
     )
 
+def _estimate_true_probs(lb: dict) -> dict:
+    """
+    Estimate true win probability for each player using an exponential
+    decay model keyed on shots back from the lead.
+    k=0.28 calibrated for US Open tight scoring distributions.
+    Returns {name: pct} where pct is 0-100.
+    """
+    if not lb:
+        return {}
+    sorted_lb = sorted(lb.items(), key=lambda x: x[1].get("score", 999))
+    lead_score = sorted_lb[0][1].get("score", 0)
+    k = 0.28
+    raw = {}
+    for name, d in sorted_lb:
+        shots_back = max(0, d.get("score", 0) - lead_score)
+        # Cut players get near-zero weight
+        if d.get("cut"):
+            raw[name] = 0.001
+        else:
+            raw[name] = math.exp(-k * shots_back)
+    total = sum(raw.values())
+    if not total:
+        return {}
+    return {name: round(v / total * 100, 2) for name, v in raw.items()}
+
+
+def send_ladder():
+    """
+    Rank every player in the field by estimated edge vs current Polymarket odds.
+    Shows full edge ladder sorted best→worst.
+    """
+    tg("📊 LADDER — fetching live data...")
+    lb   = fetch_leaderboard()
+    odds = fetch_polymarket_odds(list(lb.keys())) if lb else {}
+    if not lb:
+        tg("LADDER: Leaderboard unavailable")
+        return
+
+    true_probs = _estimate_true_probs(lb)
+    rnd        = state["current_round"]
+    now_str    = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    held       = {p["player"] for p in state["open_positions"]}
+
+    rows = []
+    for name, true_pct in true_probs.items():
+        mkt_pct = odds.get(name)
+        if mkt_pct is None or mkt_pct <= 0:
+            continue
+        edge = round(true_pct - mkt_pct, 1)
+        lb_d = lb.get(name, {})
+        pos  = lb_d.get("position", 999)
+        score = lb_d.get("score", 0)
+        rows.append((edge, name, true_pct, mkt_pct, pos, score))
+
+    # Sort: best edge first
+    rows.sort(key=lambda x: -x[0])
+
+    pos_threshold = 10   # top-10 only label
+    edge_threshold = state["min_edge_pct"]
+
+    lines = []
+    for edge, name, true_pct, mkt_pct, pos, score in rows[:25]:
+        tag = ""
+        if name in held:
+            tag = " ✅"
+        elif edge >= edge_threshold and pos <= 20:
+            tag = " 🎯"
+        score_str = f"{score:+d}" if isinstance(score, int) else str(score)
+        sign = "+" if edge >= 0 else ""
+        lines.append(
+            f"#{pos} {name}{tag}\n"
+            f"   Est {true_pct:.1f}% | Mkt {mkt_pct:.1f}% | Edge {sign}{edge:.1f}%\n"
+            f"   Score: {score_str}"
+        )
+
+    # Summary: count players with positive edge
+    pos_edges = [r for r in rows if r[0] >= edge_threshold and lb.get(r[1], {}).get("position", 999) <= 30]
+    tg(
+        f"--- EDGE LADDER | R{rnd} | {now_str} ---\n"
+        f"Min edge threshold: +{edge_threshold:.0f}%\n"
+        f"🎯 = actionable  ✅ = held\n\n"
+        + "\n".join(lines)
+        + f"\n\nActionable: {len(pos_edges)} players above threshold"
+        + "\n-----------------------------"
+    )
+
+
 def settle_positions():
     """
     Settle all open positions against the final R4 leaderboard.
@@ -1221,6 +1309,7 @@ REPORT              — P&L per position vs entry
 SNAPSHOT            — full state audit (bankroll, positions, age, P&L)
 BRIEFING            — Claude morning briefing for today's round
 HALFTIME            — mid-round analysis: movers, faders, position advice
+LADDER              — full field ranked by edge (Est% vs Polymarket%)
 LEADERBOARD         — live top-15 + Polymarket odds
 SCAN                — manual Claude signal scan
 PENDING             — queued trades + countdown
@@ -1270,6 +1359,9 @@ def handle_command(text: str):
 
     elif cmd == "HALFTIME":
         send_halftime_report(state["current_round"])
+
+    elif cmd == "LADDER":
+        send_ladder()
 
     elif cmd == "LEADERBOARD":
         send_leaderboard()
