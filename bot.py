@@ -513,6 +513,7 @@ def execute_trade(player: str, edge: float, confidence: str,
         "order_id":      order_id,
         "round_entered": round_num,
         "from_cycle":    from_cycle_pool,
+        "entered_at":    time.time(),
     })
     if from_cycle_pool:
         state["cycle_pool"] -= size
@@ -938,6 +939,96 @@ def settle_positions():
     save_state()
 
 
+def send_snapshot():
+    """Full state audit snapshot sent to Telegram."""
+    now      = time.time()
+    now_str  = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    rnd      = state["current_round"]
+    odds     = state["last_odds"]
+    bankroll = state["bankroll"]
+    start    = state["starting_bankroll"]
+    banked   = state["banked_profit"]
+    pool     = state["cycle_pool"]
+    wins     = state["total_wins"]
+    losses   = state["total_losses"]
+    total_t  = wins + losses
+    win_rate = (wins / total_t * 100) if total_t else 0
+    ap_icon  = "🟢 ON" if state["autopilot"] else "🔴 OFF"
+
+    # ── Header ─────────────────────────────────────
+    header = (
+        f"--- SNAPSHOT | R{rnd} | {now_str} ---\n"
+        f"Autopilot:  {ap_icon}\n"
+        f"Bankroll:   ${bankroll:.2f}  (started ${start:.2f})\n"
+        f"Banked:     ${banked:.2f}\n"
+        f"Cycle pool: ${pool:.2f}\n"
+        f"Record:     {wins}W / {losses}L "
+        + (f"({win_rate:.0f}%)" if total_t else "(no trades yet)")
+    )
+
+    # ── Open Positions ──────────────────────────────
+    pos_lines = []
+    total_exposure   = 0.0
+    total_unrealized = 0.0
+
+    for pos in state["open_positions"]:
+        player  = pos["player"]
+        entry   = pos["entry_pct"]
+        size    = pos["size_usd"]
+        shares  = pos.get("shares", _usd_to_shares(size, entry))
+        current = odds.get(player, entry)
+        cycle   = " [CYCLE]" if pos.get("from_cycle") else ""
+        rnd_in  = pos.get("round_entered", "?")
+
+        # Unrealized P&L: current share value vs cost
+        cur_val  = round(shares * current / 100, 2)
+        pnl_usd  = round(cur_val - size, 2)
+        pnl_sign = "+" if pnl_usd >= 0 else ""
+        arrow    = "▲" if pnl_usd >= 0 else "▼"
+
+        # Position age
+        entered_at = pos.get("entered_at")
+        if entered_at:
+            age_secs = int(now - entered_at)
+            age_h    = age_secs // 3600
+            age_m    = (age_secs % 3600) // 60
+            age_str  = f"{age_h}h {age_m}m" if age_h else f"{age_m}m"
+        else:
+            age_str = "?"
+
+        total_exposure   += size
+        total_unrealized += pnl_usd
+
+        pos_lines.append(
+            f"{arrow} {player}{cycle}\n"
+            f"   R{rnd_in} | Entry {entry:.1f}% → Now {current:.1f}%\n"
+            f"   Shares {shares:.2f} | Cost ${size:.2f} | Age {age_str}\n"
+            f"   Unreal P&L: {pnl_sign}${pnl_usd:.2f}"
+        )
+
+    # ── Closed Positions ────────────────────────────
+    realized = sum(p.get("pnl", 0) for p in state["closed_positions"])
+    net_pnl  = realized + total_unrealized + banked
+
+    if state["open_positions"]:
+        pos_section = f"\nOPEN ({len(state['open_positions'])}):\n" + "\n".join(pos_lines)
+        pos_section += f"\nExposure: ${total_exposure:.2f} | Unreal: {'+' if total_unrealized>=0 else ''}${total_unrealized:.2f}"
+    else:
+        pos_section = "\nOPEN: none"
+
+    closed_section = (
+        f"\nCLOSED: {len(state['closed_positions'])} | "
+        f"Realized: {'+' if realized>=0 else ''}${realized:.2f}"
+    )
+
+    footer = (
+        f"\nGrand total: {'+' if net_pnl>=0 else ''}${net_pnl:.2f}"
+        f"\n------------------------------"
+    )
+
+    tg(header + pos_section + closed_section + footer)
+
+
 def send_session_summary():
     total    = state["total_wins"] + state["total_losses"]
     win_rate = (state["total_wins"] / total * 100) if total else 0
@@ -964,6 +1055,7 @@ AUTOPILOT: OFF      — signals only, no trades
 AUTOPILOT: RESUME   — resume after suspension
 STATUS              — open positions + exposure
 REPORT              — P&L per position vs entry
+SNAPSHOT            — full state audit (bankroll, positions, age, P&L)
 LEADERBOARD         — live top-15 + Polymarket odds
 SCAN                — manual Claude signal scan
 PENDING             — queued trades + countdown
@@ -1004,6 +1096,9 @@ def handle_command(text: str):
 
     elif cmd == "REPORT":
         send_pnl_report()
+
+    elif cmd == "SNAPSHOT":
+        send_snapshot()
 
     elif cmd == "LEADERBOARD":
         send_leaderboard()
