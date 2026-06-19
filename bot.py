@@ -89,8 +89,25 @@ def load_state():
 SLASH_GOLF_KEY            = os.environ.get("SLASH_GOLF_KEY", "")
 TELEGRAM_TOKEN            = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID          = os.environ.get("TELEGRAM_CHAT_ID", "8486909237")
-POLYMARKET_KEY_ID         = os.environ.get("POLYMARKET_KEY_ID", "")
-POLYMARKET_SECRET_KEY     = os.environ.get("POLYMARKET_SECRET_KEY", "")
+def _load_pm_creds():
+    """Polymarket US creds: prefer valid env secrets; fall back to local .pm_creds.json.
+    The stored env secrets can hold stale self-custody wallet values (0x...); the
+    base64 Ed25519 secret never starts with 0x and the key id is a UUID."""
+    kid = os.environ.get("POLYMARKET_KEY_ID", "")
+    sec = os.environ.get("POLYMARKET_SECRET_KEY", "")
+    env_valid = (kid.count("-") == 4 and not kid.startswith("0x")
+                 and sec and not sec.startswith("0x"))
+    if not env_valid:
+        try:
+            with open(".pm_creds.json") as f:
+                d = json.load(f)
+            kid = d.get("key_id", "") or kid
+            sec = d.get("secret_key", "") or sec
+        except Exception:
+            pass
+    return kid, sec
+
+POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY = _load_pm_creds()
 ANTHROPIC_API_KEY         = os.environ.get("ANTHROPIC_API_KEY", "")
 SESSION_BANKROLL          = float(os.environ.get("SESSION_BANKROLL", "300"))
 

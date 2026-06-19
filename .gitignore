@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Local Polymarket US credentials (never commit)
+.pm_creds.json
