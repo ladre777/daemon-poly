@@ -16,11 +16,70 @@ Required Secrets (set in Replit Secrets panel):
 """
 
 import os
+import json
 import time
 import threading
 from datetime import datetime, timezone, date as dt
 
 import requests
+
+STATE_FILE = "daemon_state.json"
+
+# Keys persisted to disk — excludes ephemeral runtime fields
+PERSIST_KEYS = [
+    "autopilot", "bankroll", "starting_bankroll",
+    "open_positions", "closed_positions",
+    "banked_profit", "cycle_pool",
+    "consecutive_losses", "cooldown_active",
+    "cycling_active", "cycle_no_growth_count",
+    "current_round", "last_leaderboard", "last_odds",
+    "market_token_map", "cut_players",
+    "total_wins", "total_losses",
+]
+
+def save_state():
+    """Persist bot state to disk. Called after every meaningful mutation."""
+    try:
+        snapshot = {}
+        for k in PERSIST_KEYS:
+            v = state.get(k)
+            snapshot[k] = list(v) if isinstance(v, set) else v
+        with open(STATE_FILE, "w") as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception as e:
+        print(f"[STATE] Save error: {e}")
+
+def load_state():
+    """Restore bot state from disk on startup."""
+    if not os.path.exists(STATE_FILE):
+        print("[STATE] No saved state found — starting fresh")
+        return
+    try:
+        with open(STATE_FILE) as f:
+            snapshot = json.load(f)
+        for k in PERSIST_KEYS:
+            if k not in snapshot:
+                continue
+            v = snapshot[k]
+            if k == "cut_players":
+                state[k] = set(v)
+            else:
+                state[k] = v
+        pos_count  = len(state["open_positions"])
+        closed_count = len(state["closed_positions"])
+        print(f"[STATE] Restored — bankroll ${state['bankroll']:.2f} | "
+              f"{pos_count} open | {closed_count} closed | "
+              f"autopilot {'ON' if state['autopilot'] else 'OFF'}")
+        tg(
+            f"♻️ STATE RESTORED after restart\n"
+            f"Bankroll:  ${state['bankroll']:.2f}\n"
+            f"Open:      {pos_count} position(s)\n"
+            f"Autopilot: {'ON 🟢' if state['autopilot'] else 'OFF 🔴'}\n"
+            + (f"Positions: " + ", ".join(p['player'] for p in state['open_positions'])
+               if pos_count else "")
+        )
+    except Exception as e:
+        print(f"[STATE] Load error: {e} — starting fresh")
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -460,6 +519,7 @@ def execute_trade(player: str, edge: float, confidence: str,
 
     state["consecutive_losses"] = 0
     tg(f"✅ FILLED: {player} YES | {shares:.2f} shares @ ${entry_pct/100:.2f} | Order: {order_id}")
+    save_state()
     return True
 
 # ─────────────────────────────────────────────
@@ -549,6 +609,7 @@ def run_profit_cycle(round_num: int):
     tg(f"--- PROFIT CYCLE ---\nR{round_num}→R{round_num+1}\nRealized: ${realized:.2f}\n"
        f"Locked:   ${lock:.2f}\nCycle:    ${cycle:.2f}\nBanked:   ${state['banked_profit']:.2f}\n"
        f"--------------------")
+    save_state()
 
     if state["banked_profit"] <= prev:
         state["cycle_no_growth_count"] += 1
@@ -874,6 +935,7 @@ def settle_positions():
         + f"\nTrades:        {total_trades}"
         + "\n---------------------------"
     )
+    save_state()
 
 
 def send_session_summary():
@@ -923,16 +985,19 @@ def handle_command(text: str):
     if cmd == "AUTOPILOT: ON":
         state["autopilot"] = True
         tg("🟢 AUTOPILOT: ON — live trading active")
+        save_state()
 
     elif cmd == "AUTOPILOT: OFF":
         state["autopilot"] = False
         tg("🔴 AUTOPILOT: OFF — signal mode only")
+        save_state()
 
     elif cmd == "AUTOPILOT: RESUME":
-        state["autopilot"]      = True
-        state["suspended"]      = False
+        state["autopilot"]       = True
+        state["suspended"]       = False
         state["cooldown_active"] = False
         tg("🟢 AUTOPILOT: RESUMED — all systems active")
+        save_state()
 
     elif cmd in ("STATUS", "POSITIONS"):
         send_cycle_report(state["current_round"])
@@ -1003,6 +1068,7 @@ def handle_command(text: str):
             state["bankroll"]          = amount
             state["starting_bankroll"] = amount
             tg(f"BANKROLL SET: ${amount:.2f}")
+            save_state()
         except:
             tg("Format: BANKROLL: $300")
 
@@ -1013,6 +1079,7 @@ def handle_command(text: str):
             half = pos["size_usd"] / 2
             exit_polymarket_position(pos["token_id"], half, player)
             tg(f"EXIT HALF: {player} — sold ${half:.2f}")
+            save_state()
         else:
             tg(f"No open position for: {player}")
 
@@ -1023,6 +1090,7 @@ def handle_command(text: str):
             exit_polymarket_position(pos["token_id"], pos["size_usd"], player)
             state["open_positions"].remove(pos)
             tg(f"EXIT FULL: {player} — closed ${pos['size_usd']:.2f}")
+            save_state()
         else:
             tg(f"No open position for: {player}")
 
@@ -1174,6 +1242,7 @@ def schedule_loop():
 
             check_movement_triggers(4)
 
+        save_state()      # heartbeat save every poll cycle
         time.sleep(600)  # poll every 10 minutes
 
 # ─────────────────────────────────────────────
@@ -1209,6 +1278,8 @@ if __name__ == "__main__":
     print()
     print("  Connecting to Polymarket CLOB...")
     get_clob_client()
+    print("  Restoring saved state (if any)...")
+    load_state()
     print("  Pre-loading leaderboard + market tokens...")
     lb = fetch_leaderboard()
     if lb:

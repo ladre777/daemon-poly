@@ -1,0 +1,20 @@
+{
+  "autopilot": false,
+  "bankroll": 300.0,
+  "starting_bankroll": 300.0,
+  "open_positions": [],
+  "closed_positions": [],
+  "banked_profit": 0.0,
+  "cycle_pool": 0.0,
+  "consecutive_losses": 0,
+  "cooldown_active": false,
+  "cycling_active": true,
+  "cycle_no_growth_count": 0,
+  "current_round": 2,
+  "last_leaderboard": {},
+  "last_odds": {},
+  "market_token_map": {},
+  "cut_players": [],
+  "total_wins": 0,
+  "total_losses": 0
+}
