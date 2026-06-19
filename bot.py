@@ -255,7 +255,7 @@ def place_polymarket_order(token_id: str, side: str, size_usd: float, player_nam
 
         if client:
             from py_clob_client.order_builder.constants import BUY, SELL
-            from py_clob_client.client import OrderArgs, PartialCreateOrderOptions
+            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
 
             # Get current price to set limit
             current_pct = state["last_odds"].get(player_name, 50) / 100
@@ -304,7 +304,7 @@ def exit_polymarket_position(token_id: str, size_usd: float, player_name: str) -
 
         if client:
             from py_clob_client.order_builder.constants import SELL
-            from py_clob_client.client import OrderArgs, PartialCreateOrderOptions
+            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
 
             current_pct = state["last_odds"].get(player_name, 50) / 100
             price = round(current_pct, 2)

@@ -11,6 +11,26 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "DAEMON-POLY Bot"
+
+[[workflows.workflow]]
+name = "DAEMON-POLY Bot"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python bot.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -26,3 +46,19 @@ externalPort = 8080
 [[ports]]
 localPort = 8081
 externalPort = 80
+
+[[ports]]
+localPort = 8082
+externalPort = 3000
+
+[userenv]
+
+[userenv.shared]
+TELEGRAM_TOKEN = "8994388979:AAHzh7K46o27DJXaDnffDd9ZC6SWNNrBDuc"
+TELEGRAM_CHAT_ID = "8486909237"
+POLYMARKET_API_KEY = "019eadfb-61ad-7035-9cff-133508451e5f"
+POLYMARKET_PK = "0xbdd566e48d9bef312066f40ecd57994d519bad44eaeb1ca3eb34545d699bbb42"
+POLYMARKET_WALLET = "0xBD912b38f7F6E6511E700ee5eD613aa436B224ac"
+POLYMARKET_DEPOSIT_WALLET = "0x00bF7a5e577BeD3375518C6308DD7A405BaC291B"
+SLASH_GOLF_KEY = "f8423a3c26msh85fb14945e67297p102da3jsn37c0450d706a"
+SESSION_BANKROLL = "300"
