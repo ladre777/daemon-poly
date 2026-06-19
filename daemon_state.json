@@ -1,7 +1,7 @@
 {
-  "autopilot": false,
-  "bankroll": 300.0,
-  "starting_bankroll": 300.0,
+  "autopilot": true,
+  "bankroll": 50.0,
+  "starting_bankroll": 50.0,
   "open_positions": [],
   "closed_positions": [],
   "banked_profit": 0.0,
