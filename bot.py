@@ -42,6 +42,8 @@ SLASH_GOLF_HOST  = "https://live-golf-data.p.rapidapi.com"
 TELEGRAM_API     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 ANTHROPIC_API    = "https://api.anthropic.com/v1/messages"
 
+VETO_WINDOW_SECS = 60   # seconds before a queued trade auto-fires
+
 # ─────────────────────────────────────────────
 # POLYMARKET CLOB CLIENT
 # ─────────────────────────────────────────────
@@ -111,6 +113,8 @@ state = {
     "scan_hour_reset":      datetime.now(timezone.utc).hour,
     "prev_leaderboard":     {},
     "prev_odds":            {},
+    "pending_trades":       [],   # [{player, edge, confidence, entry_pct, round, from_cycle, queued_at}]
+    "veto_lock":            threading.Lock(),
 }
 
 # ─────────────────────────────────────────────
@@ -459,6 +463,70 @@ def execute_trade(player: str, edge: float, confidence: str,
     return True
 
 # ─────────────────────────────────────────────
+# VETO QUEUE
+# ─────────────────────────────────────────────
+
+def queue_trade(player: str, edge: float, confidence: str,
+                entry_pct: float, round_num: int, from_cycle_pool: bool = False):
+    """
+    Queue a trade for deferred execution.
+    Sends a Telegram alert with a VETO_WINDOW_SECS countdown.
+    If no VETO is received the veto_worker fires the order automatically.
+    """
+    trade = {
+        "player":       player,
+        "edge":         edge,
+        "confidence":   confidence,
+        "entry_pct":    entry_pct,
+        "round":        round_num,
+        "from_cycle":   from_cycle_pool,
+        "queued_at":    time.time(),
+        "vetoed":       False,
+    }
+    with state["veto_lock"]:
+        state["pending_trades"].append(trade)
+
+    size = calculate_size(edge, confidence)
+    tg(
+        f"⏳ PENDING TRADE — {VETO_WINDOW_SECS}s to veto\n"
+        f"Player:     {player}\n"
+        f"Signal:     YES @ {entry_pct:.1f}%\n"
+        f"Edge:       +{edge:.1f}% | {confidence} confidence\n"
+        f"Size:       ${size:.2f}\n"
+        f"Round:      R{round_num}\n"
+        f"\nReply VETO {player}  or  VETO ALL  to cancel.\n"
+        f"Otherwise fires in {VETO_WINDOW_SECS}s automatically."
+    )
+
+
+def veto_worker():
+    """
+    Background thread. Checks pending_trades every 3 seconds.
+    Fires each trade once VETO_WINDOW_SECS has elapsed and it hasn't been vetoed.
+    """
+    while True:
+        time.sleep(3)
+        now = time.time()
+        with state["veto_lock"]:
+            ready = [t for t in state["pending_trades"]
+                     if not t["vetoed"] and now - t["queued_at"] >= VETO_WINDOW_SECS]
+            for trade in ready:
+                state["pending_trades"].remove(trade)
+            # Also remove any already-vetoed entries
+            state["pending_trades"] = [t for t in state["pending_trades"] if not t["vetoed"]]
+
+        for trade in ready:
+            tg(f"🚀 FIRING: {trade['player']} — veto window expired, executing now...")
+            execute_trade(
+                trade["player"],
+                trade["edge"],
+                trade["confidence"],
+                trade["entry_pct"],
+                trade["round"],
+                trade["from_cycle"],
+            )
+
+# ─────────────────────────────────────────────
 # PROFIT CYCLING
 # ─────────────────────────────────────────────
 
@@ -548,7 +616,7 @@ def run_scan(round_num: int, trigger: str = "SCHEDULED", from_cycle: bool = Fals
             if current_player.get("signal") == "ENTER":
                 player = current_player.get("player", "")
                 if player and player not in state["cut_players"]:
-                    execute_trade(
+                    queue_trade(
                         player,
                         current_player.get("edge", 0),
                         current_player.get("confidence", "Low"),
@@ -759,6 +827,9 @@ STATUS              — open positions + exposure
 REPORT              — P&L per position vs entry
 LEADERBOARD         — live top-15 + Polymarket odds
 SCAN                — manual Claude signal scan
+PENDING             — show queued trades + countdown
+VETO [player]       — cancel one pending trade
+VETO ALL            — cancel all pending trades
 BANKROLL: $[X]      — update bankroll
 COOLDOWN: RESET     — clear cooldown
 CYCLE PROFIT        — trigger profit cycling
@@ -811,6 +882,37 @@ def handle_command(text: str):
 
     elif cmd == "HELP":
         tg(HELP_TEXT)
+
+    elif cmd == "VETO ALL":
+        with state["veto_lock"]:
+            count = sum(1 for t in state["pending_trades"] if not t["vetoed"])
+            for t in state["pending_trades"]:
+                t["vetoed"] = True
+        tg(f"🚫 VETO ALL — {count} pending trade(s) cancelled.")
+
+    elif cmd.startswith("VETO "):
+        player = text[5:].strip()
+        with state["veto_lock"]:
+            matches = [t for t in state["pending_trades"]
+                       if not t["vetoed"] and t["player"].lower() == player.lower()]
+            for t in matches:
+                t["vetoed"] = True
+        if matches:
+            tg(f"🚫 VETOED: {matches[0]['player']} — trade cancelled.")
+        else:
+            tg(f"No pending trade found for: {player}")
+
+    elif cmd == "PENDING":
+        with state["veto_lock"]:
+            pending = [t for t in state["pending_trades"] if not t["vetoed"]]
+        if not pending:
+            tg("No pending trades in queue.")
+        else:
+            lines = []
+            for t in pending:
+                secs_left = max(0, VETO_WINDOW_SECS - int(time.time() - t["queued_at"]))
+                lines.append(f"• {t['player']} YES @ {t['entry_pct']:.1f}% | Edge +{t['edge']:.1f}% | fires in {secs_left}s")
+            tg("⏳ PENDING TRADES:\n" + "\n".join(lines) + "\nReply VETO [player] or VETO ALL to cancel.")
 
     elif cmd.startswith("BANKROLL:"):
         try:
@@ -1024,6 +1126,7 @@ if __name__ == "__main__":
         print(f"  Leaderboard: {len(lb)} players loaded")
         print(f"  Token map  : {len(state['market_token_map'])} markets mapped")
     print()
-    print("  Starting Telegram listener + scheduler...")
+    print("  Starting Telegram listener, veto worker + scheduler...")
     threading.Thread(target=telegram_listener, daemon=True).start()
+    threading.Thread(target=veto_worker,       daemon=True).start()
     schedule_loop()
