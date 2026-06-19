@@ -799,6 +799,83 @@ def send_leaderboard():
         + "\n-----------------------------"
     )
 
+def settle_positions():
+    """
+    Settle all open positions against the final R4 leaderboard.
+    YES on the winner pays $1/share → profit.
+    YES on any other player resolves $0 → full loss.
+    Updates bankroll, win/loss counters, and closed_positions.
+    """
+    if not state["open_positions"]:
+        tg("SETTLE: No open positions to settle.")
+        return
+
+    lb = fetch_leaderboard()
+    if not lb:
+        tg("SETTLEMENT ERROR: Cannot fetch final leaderboard — try again in a moment.")
+        return
+
+    sorted_lb = sorted(lb.items(), key=lambda x: x[1].get("position", 999))
+    winner    = sorted_lb[0][0]
+    winner_score = sorted_lb[0][1].get("score", 0)
+
+    tg(
+        f"🏆 FINAL RESULT: {winner} wins US Open 2026\n"
+        f"Score: {winner_score:+d}\n"
+        f"Settling {len(state['open_positions'])} open position(s)..."
+    )
+
+    lines = []
+    for pos in state["open_positions"][:]:
+        player   = pos["player"]
+        size_usd = pos["size_usd"]
+        entry    = pos["entry_pct"]
+        shares   = pos.get("shares", _usd_to_shares(size_usd, entry))
+
+        if player.lower() == winner.lower():
+            # YES resolves to $1/share — receive full share value back
+            proceeds = round(shares, 2)
+            pnl      = round(proceeds - size_usd, 2)
+            state["total_wins"] += 1
+            result = "WIN"
+            state["bankroll"] = round(state["bankroll"] + proceeds, 2)
+        else:
+            # YES resolves to $0 — lose stake
+            pnl    = round(-size_usd, 2)
+            result = "LOSS"
+            state["total_losses"] += 1
+
+        pos["pnl"]    = pnl
+        pos["result"] = result
+        state["closed_positions"].append(pos)
+        state["open_positions"].remove(pos)
+
+        icon = "🟢" if result == "WIN" else "🔴"
+        sign = "+" if pnl >= 0 else ""
+        lines.append(
+            f"{icon} {player}\n"
+            f"   Result: {result} | Shares: {shares:.2f}\n"
+            f"   Cost: ${size_usd:.2f} | P&L: {sign}${pnl:.2f}"
+        )
+
+    total_realized = sum(p.get("pnl", 0) for p in state["closed_positions"])
+    banked         = state["banked_profit"]
+    grand_total    = total_realized + banked
+    total_trades   = state["total_wins"] + state["total_losses"]
+    win_rate       = (state["total_wins"] / total_trades * 100) if total_trades else 0
+
+    tg(
+        f"--- SETTLEMENT COMPLETE ---\n"
+        + "\n".join(lines)
+        + f"\n\nRealized P&L:  {'+' if total_realized>=0 else ''}${total_realized:.2f}"
+        + f"\nBanked profit: ${banked:.2f}"
+        + f"\nGrand total:   {'+' if grand_total>=0 else ''}${grand_total:.2f}"
+        + f"\nWin rate:      {win_rate:.0f}% ({state['total_wins']}W / {state['total_losses']}L)"
+        + f"\nTrades:        {total_trades}"
+        + "\n---------------------------"
+    )
+
+
 def send_session_summary():
     total    = state["total_wins"] + state["total_losses"]
     win_rate = (state["total_wins"] / total * 100) if total else 0
@@ -827,9 +904,10 @@ STATUS              — open positions + exposure
 REPORT              — P&L per position vs entry
 LEADERBOARD         — live top-15 + Polymarket odds
 SCAN                — manual Claude signal scan
-PENDING             — show queued trades + countdown
+PENDING             — queued trades + countdown
 VETO [player]       — cancel one pending trade
 VETO ALL            — cancel all pending trades
+SETTLE              — settle positions vs final result
 BANKROLL: $[X]      — update bankroll
 COOLDOWN: RESET     — clear cooldown
 CYCLE PROFIT        — trigger profit cycling
@@ -879,6 +957,11 @@ def handle_command(text: str):
     elif cmd == "CYCLE: OFF":
         state["cycling_active"] = False
         tg("CYCLING: disabled for remainder of session")
+
+    elif cmd == "SETTLE":
+        tg("SETTLE: pulling final standings and settling all open positions...")
+        settle_positions()
+        send_session_summary()
 
     elif cmd == "HELP":
         tg(HELP_TEXT)
@@ -1079,7 +1162,14 @@ def schedule_loop():
                     run_scan(4, f"SCHEDULED_{label}")
                     flags[flag_key] = True
 
-            if hour == 23 and minute < 10 and flags["r4_18"]:
+            # Auto-settle when all R4 groups finish
+            if state["all_groups_finished"] and not flags.get("r4_settled"):
+                tg("R4 COMPLETE — all groups finished. Running settlement...")
+                settle_positions()
+                send_session_summary()
+                flags["r4_settled"] = True
+
+            if hour == 23 and minute < 10 and flags["r4_18"] and not flags.get("r4_settled"):
                 send_session_summary()
 
             check_movement_triggers(4)
