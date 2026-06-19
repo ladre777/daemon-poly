@@ -473,6 +473,112 @@ def send_morning_briefing(round_num: int):
 
 
 # ─────────────────────────────────────────────
+# HALFTIME
+# ─────────────────────────────────────────────
+
+def _field_half_through(lb: dict) -> bool:
+    """Return True when ≥50% of active players are through hole 9 or more."""
+    if not lb:
+        return False
+    thru_vals = []
+    for d in lb.values():
+        t = d.get("thru", 0)
+        try:
+            thru_vals.append(int(t))
+        except (ValueError, TypeError):
+            pass  # "F" or "-" — skip
+    if not thru_vals:
+        return False
+    half_through = sum(1 for t in thru_vals if t >= 9)
+    return half_through >= len(thru_vals) * 0.5
+
+
+def claude_halftime_analysis(lb: dict, old_lb: dict, odds: dict,
+                              positions: list, round_num: int) -> str:
+    """Ask Claude for a mid-round analysis: movers, faders, position advice."""
+    try:
+        # Build sorted current leaderboard
+        sorted_lb = sorted(lb.items(), key=lambda x: x[1].get("position", 999))[:15]
+        lb_text = "\n".join([
+            f"{v['position']} | {name} | {v['score']:+d} | Today: {v['today']:+d} | Thru: {v['thru']}"
+            for name, v in sorted_lb
+        ])
+
+        # Detect movers: compare today's score vs old leaderboard
+        movers = []
+        for name, d in sorted_lb:
+            old = old_lb.get(name, {})
+            old_pos = old.get("position", 999)
+            new_pos = d.get("position", 999)
+            delta   = old_pos - new_pos  # positive = moved up
+            if abs(delta) >= 3:
+                direction = "▲" if delta > 0 else "▼"
+                movers.append(f"{direction} {name}: pos {old_pos}→{new_pos} ({delta:+d})")
+        movers_text = "\n".join(movers) if movers else "No major moves yet"
+
+        # Active positions context
+        pos_text = "\n".join([
+            f"  {p['player']} YES @ {p['entry_pct']}% | Now {odds.get(p['player'], '?')}%"
+            for p in positions
+        ]) or "  None"
+
+        user_msg = (
+            f"HALFTIME ANALYSIS | R{round_num} | {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n\n"
+            f"MID-ROUND LEADERBOARD:\n{lb_text}\n\n"
+            f"POSITION MOVERS:\n{movers_text}\n\n"
+            f"MY OPEN POSITIONS:\n{pos_text}\n\n"
+            f"Provide a tight halftime report:\n"
+            f"1. SURGING (top 2 players gaining ground — are they worth entering?)\n"
+            f"2. COLLAPSING (who is fading — should I exit if I hold them?)\n"
+            f"3. POSITION ADVICE (for each of my open positions: HOLD, EXIT, or ADD)\n"
+            f"4. WATCH LIST (1-2 players not yet entered who may spike late)\n"
+            f"Keep it concise — one line per point. Goes straight to my phone."
+        )
+        headers = {
+            "x-api-key":          ANTHROPIC_API_KEY,
+            "anthropic-version":  "2023-06-01",
+            "content-type":       "application/json",
+        }
+        payload = {
+            "model":    "claude-sonnet-4-5",
+            "max_tokens": 500,
+            "system":   SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_msg}],
+        }
+        r = requests.post(ANTHROPIC_API, headers=headers, json=payload, timeout=30)
+        return r.json()["content"][0]["text"]
+    except Exception as e:
+        return f"HALFTIME ERROR: {e}"
+
+
+def send_halftime_report(round_num: int):
+    """Fetch fresh data, compare to prev leaderboard, send halftime Telegram report."""
+    tg(f"⏱️ R{round_num} HALFTIME — pulling mid-round data...")
+    old_lb = dict(state.get("last_leaderboard", {}))
+    lb     = fetch_leaderboard()
+    odds   = fetch_polymarket_odds(list(lb.keys())) if lb else {}
+    analysis = claude_halftime_analysis(lb, old_lb, odds, state["open_positions"], round_num)
+    now_str  = datetime.now(timezone.utc).strftime('%H:%M UTC')
+
+    # Quick stats
+    in_progress = [
+        (name, d) for name, d in lb.items()
+        if str(d.get("thru", "")).isdigit()
+    ]
+    finished = [d for d in lb.values() if str(d.get("thru", "")) == "F"]
+
+    tg(
+        f"--- R{round_num} HALFTIME | {now_str} ---\n"
+        f"Field: {len(finished)} finished | {len(in_progress)} in progress\n\n"
+        f"{analysis}\n"
+        f"------------------------------\n"
+        f"Bankroll: ${state['bankroll']:.2f} | "
+        f"Open: {len(state['open_positions'])} | "
+        f"Banked: ${state['banked_profit']:.2f}"
+    )
+
+
+# ─────────────────────────────────────────────
 # PRE-FLIGHT
 # ─────────────────────────────────────────────
 
@@ -1114,6 +1220,7 @@ STATUS              — open positions + exposure
 REPORT              — P&L per position vs entry
 SNAPSHOT            — full state audit (bankroll, positions, age, P&L)
 BRIEFING            — Claude morning briefing for today's round
+HALFTIME            — mid-round analysis: movers, faders, position advice
 LEADERBOARD         — live top-15 + Polymarket odds
 SCAN                — manual Claude signal scan
 PENDING             — queued trades + countdown
@@ -1160,6 +1267,9 @@ def handle_command(text: str):
 
     elif cmd == "BRIEFING":
         send_morning_briefing(state["current_round"])
+
+    elif cmd == "HALFTIME":
+        send_halftime_report(state["current_round"])
 
     elif cmd == "LEADERBOARD":
         send_leaderboard()
@@ -1271,10 +1381,10 @@ def get_current_round() -> int:
 
 def schedule_loop():
     flags = {k: False for k in [
-        "r1_brief",  "r1_monitor",
-        "r2_brief",  "r2_scan1", "r2_scan2",
-        "r3_brief",  "r3_morning", "r3_scan1", "r3_scan2", "r3_night",
-        "r4_brief",  "r4_morning", "r4_11", "r4_14", "r4_17", "r4_18",
+        "r1_brief",  "r1_half",  "r1_monitor",
+        "r2_brief",  "r2_half",  "r2_scan1", "r2_scan2",
+        "r3_brief",  "r3_half",  "r3_morning", "r3_scan1", "r3_scan2", "r3_night",
+        "r4_brief",  "r4_half",  "r4_morning", "r4_11", "r4_14", "r4_17", "r4_18",
     ]}
     r2_scan1_time = r3_scan1_time = None
 
@@ -1300,6 +1410,10 @@ def schedule_loop():
                 flags["r1_brief"] = True
 
             fetch_leaderboard()
+            if not flags["r1_half"] and _field_half_through(state["last_leaderboard"]):
+                send_halftime_report(1)
+                flags["r1_half"] = True
+
             if state["all_groups_finished"] and not flags["r1_monitor"]:
                 lb = state["last_leaderboard"]
                 top10 = "\n".join([
@@ -1316,6 +1430,10 @@ def schedule_loop():
                 flags["r2_brief"] = True
 
             fetch_leaderboard()
+            if not flags["r2_half"] and _field_half_through(state["last_leaderboard"]):
+                send_halftime_report(2)
+                flags["r2_half"] = True
+
             if state["all_groups_finished"] and not flags["r2_scan1"]:
                 tg("R2 COMPLETE — running Scan 1...")
                 run_scan(2, "SCHEDULED_R2_S1")
@@ -1343,6 +1461,11 @@ def schedule_loop():
             if hour == 13 and minute < 10 and not flags["r3_brief"]:
                 send_morning_briefing(3)
                 flags["r3_brief"] = True
+
+            fetch_leaderboard()
+            if not flags["r3_half"] and _field_half_through(state["last_leaderboard"]):
+                send_halftime_report(3)
+                flags["r3_half"] = True
 
             if hour == 12 and minute < 10 and not flags["r3_morning"]:
                 tg("R3 PRE-ROUND CHECK")
@@ -1390,6 +1513,11 @@ def schedule_loop():
             if hour == 13 and minute < 10 and not flags["r4_brief"]:
                 send_morning_briefing(4)
                 flags["r4_brief"] = True
+
+            fetch_leaderboard()
+            if not flags["r4_half"] and _field_half_through(state["last_leaderboard"]):
+                send_halftime_report(4)
+                flags["r4_half"] = True
 
             if hour == 12 and minute < 10 and not flags["r4_morning"]:
                 tg("R4 ACTIVE — 15% edge min, 4-shot gate")
