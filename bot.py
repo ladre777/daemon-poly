@@ -741,6 +741,63 @@ EXPOSURE: ${exposure:.2f} ({(exposure/state['bankroll']*100):.1f}% of bankroll)
 Banked profit: ${state['banked_profit']:.2f}
 --------------------""")
 
+def send_pnl_report():
+    """Send detailed P&L report for each open position vs entry price."""
+    odds = state["last_odds"]
+    now_str = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    round_num = state["current_round"]
+
+    if not state["open_positions"]:
+        tg(f"--- P&L REPORT ({now_str}) ---\nNo open positions.\nBankroll: ${state['bankroll']:.2f} | Banked: ${state['banked_profit']:.2f}\n-----------------------------")
+        return
+
+    lines = []
+    total_unrealized = 0.0
+    total_exposure = 0.0
+
+    for pos in state["open_positions"]:
+        player = pos["player"]
+        entry = pos["entry_pct"]
+        size = pos["size"]
+        current = odds.get(player, entry)
+
+        if entry > 0 and current > 0:
+            pnl_pct = ((current - entry) / entry) * 100
+            # Estimated dollar P&L: size * (current/entry - 1)
+            pnl_usd = round(size * (current / entry - 1), 2)
+        else:
+            pnl_pct = 0.0
+            pnl_usd = 0.0
+
+        total_unrealized += pnl_usd
+        total_exposure += size
+
+        arrow = "▲" if pnl_usd >= 0 else "▼"
+        sign = "+" if pnl_usd >= 0 else ""
+        lines.append(
+            f"{arrow} {player}\n"
+            f"   Entry: {entry:.1f}%  Now: {current:.1f}%  ({sign}{pnl_pct:.0f}%)\n"
+            f"   Size: ${size:.2f}  Est P&L: {sign}${pnl_usd:.2f}"
+        )
+
+    realized = sum(p.get("pnl", 0) for p in state["closed_positions"])
+    total_pnl = realized + total_unrealized
+    sign_total = "+" if total_pnl >= 0 else ""
+
+    report = (
+        f"--- P&L REPORT | R{round_num} | {now_str} ---\n"
+        + "\n".join(lines)
+        + f"\n\nOpen positions: {len(state['open_positions'])}/4"
+        + f"\nTotal exposure: ${total_exposure:.2f}"
+        + f"\nUnrealized P&L: {('+' if total_unrealized >= 0 else '')}${total_unrealized:.2f}"
+        + f"\nRealized P&L:   {('+' if realized >= 0 else '')}${realized:.2f}"
+        + f"\nNet P&L:        {sign_total}${total_pnl:.2f}"
+        + f"\nBankroll: ${state['bankroll']:.2f} | Banked: ${state['banked_profit']:.2f}"
+        + "\n-----------------------------"
+    )
+    tg(report)
+
+
 def send_session_summary():
     """Send end of tournament summary."""
     total = state["total_wins"] + state["total_losses"]
@@ -781,6 +838,9 @@ def handle_command(text: str):
 
     elif cmd == "STATUS":
         send_cycle_report(state["current_round"])
+
+    elif cmd == "REPORT":
+        send_pnl_report()
 
     elif cmd == "COOLDOWN: RESET":
         state["consecutive_losses"] = 0
