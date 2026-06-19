@@ -20,6 +20,7 @@ import json
 import math
 import time
 import threading
+import unicodedata
 from datetime import datetime, timezone, date as dt
 
 import requests
@@ -96,7 +97,7 @@ POLYMARKET_DEPOSIT_WALLET = os.environ.get("POLYMARKET_DEPOSIT_WALLET", "") or P
 ANTHROPIC_API_KEY         = os.environ.get("ANTHROPIC_API_KEY", "")
 SESSION_BANKROLL          = float(os.environ.get("SESSION_BANKROLL", "300"))
 
-TOURNAMENT_ID    = "401353268"
+TOURNAMENT_ID    = "026"
 POLYMARKET_HOST  = "https://clob.polymarket.com"
 SLASH_GOLF_HOST  = "https://live-golf-data.p.rapidapi.com"
 TELEGRAM_API     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -206,6 +207,24 @@ def get_telegram_updates(offset: int = 0):
 # SLASH GOLF — LEADERBOARD
 # ─────────────────────────────────────────────
 
+def _parse_pos(v) -> int:
+    """Parse a leaderboard position ('1', 'T5', 'CUT') into an int (999 = out)."""
+    s = str(v).strip().upper().lstrip("T")
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return 999
+
+def _parse_score(v) -> int:
+    """Parse a golf score ('-7', 'E', '+4') into an int relative to par."""
+    s = str(v).strip().upper()
+    if s in ("E", "EVEN", "", "-"):
+        return 0
+    try:
+        return int(s.replace("+", ""))
+    except (ValueError, TypeError):
+        return 0
+
 def fetch_leaderboard() -> dict:
     """Pull live leaderboard from Slash Golf API."""
     try:
@@ -221,15 +240,18 @@ def fetch_leaderboard() -> dict:
         )
         data = r.json()
         leaderboard = {}
-        players = data.get("leaderboard", data.get("players", []))
+        players = data.get("leaderboardRows", data.get("leaderboard", data.get("players", [])))
         for p in players:
-            name = p.get("playerName", p.get("name", "Unknown"))
+            first = str(p.get("firstName", "")).strip()
+            last  = str(p.get("lastName", "")).strip()
+            name  = (first + " " + last).strip() or p.get("playerName", p.get("name", "Unknown"))
+            status = str(p.get("status", "")).upper()
             leaderboard[name] = {
-                "position": p.get("position", p.get("pos", 0)),
-                "score":    p.get("total", p.get("score", 0)),
-                "today":    p.get("today", 0),
+                "position": _parse_pos(p.get("position", 999)),
+                "score":    _parse_score(p.get("total", p.get("score", 0))),
+                "today":    _parse_score(p.get("currentRoundScore", p.get("today", 0))),
                 "thru":     p.get("thru", "F"),
-                "cut":      p.get("status", "") in ["CUT", "WD", "DQ"],
+                "cut":      status in ("CUT", "WD", "DQ", "WITHDRAWN"),
             }
         state["last_leaderboard"] = leaderboard
         state["all_groups_finished"] = all(
@@ -246,39 +268,77 @@ def fetch_leaderboard() -> dict:
 # POLYMARKET — ODDS & MARKET LOOKUP
 # ─────────────────────────────────────────────
 
-def _fetch_markets_http():
-    """Fetch US Open 2026 markets via raw HTTP."""
-    headers = {"Authorization": f"Bearer {POLYMARKET_API_KEY}"}
-    r = requests.get(
-        f"{POLYMARKET_HOST}/markets",
-        headers=headers,
-        params={"keyword": "US Open 2026", "active": "true"},
-        timeout=10,
-    )
-    return r.json().get("data", [])
+GAMMA_HOST          = "https://gamma-api.polymarket.com"
+US_OPEN_EVENT_SLUG  = "2026-us-open-winner"
+US_OPEN_QUESTION    = "win the 2026 U.S. Open"
+_MARKET_TICK        = {}   # token_id -> tick size string (e.g. "0.001"); negRisk market
+_MARKET_NEG_RISK    = True
+
+def _norm_name(n: str) -> str:
+    """Normalize a player name for matching (strip accents, punctuation, case)."""
+    n = unicodedata.normalize("NFKD", str(n)).encode("ascii", "ignore").decode()
+    return "".join(c for c in n.lower() if c.isalnum())
+
+def _as_list(v):
+    """Gamma returns clobTokenIds/outcomePrices as JSON strings or lists."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return []
+    return []
+
+def _fetch_us_open_markets() -> list:
+    """
+    Fetch the live 2026 U.S. Open Winner event from Polymarket Gamma.
+    Returns [{name, token_id (YES), price_pct, tick}] for each named player.
+    """
+    r = requests.get(f"{GAMMA_HOST}/events",
+                     params={"slug": US_OPEN_EVENT_SLUG}, timeout=12)
+    events = r.json()
+    if not events:
+        return []
+    out = []
+    for m in events[0].get("markets", []):
+        q = m.get("question", "")
+        if US_OPEN_QUESTION not in q:
+            continue
+        name = q.replace("Will ", "").replace(" win the 2026 U.S. Open?", "").strip()
+        if name.lower().startswith("player ") or name.lower().startswith("any other"):
+            continue
+        toks   = _as_list(m.get("clobTokenIds"))
+        prices = _as_list(m.get("outcomePrices"))
+        if not toks:
+            continue
+        try:
+            yes_price = float(prices[0]) if prices else 0.0
+        except (ValueError, TypeError):
+            yes_price = 0.0
+        out.append({
+            "name":      name,
+            "token_id":  toks[0],                       # YES token
+            "price_pct": round(yes_price * 100, 2),
+            "tick":      str(m.get("orderPriceMinTickSize", "0.001")),
+        })
+    return out
 
 def fetch_polymarket_odds(player_names: list) -> dict:
-    """Pull current win probabilities and cache token IDs."""
+    """Pull current win probabilities for the live US Open market and cache token IDs."""
     try:
-        client = get_clob_client()
+        markets = _fetch_us_open_markets()
+        if not markets:
+            return state["last_odds"]
+
+        norm_lookup = {_norm_name(p): p for p in player_names}
         odds = {}
-
-        if client:
-            resp = client.get_markets()
-            markets = resp.get("data", []) if isinstance(resp, dict) else []
-        else:
-            markets = _fetch_markets_http()
-
-        for market in markets:
-            for token in market.get("tokens", []):
-                outcome  = token.get("outcome", "")
-                price    = float(token.get("price", 0))
-                token_id = token.get("token_id", "")
-                for name in player_names:
-                    if name.lower() in outcome.lower():
-                        odds[name] = round(price * 100, 2)
-                        if token_id:
-                            state["market_token_map"][name] = token_id
+        for mk in markets:
+            # Prefer the leaderboard's spelling of the name when it matches.
+            player = norm_lookup.get(_norm_name(mk["name"]), mk["name"])
+            odds[player] = mk["price_pct"]
+            state["market_token_map"][player] = mk["token_id"]
+            _MARKET_TICK[mk["token_id"]] = mk["tick"]
 
         state["last_odds"] = odds
         return odds
@@ -295,12 +355,25 @@ def _usd_to_shares(size_usd: float, price_pct: float) -> float:
     price = max(price_pct / 100, 0.01)
     return round(size_usd / price, 2)
 
+def _round_to_tick(price: float, tick: str) -> float:
+    """Round a probability price (0-1) to the market's tick size, clamped to (0,1)."""
+    try:
+        t = float(tick)
+    except (ValueError, TypeError):
+        t = 0.01
+    if t <= 0:
+        t = 0.01
+    decimals = max(0, len(tick.split(".")[1]) if "." in str(tick) else 0)
+    p = round(round(price / t) * t, decimals)
+    return min(max(p, t), 1 - t)
+
 def place_polymarket_order(token_id: str, side: str, size_usd: float, player_name: str) -> dict:
     """Place a YES/NO order. side = 'YES' or 'NO'."""
     try:
         client = get_clob_client()
         price_pct = state["last_odds"].get(player_name, 50)
-        price     = round(price_pct / 100, 2)
+        tick      = _MARKET_TICK.get(token_id, "0.01")
+        price     = _round_to_tick(price_pct / 100, tick)
         shares    = _usd_to_shares(size_usd, price_pct)
 
         if client:
@@ -309,7 +382,7 @@ def place_polymarket_order(token_id: str, side: str, size_usd: float, player_nam
             order_side = BUY if side == "YES" else SELL
             result = client.create_and_post_order(
                 OrderArgs(token_id=token_id, price=price, size=shares, side=order_side),
-                options=PartialCreateOrderOptions(tick_size="0.01", neg_risk=False),
+                options=PartialCreateOrderOptions(tick_size=tick, neg_risk=_MARKET_NEG_RISK),
             )
             return result if isinstance(result, dict) else {"orderID": str(result), "shares": shares}
         else:
@@ -331,7 +404,8 @@ def exit_polymarket_position(token_id: str, size_usd: float, player_name: str) -
     try:
         client = get_clob_client()
         price_pct = state["last_odds"].get(player_name, 50)
-        price     = round(price_pct / 100, 2)
+        tick      = _MARKET_TICK.get(token_id, "0.01")
+        price     = _round_to_tick(price_pct / 100, tick)
         shares    = _usd_to_shares(size_usd, price_pct)
 
         if client:
@@ -339,7 +413,7 @@ def exit_polymarket_position(token_id: str, size_usd: float, player_name: str) -
             from py_clob_client.order_builder.constants import SELL
             result = client.create_and_post_order(
                 OrderArgs(token_id=token_id, price=price, size=shares, side=SELL),
-                options=PartialCreateOrderOptions(tick_size="0.01", neg_risk=False),
+                options=PartialCreateOrderOptions(tick_size=tick, neg_risk=_MARKET_NEG_RISK),
             )
             return result if isinstance(result, dict) else {"orderID": str(result)}
         else:
