@@ -1112,6 +1112,115 @@ def send_ladder():
     )
 
 
+def claude_targets_analysis(lb: dict, odds: dict, rows: list,
+                             round_num: int) -> str:
+    """
+    Ask Claude to select top 3 specific buy targets with exact position sizes.
+    rows = sorted (edge, name, true_pct, mkt_pct, pos, score) list from LADDER.
+    """
+    try:
+        bankroll   = state["bankroll"]
+        held       = [p["player"] for p in state["open_positions"]]
+        open_slots = max(0, 4 - len(held))
+        avail_cap  = round(bankroll * 0.30, 2)  # max 30% of bankroll per session
+
+        # Top 15 edge candidates for Claude to review
+        candidates = "\n".join([
+            f"{name} | #{pos} | Score {score:+d} | Est {true_pct:.1f}% | Mkt {mkt_pct:.1f}% | Edge +{edge:.1f}%"
+            for edge, name, true_pct, mkt_pct, pos, score in rows[:15]
+            if edge > 0
+        ]) or "No positive-edge candidates found"
+
+        held_text = ", ".join(held) if held else "None"
+
+        user_msg = (
+            f"TARGETS REQUEST | R{round_num} | {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n\n"
+            f"BANKROLL: ${bankroll:.2f}\n"
+            f"AVAILABLE CAPITAL (30% cap): ${avail_cap:.2f}\n"
+            f"OPEN SLOTS: {open_slots}/4\n"
+            f"CURRENTLY HELD: {held_text}\n\n"
+            f"TOP EDGE CANDIDATES:\n{candidates}\n\n"
+            f"Select exactly {min(3, open_slots)} specific buy targets from the candidates above. "
+            f"For each, provide:\n"
+            f"TARGET: [player name]\n"
+            f"ENTRY: [Polymarket % price]\n"
+            f"SIZE: $[exact dollar amount — max ${avail_cap/max(1,min(3,open_slots)):.0f} per trade]\n"
+            f"EDGE: [true% - market%]\n"
+            f"REASON: [one tight sentence — why now, R{round_num} specific]\n\n"
+            f"Rules: only top-30 leaderboard players, no players already held, "
+            f"min +10% edge, total sizes must not exceed ${avail_cap:.2f}. "
+            f"If fewer than {min(3, open_slots)} qualify, return only those that do. "
+            f"Be decisive — this goes straight to execution."
+        )
+        headers = {
+            "x-api-key":         ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type":      "application/json",
+        }
+        payload = {
+            "model":      "claude-sonnet-4-5",
+            "max_tokens": 500,
+            "system":     SYSTEM_PROMPT,
+            "messages":   [{"role": "user", "content": user_msg}],
+        }
+        r = requests.post(ANTHROPIC_API, headers=headers, json=payload, timeout=30)
+        return r.json()["content"][0]["text"]
+    except Exception as e:
+        return f"TARGETS ERROR: {e}"
+
+
+def send_targets():
+    """
+    Pull live ladder, send to Claude for target selection, format and deliver
+    specific buy recommendations with sizes to Telegram.
+    """
+    tg("🎯 TARGETS — building edge ladder + asking Claude for picks...")
+    lb   = fetch_leaderboard()
+    odds = fetch_polymarket_odds(list(lb.keys())) if lb else {}
+    if not lb:
+        tg("TARGETS: Leaderboard unavailable")
+        return
+
+    true_probs = _estimate_true_probs(lb)
+    rnd        = state["current_round"]
+    now_str    = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    held       = {p["player"] for p in state["open_positions"]}
+
+    # Build rows same as LADDER
+    rows = []
+    for name, true_pct in true_probs.items():
+        mkt_pct = odds.get(name)
+        if mkt_pct is None or mkt_pct <= 0:
+            continue
+        if name in held:
+            continue  # already holding
+        if lb.get(name, {}).get("cut"):
+            continue  # cut players excluded
+        edge = round(true_pct - mkt_pct, 1)
+        lb_d = lb.get(name, {})
+        pos   = lb_d.get("position", 999)
+        score = lb_d.get("score", 0)
+        rows.append((edge, name, true_pct, mkt_pct, pos, score))
+
+    rows.sort(key=lambda x: -x[0])
+
+    open_slots = max(0, 4 - len(held))
+    if open_slots == 0:
+        tg("TARGETS: All 4 position slots are full. Exit a position first.")
+        return
+
+    analysis = claude_targets_analysis(lb, odds, rows, rnd)
+
+    tg(
+        f"--- TARGETS | R{rnd} | {now_str} ---\n"
+        f"Bankroll: ${state['bankroll']:.2f} | Slots: {open_slots}/4\n\n"
+        f"{analysis}\n"
+        f"----------------------------------------\n"
+        f"Send AUTOPILOT: ON to let Claude auto-execute,\n"
+        f"or VETO [player] within 60s of any queued trade."
+    )
+
+
 def settle_positions():
     """
     Settle all open positions against the final R4 leaderboard.
@@ -1310,6 +1419,7 @@ SNAPSHOT            — full state audit (bankroll, positions, age, P&L)
 BRIEFING            — Claude morning briefing for today's round
 HALFTIME            — mid-round analysis: movers, faders, position advice
 LADDER              — full field ranked by edge (Est% vs Polymarket%)
+TARGETS             — Claude picks top 3 buys with exact sizes right now
 LEADERBOARD         — live top-15 + Polymarket odds
 SCAN                — manual Claude signal scan
 PENDING             — queued trades + countdown
@@ -1362,6 +1472,9 @@ def handle_command(text: str):
 
     elif cmd == "LADDER":
         send_ladder()
+
+    elif cmd == "TARGETS":
+        send_targets()
 
     elif cmd == "LEADERBOARD":
         send_leaderboard()
