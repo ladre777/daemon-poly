@@ -2,7 +2,21 @@
   "autopilot": true,
   "bankroll": 50.0,
   "starting_bankroll": 50.0,
-  "open_positions": [],
+  "open_positions": [
+    {
+      "player": "Wyndham Clark",
+      "token_id": "tec-pga-us-2026-06-21-w-wyncla",
+      "side": "YES",
+      "size_usd": 1.8,
+      "shares": 5,
+      "entry_pct": 36.1,
+      "signal_pct": 36.0,
+      "order_id": "AR7TC5HHA4SS",
+      "round_entered": 2,
+      "from_cycle": false,
+      "entered_at": 1781912055.6522715
+    }
+  ],
   "closed_positions": [],
   "banked_profit": 0.0,
   "cycle_pool": 0.0,
