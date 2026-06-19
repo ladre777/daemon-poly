@@ -415,6 +415,63 @@ def claude_signal_scan(leaderboard: dict, odds: dict, active_positions: list, ro
     except Exception as e:
         return f"CLAUDE ERROR: {e}"
 
+def claude_morning_briefing(leaderboard: dict, odds: dict, round_num: int) -> str:
+    """Ask Claude for a structured morning-of-round briefing."""
+    try:
+        lb_text   = "\n".join([
+            f"{v['position']} | {name} | {v['score']:+d} | R{round_num-1} today: {v['today']:+d}"
+            for name, v in sorted(leaderboard.items(), key=lambda x: x[1].get("position", 999))[:15]
+        ])
+        odds_text = "\n".join([
+            f"{name}: {pct:.1f}%"
+            for name, pct in sorted(odds.items(), key=lambda x: -x[1])[:15]
+        ])
+        user_msg = (
+            f"MORNING BRIEFING | Round R{round_num} | US Open 2026 | Shinnecock Hills\n\n"
+            f"TOP 15 ENTERING R{round_num}:\n{lb_text}\n\n"
+            f"POLYMARKET WIN ODDS:\n{odds_text}\n\n"
+            f"Give me a tight morning briefing for R{round_num} covering:\n"
+            f"1. KEY STORYLINES (2-3 bullet points — who has momentum, weather, course conditions)\n"
+            f"2. PLAYERS TO WATCH (top 3 names + one-line reason each)\n"
+            f"3. MARKET EDGES TODAY (where Polymarket odds look mispriced vs true win probability)\n"
+            f"4. RISK FLAGS (any contenders to fade or avoid)\n"
+            f"5. TODAY'S EDGE THRESHOLD (recommend min edge % for R{round_num} given volatility)\n\n"
+            f"Keep it sharp — 5 sections, no waffle. This goes straight to my phone."
+        )
+        headers = {
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model":      "claude-sonnet-4-5",
+            "max_tokens": 600,
+            "system":     SYSTEM_PROMPT,
+            "messages":   [{"role": "user", "content": user_msg}],
+        }
+        r = requests.post(ANTHROPIC_API, headers=headers, json=payload, timeout=30)
+        return r.json()["content"][0]["text"]
+    except Exception as e:
+        return f"BRIEFING ERROR: {e}"
+
+
+def send_morning_briefing(round_num: int):
+    """Fetch leaderboard + odds and send Claude's morning briefing to Telegram."""
+    tg(f"☀️ R{round_num} MORNING BRIEFING — pulling data...")
+    lb   = fetch_leaderboard()
+    odds = fetch_polymarket_odds(list(lb.keys())) if lb else {}
+    brief = claude_morning_briefing(lb, odds, round_num)
+    now_str = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    tg(
+        f"--- R{round_num} MORNING BRIEF | {now_str} ---\n"
+        f"{brief}\n"
+        f"----------------------------------------\n"
+        f"Bankroll: ${state['bankroll']:.2f} | "
+        f"Open: {len(state['open_positions'])} | "
+        f"Banked: ${state['banked_profit']:.2f}"
+    )
+
+
 # ─────────────────────────────────────────────
 # PRE-FLIGHT
 # ─────────────────────────────────────────────
@@ -1056,6 +1113,7 @@ AUTOPILOT: RESUME   — resume after suspension
 STATUS              — open positions + exposure
 REPORT              — P&L per position vs entry
 SNAPSHOT            — full state audit (bankroll, positions, age, P&L)
+BRIEFING            — Claude morning briefing for today's round
 LEADERBOARD         — live top-15 + Polymarket odds
 SCAN                — manual Claude signal scan
 PENDING             — queued trades + countdown
@@ -1099,6 +1157,9 @@ def handle_command(text: str):
 
     elif cmd == "SNAPSHOT":
         send_snapshot()
+
+    elif cmd == "BRIEFING":
+        send_morning_briefing(state["current_round"])
 
     elif cmd == "LEADERBOARD":
         send_leaderboard()
@@ -1210,9 +1271,10 @@ def get_current_round() -> int:
 
 def schedule_loop():
     flags = {k: False for k in [
-        "r1_monitor", "r2_scan1", "r2_scan2",
-        "r3_morning", "r3_scan1", "r3_scan2", "r3_night",
-        "r4_morning", "r4_11", "r4_14", "r4_17", "r4_18",
+        "r1_brief",  "r1_monitor",
+        "r2_brief",  "r2_scan1", "r2_scan2",
+        "r3_brief",  "r3_morning", "r3_scan1", "r3_scan2", "r3_night",
+        "r4_brief",  "r4_morning", "r4_11", "r4_14", "r4_17", "r4_18",
     ]}
     r2_scan1_time = r3_scan1_time = None
 
@@ -1233,6 +1295,10 @@ def schedule_loop():
 
         # ── R1 THURSDAY ──
         if rnd == 1:
+            if hour == 13 and minute < 10 and not flags["r1_brief"]:
+                send_morning_briefing(1)
+                flags["r1_brief"] = True
+
             fetch_leaderboard()
             if state["all_groups_finished"] and not flags["r1_monitor"]:
                 lb = state["last_leaderboard"]
@@ -1245,6 +1311,10 @@ def schedule_loop():
 
         # ── R2 FRIDAY ──
         elif rnd == 2:
+            if hour == 13 and minute < 10 and not flags["r2_brief"]:
+                send_morning_briefing(2)
+                flags["r2_brief"] = True
+
             fetch_leaderboard()
             if state["all_groups_finished"] and not flags["r2_scan1"]:
                 tg("R2 COMPLETE — running Scan 1...")
@@ -1270,6 +1340,10 @@ def schedule_loop():
 
         # ── R3 SATURDAY ──
         elif rnd == 3:
+            if hour == 13 and minute < 10 and not flags["r3_brief"]:
+                send_morning_briefing(3)
+                flags["r3_brief"] = True
+
             if hour == 12 and minute < 10 and not flags["r3_morning"]:
                 tg("R3 PRE-ROUND CHECK")
                 send_cycle_report(3)
@@ -1313,6 +1387,10 @@ def schedule_loop():
 
         # ── R4 SUNDAY ──
         elif rnd == 4:
+            if hour == 13 and minute < 10 and not flags["r4_brief"]:
+                send_morning_briefing(4)
+                flags["r4_brief"] = True
+
             if hour == 12 and minute < 10 and not flags["r4_morning"]:
                 tg("R4 ACTIVE — 15% edge min, 4-shot gate")
                 send_cycle_report(4)
