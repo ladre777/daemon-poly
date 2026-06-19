@@ -1,5 +1,5 @@
 {
-  "autopilot": true,
+  "autopilot": false,
   "bankroll": 50.0,
   "starting_bankroll": 50.0,
   "open_positions": [],

@@ -1068,21 +1068,27 @@ def send_ladder():
     now_str    = datetime.now(timezone.utc).strftime('%H:%M UTC')
     held       = {p["player"] for p in state["open_positions"]}
 
+    has_market = any(v and v > 0 for v in odds.values())
+
     rows = []
     for name, true_pct in true_probs.items():
         mkt_pct = odds.get(name)
-        if mkt_pct is None or mkt_pct <= 0:
-            continue
-        edge = round(true_pct - mkt_pct, 1)
-        lb_d = lb.get(name, {})
-        pos  = lb_d.get("position", 999)
+        lb_d  = lb.get(name, {})
+        pos   = lb_d.get("position", 999)
         score = lb_d.get("score", 0)
-        rows.append((edge, name, true_pct, mkt_pct, pos, score))
+        if mkt_pct is None or mkt_pct <= 0:
+            # No market odds — rank by model probability instead of edge
+            rows.append((None, name, true_pct, None, pos, score))
+        else:
+            edge = round(true_pct - mkt_pct, 1)
+            rows.append((edge, name, true_pct, mkt_pct, pos, score))
 
-    # Sort: best edge first
-    rows.sort(key=lambda x: -x[0])
+    # Sort: by edge when market exists, else by model probability
+    if has_market:
+        rows.sort(key=lambda x: (-(x[0] if x[0] is not None else -999)))
+    else:
+        rows.sort(key=lambda x: -x[2])
 
-    pos_threshold = 10   # top-10 only label
     edge_threshold = state["min_edge_pct"]
 
     lines = []
@@ -1090,24 +1096,43 @@ def send_ladder():
         tag = ""
         if name in held:
             tag = " ✅"
-        elif edge >= edge_threshold and pos <= 20:
+        elif edge is not None and edge >= edge_threshold and pos <= 20:
             tag = " 🎯"
         score_str = f"{score:+d}" if isinstance(score, int) else str(score)
-        sign = "+" if edge >= 0 else ""
-        lines.append(
-            f"#{pos} {name}{tag}\n"
-            f"   Est {true_pct:.1f}% | Mkt {mkt_pct:.1f}% | Edge {sign}{edge:.1f}%\n"
-            f"   Score: {score_str}"
+        if mkt_pct is None:
+            lines.append(
+                f"#{pos} {name}{tag}\n"
+                f"   Est {true_pct:.1f}% | Mkt n/a (no market)\n"
+                f"   Score: {score_str}"
+            )
+        else:
+            sign = "+" if edge >= 0 else ""
+            lines.append(
+                f"#{pos} {name}{tag}\n"
+                f"   Est {true_pct:.1f}% | Mkt {mkt_pct:.1f}% | Edge {sign}{edge:.1f}%\n"
+                f"   Score: {score_str}"
+            )
+
+    if has_market:
+        pos_edges = [r for r in rows if r[0] is not None and r[0] >= edge_threshold
+                     and lb.get(r[1], {}).get("position", 999) <= 30]
+        footer = (
+            f"Min edge threshold: +{edge_threshold:.0f}%\n"
+            f"🎯 = actionable  ✅ = held\n\n"
+            + "\n".join(lines)
+            + f"\n\nActionable: {len(pos_edges)} players above threshold"
+        )
+    else:
+        footer = (
+            f"⚠️ No Polymarket market for this tournament — "
+            f"showing model win-probability ranking only.\n"
+            f"✅ = held\n\n"
+            + "\n".join(lines)
         )
 
-    # Summary: count players with positive edge
-    pos_edges = [r for r in rows if r[0] >= edge_threshold and lb.get(r[1], {}).get("position", 999) <= 30]
     tg(
         f"--- EDGE LADDER | R{rnd} | {now_str} ---\n"
-        f"Min edge threshold: +{edge_threshold:.0f}%\n"
-        f"🎯 = actionable  ✅ = held\n\n"
-        + "\n".join(lines)
-        + f"\n\nActionable: {len(pos_edges)} players above threshold"
+        + footer
         + "\n-----------------------------"
     )
 
