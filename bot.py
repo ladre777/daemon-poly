@@ -7,15 +7,14 @@ Required Secrets (set in Replit Secrets panel):
   SLASH_GOLF_KEY          → RapidAPI key for live golf data
   TELEGRAM_TOKEN          → Telegram bot token from BotFather
   TELEGRAM_CHAT_ID        → Operator Telegram chat ID (default: 8486909237)
-  POLYMARKET_API_KEY      → Polymarket API key
-  POLYMARKET_PK           → Polymarket wallet private key (0x...)
-  POLYMARKET_WALLET       → Polymarket wallet address (0x...)
-  POLYMARKET_DEPOSIT_WALLET → Polymarket deposit/funder wallet (0x...)
+  POLYMARKET_KEY_ID       → Polymarket US API key id (UUID)
+  POLYMARKET_SECRET_KEY   → Polymarket US API secret (base64 Ed25519)
   ANTHROPIC_API_KEY       → Claude API key
   SESSION_BANKROLL        → Starting bankroll in USD (e.g. 300)
 """
 
 import os
+import re
 import json
 import math
 import time
@@ -90,15 +89,12 @@ def load_state():
 SLASH_GOLF_KEY            = os.environ.get("SLASH_GOLF_KEY", "")
 TELEGRAM_TOKEN            = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID          = os.environ.get("TELEGRAM_CHAT_ID", "8486909237")
-POLYMARKET_API_KEY        = os.environ.get("POLYMARKET_API_KEY", "")
-POLYMARKET_PK             = os.environ.get("POLYMARKET_PK", "")
-POLYMARKET_WALLET         = os.environ.get("POLYMARKET_WALLET", "")
-POLYMARKET_DEPOSIT_WALLET = os.environ.get("POLYMARKET_DEPOSIT_WALLET", "") or POLYMARKET_WALLET
+POLYMARKET_KEY_ID         = os.environ.get("POLYMARKET_KEY_ID", "")
+POLYMARKET_SECRET_KEY     = os.environ.get("POLYMARKET_SECRET_KEY", "")
 ANTHROPIC_API_KEY         = os.environ.get("ANTHROPIC_API_KEY", "")
 SESSION_BANKROLL          = float(os.environ.get("SESSION_BANKROLL", "300"))
 
 TOURNAMENT_ID    = "026"
-POLYMARKET_HOST  = "https://clob.polymarket.com"
 SLASH_GOLF_HOST  = "https://live-golf-data.p.rapidapi.com"
 TELEGRAM_API     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 ANTHROPIC_API    = "https://api.anthropic.com/v1/messages"
@@ -106,43 +102,42 @@ ANTHROPIC_API    = "https://api.anthropic.com/v1/messages"
 VETO_WINDOW_SECS = 60   # seconds before a queued trade auto-fires
 
 # ─────────────────────────────────────────────
-# POLYMARKET CLOB CLIENT
+# POLYMARKET US CLIENT
 # ─────────────────────────────────────────────
 
-_clob_client = None
+_pm_client = None
 
-def get_clob_client():
-    """Lazy-init the CLOB client with L1→L2 auth derivation."""
-    global _clob_client
-    if _clob_client is not None:
-        return _clob_client
+def get_pm_client():
+    """Lazy-init the Polymarket US API client (Ed25519 key auth)."""
+    global _pm_client
+    if _pm_client is not None:
+        return _pm_client
     try:
-        from py_clob_client.client import ClobClient
-
-        # Step 1 — L1 client to derive API creds
-        l1 = ClobClient(
-            host=POLYMARKET_HOST,
-            chain_id=137,
-            key=POLYMARKET_PK,
-            signature_type=0,
-            funder=POLYMARKET_DEPOSIT_WALLET,
+        from polymarket_us import PolymarketUS
+        _pm_client = PolymarketUS(
+            key_id=POLYMARKET_KEY_ID,
+            secret_key=POLYMARKET_SECRET_KEY,
         )
-        api_creds = l1.create_or_derive_api_creds()
-
-        # Step 2 — Full L2 client
-        _clob_client = ClobClient(
-            host=POLYMARKET_HOST,
-            chain_id=137,
-            key=POLYMARKET_PK,
-            creds=api_creds,
-            signature_type=0,
-            funder=POLYMARKET_DEPOSIT_WALLET,
-        )
-        print("[POLYMARKET] CLOB client initialised (L2 auth)")
-        return _clob_client
+        print("[POLYMARKET] US client initialised (Ed25519 auth)")
+        return _pm_client
     except Exception as e:
-        print(f"[POLYMARKET] Client init failed: {e} — will use HTTP fallback")
+        print(f"[POLYMARKET] Client init failed: {e}")
+        _pm_client = None
         return None
+
+def get_buying_power() -> float:
+    """Return current Polymarket US buying power in USD (0.0 on failure)."""
+    try:
+        client = get_pm_client()
+        if not client:
+            return 0.0
+        bal = client.account.balances()
+        for b in bal.get("balances", []):
+            if b.get("currency", "USD") == "USD":
+                return float(b.get("buyingPower", b.get("currentBalance", 0)) or 0)
+    except Exception as e:
+        print(f"[POLYMARKET] balance error: {e}")
+    return 0.0
 
 # ─────────────────────────────────────────────
 # STATE
@@ -268,64 +263,54 @@ def fetch_leaderboard() -> dict:
 # POLYMARKET — ODDS & MARKET LOOKUP
 # ─────────────────────────────────────────────
 
-GAMMA_HOST          = "https://gamma-api.polymarket.com"
-US_OPEN_EVENT_SLUG  = "2026-us-open-winner"
-US_OPEN_QUESTION    = "win the 2026 U.S. Open"
-_MARKET_TICK        = {}   # token_id -> tick size string (e.g. "0.001"); negRisk market
-_MARKET_NEG_RISK    = True
+US_OPEN_EVENT_SLUG  = "pga-us-2026-06-21-w"
+US_OPEN_SEARCH      = "us open winner"
+_US_OPEN_DESC_RE    = re.compile(r"Will (.+?) win the 2026 U\.S\. Open")
+_MARKET_TICK        = {}   # marketSlug -> tick size string (e.g. "0.001")
 
 def _norm_name(n: str) -> str:
     """Normalize a player name for matching (strip accents, punctuation, case)."""
     n = unicodedata.normalize("NFKD", str(n)).encode("ascii", "ignore").decode()
     return "".join(c for c in n.lower() if c.isalnum())
 
-def _as_list(v):
-    """Gamma returns clobTokenIds/outcomePrices as JSON strings or lists."""
-    if isinstance(v, list):
-        return v
-    if isinstance(v, str):
-        try:
-            return json.loads(v)
-        except Exception:
-            return []
-    return []
-
 def _fetch_us_open_markets() -> list:
     """
-    Fetch the live 2026 U.S. Open Winner event from Polymarket Gamma.
-    Returns [{name, token_id (YES), price_pct, tick}] for each named player.
+    Fetch the live 2026 U.S. Open Winner event from Polymarket US.
+    Returns [{name, slug, price_pct, tick}] for each named player.
+    The player name lives in each market's `description`
+    ('Will <Name> win the 2026 U.S. Open...'); the YES price is the
+    first entry of `outcomePrices`.
     """
-    r = requests.get(f"{GAMMA_HOST}/events",
-                     params={"slug": US_OPEN_EVENT_SLUG}, timeout=12)
-    events = r.json()
-    if not events:
+    client = get_pm_client()
+    if client is None:
+        from polymarket_us import PolymarketUS
+        client = PolymarketUS()          # search is a public endpoint
+    events = client.search.query({"query": US_OPEN_SEARCH}).get("events", [])
+    ev = next((e for e in events if e.get("slug") == US_OPEN_EVENT_SLUG), None)
+    if not ev:
         return []
     out = []
-    for m in events[0].get("markets", []):
-        q = m.get("question", "")
-        if US_OPEN_QUESTION not in q:
+    for m in ev.get("markets", []):
+        if m.get("closed"):
             continue
-        name = q.replace("Will ", "").replace(" win the 2026 U.S. Open?", "").strip()
-        if name.lower().startswith("player ") or name.lower().startswith("any other"):
+        match = _US_OPEN_DESC_RE.search(m.get("description", "") or "")
+        if not match:
             continue
-        toks   = _as_list(m.get("clobTokenIds"))
-        prices = _as_list(m.get("outcomePrices"))
-        if not toks:
-            continue
+        name = match.group(1).strip()
         try:
-            yes_price = float(prices[0]) if prices else 0.0
-        except (ValueError, TypeError):
+            yes_price = float(json.loads(m.get("outcomePrices", '["0"]'))[0])
+        except (ValueError, TypeError, IndexError):
             yes_price = 0.0
         out.append({
             "name":      name,
-            "token_id":  toks[0],                       # YES token
+            "slug":      m["slug"],
             "price_pct": round(yes_price * 100, 2),
             "tick":      str(m.get("orderPriceMinTickSize", "0.001")),
         })
     return out
 
 def fetch_polymarket_odds(player_names: list) -> dict:
-    """Pull current win probabilities for the live US Open market and cache token IDs."""
+    """Pull current win probabilities for the live US Open market and cache market slugs."""
     try:
         markets = _fetch_us_open_markets()
         if not markets:
@@ -337,8 +322,8 @@ def fetch_polymarket_odds(player_names: list) -> dict:
             # Prefer the leaderboard's spelling of the name when it matches.
             player = norm_lookup.get(_norm_name(mk["name"]), mk["name"])
             odds[player] = mk["price_pct"]
-            state["market_token_map"][player] = mk["token_id"]
-            _MARKET_TICK[mk["token_id"]] = mk["tick"]
+            state["market_token_map"][player] = mk["slug"]
+            _MARKET_TICK[mk["slug"]] = mk["tick"]
 
         state["last_odds"] = odds
         return odds
@@ -367,65 +352,86 @@ def _round_to_tick(price: float, tick: str) -> float:
     p = round(round(price / t) * t, decimals)
     return min(max(p, t), 1 - t)
 
-def place_polymarket_order(token_id: str, side: str, size_usd: float, player_name: str) -> dict:
-    """Place a YES/NO order. side = 'YES' or 'NO'."""
+def _live_price(market_slug: str, side: str) -> float:
+    """Live best ask (for buys) or best bid (for sells) as a 0-1 probability."""
     try:
-        client = get_clob_client()
-        price_pct = state["last_odds"].get(player_name, 50)
-        tick      = _MARKET_TICK.get(token_id, "0.01")
-        price     = _round_to_tick(price_pct / 100, tick)
-        shares    = _usd_to_shares(size_usd, price_pct)
+        client = get_pm_client()
+        if not client:
+            return 0.0
+        md = client.markets.bbo(market_slug)
+        md = md.get("marketData", md)
+        quote = md.get("bestAsk" if side == "BUY" else "bestBid") or {}
+        return float(quote.get("value", 0) or 0)
+    except Exception:
+        return 0.0
 
-        if client:
-            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
-            from py_clob_client.order_builder.constants import BUY, SELL
-            order_side = BUY if side == "YES" else SELL
-            result = client.create_and_post_order(
-                OrderArgs(token_id=token_id, price=price, size=shares, side=order_side),
-                options=PartialCreateOrderOptions(tick_size=tick, neg_risk=_MARKET_NEG_RISK),
-            )
-            return result if isinstance(result, dict) else {"orderID": str(result), "shares": shares}
-        else:
-            headers = {"Authorization": f"Bearer {POLYMARKET_API_KEY}", "Content-Type": "application/json"}
-            r = requests.post(
-                f"{POLYMARKET_HOST}/order",
-                headers=headers,
-                json={"market": token_id, "side": side, "size": str(shares), "type": "MARKET",
-                      "funder": POLYMARKET_DEPOSIT_WALLET},
-                timeout=15,
-            )
-            return r.json()
+def place_polymarket_order(market_slug: str, side: str, size_usd: float, player_name: str) -> dict:
+    """Buy a YES position on Polymarket US (side='YES'). Marketable limit at the live ask."""
+    try:
+        client = get_pm_client()
+        if not client:
+            return {"error": "Polymarket US client unavailable — check POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY"}
+
+        tick  = _MARKET_TICK.get(market_slug, "0.001")
+        ask   = _live_price(market_slug, "BUY") or (state["last_odds"].get(player_name, 50) / 100)
+        price = _round_to_tick(ask, tick)
+        shares = int(size_usd / max(price, 0.001))
+        if shares < 1:
+            return {"error": f"size ${size_usd:.2f} too small at price {price}"}
+
+        result = client.orders.create({
+            "marketSlug": market_slug,
+            "intent":     "ORDER_INTENT_BUY_LONG",
+            "type":       "ORDER_TYPE_LIMIT",
+            "price":      {"value": f"{price:.4f}", "currency": "USD"},
+            "quantity":   shares,
+            "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+        })
+        order = result.get("order", result)
+        return {
+            "orderID": order.get("id", ""),
+            "shares":  shares,
+            "price":   price,
+            "raw":     result,
+        }
     except Exception as e:
         tg(f"POLYMARKET ORDER ERROR: {e}")
         return {"error": str(e)}
 
-def exit_polymarket_position(token_id: str, size_usd: float, player_name: str) -> dict:
-    """Sell (exit) an open position."""
+def exit_polymarket_position(market_slug: str, size_usd: float, player_name: str) -> dict:
+    """Sell (exit) an open position. Full exit uses close_position; partial sells a share slice."""
     try:
-        client = get_clob_client()
-        price_pct = state["last_odds"].get(player_name, 50)
-        tick      = _MARKET_TICK.get(token_id, "0.01")
-        price     = _round_to_tick(price_pct / 100, tick)
-        shares    = _usd_to_shares(size_usd, price_pct)
+        client = get_pm_client()
+        if not client:
+            return {"error": "Polymarket US client unavailable"}
 
-        if client:
-            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
-            from py_clob_client.order_builder.constants import SELL
-            result = client.create_and_post_order(
-                OrderArgs(token_id=token_id, price=price, size=shares, side=SELL),
-                options=PartialCreateOrderOptions(tick_size=tick, neg_risk=_MARKET_NEG_RISK),
-            )
-            return result if isinstance(result, dict) else {"orderID": str(result)}
+        pos = next((p for p in state["open_positions"]
+                    if p["player"] == player_name and p.get("token_id") == market_slug), None)
+
+        full          = True
+        shares_to_sell = None
+        if pos and pos.get("shares"):
+            total = float(pos["shares"])
+            frac  = 1.0 if pos.get("size_usd", 0) <= 0 else min(1.0, size_usd / pos["size_usd"])
+            full  = frac >= 0.999
+            shares_to_sell = max(1, int(round(total * frac)))
+
+        if full or not shares_to_sell:
+            result = client.orders.close_position({"marketSlug": market_slug})
         else:
-            headers = {"Authorization": f"Bearer {POLYMARKET_API_KEY}", "Content-Type": "application/json"}
-            r = requests.post(
-                f"{POLYMARKET_HOST}/order",
-                headers=headers,
-                json={"market": token_id, "side": "SELL", "size": str(shares), "type": "MARKET",
-                      "funder": POLYMARKET_DEPOSIT_WALLET},
-                timeout=15,
-            )
-            return r.json()
+            tick  = _MARKET_TICK.get(market_slug, "0.001")
+            bid   = _live_price(market_slug, "SELL") or (state["last_odds"].get(player_name, 50) / 100)
+            price = _round_to_tick(bid, tick)
+            result = client.orders.create({
+                "marketSlug": market_slug,
+                "intent":     "ORDER_INTENT_SELL_LONG",
+                "type":       "ORDER_TYPE_LIMIT",
+                "price":      {"value": f"{price:.4f}", "currency": "USD"},
+                "quantity":   shares_to_sell,
+                "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            })
+        order = result.get("order", result) if isinstance(result, dict) else {}
+        return {"orderID": order.get("id", ""), "raw": result}
     except Exception as e:
         tg(f"EXIT ORDER ERROR: {e}")
         return {"error": str(e)}
@@ -740,6 +746,8 @@ def execute_trade(player: str, edge: float, confidence: str,
 
     order_id = result.get("orderID", result.get("id", "UNKNOWN"))
     shares   = result.get("shares", _usd_to_shares(size, entry_pct))
+    # Use the actual order price (live ask) as the recorded entry, not the signal price.
+    fill_pct = round(result["price"] * 100, 2) if result.get("price") else entry_pct
 
     state["open_positions"].append({
         "player":        player,
@@ -747,7 +755,8 @@ def execute_trade(player: str, edge: float, confidence: str,
         "side":          "YES",
         "size_usd":      size,
         "shares":        shares,
-        "entry_pct":     entry_pct,
+        "entry_pct":     fill_pct,
+        "signal_pct":    entry_pct,
         "order_id":      order_id,
         "round_entered": round_num,
         "from_cycle":    from_cycle_pool,
@@ -757,7 +766,7 @@ def execute_trade(player: str, edge: float, confidence: str,
         state["cycle_pool"] -= size
 
     state["consecutive_losses"] = 0
-    tg(f"✅ FILLED: {player} YES | {shares:.2f} shares @ ${entry_pct/100:.2f} | Order: {order_id}")
+    tg(f"✅ FILLED: {player} YES | {shares} shares @ ${fill_pct/100:.2f} | Order: {order_id}")
     save_state()
     return True
 
@@ -1647,9 +1656,14 @@ def handle_command(text: str):
         pos    = next((p for p in state["open_positions"] if p["player"].lower() == player.lower()), None)
         if pos:
             half = pos["size_usd"] / 2
-            exit_polymarket_position(pos["token_id"], half, player)
-            tg(f"EXIT HALF: {player} — sold ${half:.2f}")
-            save_state()
+            res  = exit_polymarket_position(pos["token_id"], half, player)
+            if "error" in res:
+                tg(f"EXIT HALF FAILED: {player} — {res['error']}")
+            else:
+                pos["size_usd"] -= half
+                pos["shares"]    = round(pos.get("shares", 0) / 2, 2)
+                tg(f"EXIT HALF: {player} — sold ${half:.2f}")
+                save_state()
         else:
             tg(f"No open position for: {player}")
 
@@ -1657,10 +1671,13 @@ def handle_command(text: str):
         player = text[10:].strip()
         pos    = next((p for p in state["open_positions"] if p["player"].lower() == player.lower()), None)
         if pos:
-            exit_polymarket_position(pos["token_id"], pos["size_usd"], player)
-            state["open_positions"].remove(pos)
-            tg(f"EXIT FULL: {player} — closed ${pos['size_usd']:.2f}")
-            save_state()
+            res = exit_polymarket_position(pos["token_id"], pos["size_usd"], player)
+            if "error" in res:
+                tg(f"EXIT FULL FAILED: {player} — {res['error']}")
+            else:
+                state["open_positions"].remove(pos)
+                tg(f"EXIT FULL: {player} — closed ${pos['size_usd']:.2f}")
+                save_state()
         else:
             tg(f"No open position for: {player}")
 
@@ -1802,7 +1819,10 @@ def schedule_loop():
                 for pos in state["open_positions"][:]:
                     shots_back = lb.get(pos["player"], {}).get("score", 0) - lead_score
                     if shots_back > 4:
-                        exit_polymarket_position(pos["token_id"], pos["size_usd"], pos["player"])
+                        res = exit_polymarket_position(pos["token_id"], pos["size_usd"], pos["player"])
+                        if "error" in res:
+                            tg(f"R4 EXIT FAILED: {pos['player']} — {res['error']}")
+                            continue
                         state["open_positions"].remove(pos)
                         exited.append(pos["player"])
                 tg(f"R4 PREVIEW\nExited (>4 back): {', '.join(exited) or 'None'}\n"
@@ -1881,8 +1901,8 @@ if __name__ == "__main__":
     print(f"  Bankroll : ${SESSION_BANKROLL}")
     print(f"  Round    : R{get_current_round() or '?'}")
     print()
-    print("  Connecting to Polymarket CLOB...")
-    get_clob_client()
+    print("  Connecting to Polymarket US...")
+    get_pm_client()
     print("  Restoring saved state (if any)...")
     load_state()
     print("  Pre-loading leaderboard + market tokens...")

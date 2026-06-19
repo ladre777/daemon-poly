@@ -1,0 +1,1 @@
+- [Polymarket US trade integration](polymarket-us.md) — DAEMON-POLY trades the custodial Polymarket US app via the `polymarket_us` SDK, not the empty self-custody CLOB; SDK quirks + secret-overwrite gotcha.
