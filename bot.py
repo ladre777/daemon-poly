@@ -693,7 +693,7 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
     if round_num == 4 and edge < 10:
         return False, f"PF-01: R4 needs edge >10% (got {edge:.1f}%)"
     if edge < 5:
-        return False, f"PF-02: Edge {edge:.1f}% below 8% minimum"
+        return False, f"PF-02: Edge {edge:.1f}% below 5% minimum"
     if len(state["open_positions"]) >= 6:
         return False, "PF-03: Max 6 open positions"
     if sum(1 for p in state["open_positions"] if p["player"] == player) >= 2:
@@ -1862,7 +1862,7 @@ def schedule_loop():
                         exited.append(pos["player"])
                 tg(f"R4 PREVIEW\nExited (>4 back): {', '.join(exited) or 'None'}\n"
                    f"Remaining: {len(state['open_positions'])}/4 | Banked: ${state['banked_profit']:.2f}\n"
-                   f"R4 rules: 15% edge min, 4-shot gate")
+                   f"R4 rules: 10% edge min, 4-shot gate")
                 flags["r3_night"] = True
 
             check_movement_triggers(3)
@@ -1879,7 +1879,7 @@ def schedule_loop():
                 flags["r4_half"] = True
 
             if hour == 12 and minute < 10 and not flags["r4_morning"]:
-                tg("R4 ACTIVE — 15% edge min, 4-shot gate")
+                tg("R4 ACTIVE — 10% edge min, 4-shot gate")
                 send_cycle_report(4)
                 flags["r4_morning"] = True
 
