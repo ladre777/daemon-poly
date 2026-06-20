@@ -1,7 +1,7 @@
 {
   "autopilot": true,
-  "bankroll": 50.0,
-  "starting_bankroll": 50.0,
+  "bankroll": 59.82,
+  "starting_bankroll": 59.82,
   "open_positions": [
     {
       "player": "Wyndham Clark",
@@ -544,585 +544,585 @@
       "cut": false
     },
     "Sudarshan Yellamaraju": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 2,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Bryson DeChambeau": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 5,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Viktor Hovland": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": -1,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Ryan Gerard": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 2,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Billy Horschel": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 2,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Jackson Suber": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 1,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Matthew Jordan": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Rickie Fowler": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 4,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Patrick Reed": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Andrew Novak": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 2,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Harris English": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Nick Taylor": {
-      "position": 73,
+      "position": 999,
       "score": 5,
-      "today": 1,
-      "thru": "F*",
-      "cut": false
-    },
-    "Shane Lowry": {
-      "position": 85,
-      "score": 6,
-      "today": 3,
-      "thru": "F",
-      "cut": false
-    },
-    "Carlos Ortiz": {
-      "position": 85,
-      "score": 6,
-      "today": 4,
-      "thru": "F",
-      "cut": false
-    },
-    "Jon Rahm": {
-      "position": 85,
-      "score": 6,
-      "today": 8,
-      "thru": "F",
-      "cut": false
-    },
-    "Patrick Cantlay": {
-      "position": 85,
-      "score": 6,
-      "today": 2,
-      "thru": "F*",
-      "cut": false
-    },
-    "Cole Hammer": {
-      "position": 85,
-      "score": 6,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
-    },
-    "Jack Schoenberger": {
-      "position": 85,
-      "score": 6,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
-    },
-    "Nathan Kimsey": {
-      "position": 85,
-      "score": 6,
       "today": 0,
-      "thru": "F",
-      "cut": false
-    },
-    "Cameron Smith": {
-      "position": 85,
-      "score": 6,
-      "today": 1,
-      "thru": "F*",
-      "cut": false
-    },
-    "Lucas Herbert": {
-      "position": 85,
-      "score": 6,
-      "today": 2,
-      "thru": "F",
-      "cut": false
-    },
-    "Kristoffer Reitan": {
-      "position": 85,
-      "score": 6,
-      "today": 6,
-      "thru": "F",
-      "cut": false
-    },
-    "Si Woo Kim": {
-      "position": 85,
-      "score": 6,
-      "today": -1,
-      "thru": "F",
-      "cut": false
-    },
-    "Alex Noren": {
-      "position": 85,
-      "score": 6,
-      "today": 2,
-      "thru": "F",
-      "cut": false
+      "thru": "",
+      "cut": true
     },
     "Filippo Celli": {
-      "position": 85,
+      "position": 999,
+      "score": 5,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Shane Lowry": {
+      "position": 999,
       "score": 6,
-      "today": 1,
-      "thru": "17*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Carlos Ortiz": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Jon Rahm": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Patrick Cantlay": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Cole Hammer": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Jack Schoenberger": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Nathan Kimsey": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Cameron Smith": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Lucas Herbert": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Kristoffer Reitan": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Si Woo Kim": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Alex Noren": {
+      "position": 999,
+      "score": 6,
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Adrien Saddier": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": 5,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Bryan Lee": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": 4,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Min Woo Lee": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": 3,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Manav Shah": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": 4,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Giuseppe Puebla": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Brandon Wu": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": -1,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Jimmy Stanger": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Sepp Straka": {
-      "position": 98,
+      "position": 999,
       "score": 7,
-      "today": 5,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Kaito Onishi": {
-      "position": 98,
+      "position": 999,
       "score": 7,
       "today": 0,
-      "thru": "17*",
-      "cut": false
+      "thru": "",
+      "cut": true
     },
     "Jake Knapp": {
-      "position": 107,
+      "position": 999,
       "score": 8,
-      "today": 1,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Marcelo Rozo": {
-      "position": 107,
+      "position": 999,
       "score": 8,
-      "today": 4,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Alejandro Tosti": {
-      "position": 107,
+      "position": 999,
       "score": 8,
       "today": 0,
-      "thru": "F*",
-      "cut": false
+      "thru": "",
+      "cut": true
     },
     "Ben Silverman": {
-      "position": 107,
+      "position": 999,
       "score": 8,
-      "today": 4,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Adam Scott": {
-      "position": 107,
+      "position": 999,
       "score": 8,
-      "today": 5,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Mason Howell": {
-      "position": 107,
+      "position": 999,
       "score": 8,
       "today": 0,
-      "thru": "F*",
-      "cut": false
+      "thru": "",
+      "cut": true
     },
     "J.J. Spaun": {
-      "position": 107,
+      "position": 999,
       "score": 8,
-      "today": 1,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Ugo Coussaud": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 3,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Chris Kirk": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 1,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Kevin Roy": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 7,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Preston Stout": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 7,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "David Puig": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 2,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Alex Smalley": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 3,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Nicolai H\u00f8jgaard": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 5,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Taihei Sato": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 4,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Chandler Phillips": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 5,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Jackson Herrington": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 4,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Carl Yuan": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 2,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "J.B. Holmes": {
-      "position": 114,
+      "position": 999,
       "score": 9,
-      "today": 4,
-      "thru": "17*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Davis Thompson": {
-      "position": 126,
+      "position": 999,
       "score": 10,
-      "today": 6,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Jayden Schaper": {
-      "position": 126,
+      "position": 999,
       "score": 10,
-      "today": 5,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Brooks Koepka": {
-      "position": 126,
+      "position": 999,
       "score": 10,
-      "today": 7,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Daniel Berger": {
-      "position": 126,
+      "position": 999,
       "score": 10,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Brandon Holtz": {
-      "position": 126,
+      "position": 999,
       "score": 10,
-      "today": 4,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Ryuichi Oiwa": {
-      "position": 126,
+      "position": 999,
       "score": 10,
-      "today": 2,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Harry Hall": {
-      "position": 132,
-      "score": 11,
-      "today": 7,
-      "thru": "F*",
-      "cut": false
-    },
-    "Mateo Pulcini": {
-      "position": 132,
-      "score": 11,
-      "today": 7,
-      "thru": "F",
-      "cut": false
-    },
-    "Hamilton Coleman": {
-      "position": 132,
+      "position": 999,
       "score": 11,
       "today": 0,
-      "thru": "F",
-      "cut": false
+      "thru": "",
+      "cut": true
+    },
+    "Mateo Pulcini": {
+      "position": 999,
+      "score": 11,
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Hamilton Coleman": {
+      "position": 999,
+      "score": 11,
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Taylor Montgomery": {
-      "position": 132,
+      "position": 999,
       "score": 11,
-      "today": 4,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Cooper Dossey": {
-      "position": 132,
+      "position": 999,
       "score": 11,
-      "today": 2,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Ethan Fang": {
-      "position": 132,
+      "position": 999,
       "score": 11,
-      "today": 7,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Padraig Harrington": {
-      "position": 132,
+      "position": 999,
       "score": 11,
-      "today": 4,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Logan Reilly": {
-      "position": 132,
+      "position": 999,
       "score": 11,
-      "today": 2,
-      "thru": "17",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Jake Peacock": {
-      "position": 132,
+      "position": 999,
       "score": 11,
-      "today": 5,
-      "thru": "17*",
-      "cut": false
-    },
-    "Vaughn Harber": {
-      "position": 132,
-      "score": 11,
-      "today": 6,
-      "thru": "17*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Hennie Du Plessis": {
-      "position": 142,
+      "position": 999,
       "score": 12,
-      "today": 6,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Matt McCarty": {
-      "position": 142,
+      "position": 999,
       "score": 12,
-      "today": 10,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Nick Hardy": {
-      "position": 142,
+      "position": 999,
       "score": 12,
-      "today": 3,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Chase Kyes": {
-      "position": 142,
+      "position": 999,
       "score": 12,
-      "today": 7,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Graeme McDowell": {
-      "position": 142,
+      "position": 999,
       "score": 12,
-      "today": 6,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Vaughn Harber": {
+      "position": 999,
+      "score": 12,
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Jake Sollon": {
-      "position": 147,
+      "position": 999,
       "score": 13,
-      "today": 1,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Matti Schmid": {
-      "position": 148,
+      "position": 999,
       "score": 14,
-      "today": 7,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Matthew Robles": {
-      "position": 149,
+      "position": 999,
       "score": 16,
-      "today": 9,
-      "thru": "F",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "T.K. Kim": {
-      "position": 149,
+      "position": 999,
       "score": 16,
-      "today": 7,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Rocco Repetto Taylor": {
-      "position": 151,
+      "position": 999,
       "score": 17,
-      "today": 6,
-      "thru": "F*",
-      "cut": false
-    },
-    "Jackson Ormond": {
-      "position": 152,
-      "score": 19,
-      "today": 9,
-      "thru": "17*",
-      "cut": false
-    },
-    "Greyson Leach": {
-      "position": 152,
-      "score": 19,
-      "today": 10,
-      "thru": "17",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Robbie Higgins": {
-      "position": 152,
+      "position": 999,
       "score": 19,
-      "today": 7,
-      "thru": "17",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Jackson Ormond": {
+      "position": 999,
+      "score": 20,
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Arni Sveinsson": {
-      "position": 155,
+      "position": 999,
       "score": 21,
-      "today": 7,
-      "thru": "F*",
-      "cut": false
+      "today": 0,
+      "thru": "",
+      "cut": true
+    },
+    "Greyson Leach": {
+      "position": 999,
+      "score": 21,
+      "today": 0,
+      "thru": "",
+      "cut": true
     },
     "Jason Day": {
       "position": 999,
@@ -1133,157 +1133,157 @@
     }
   },
   "last_odds": {
-    "Yechun Yuan": 0.1,
     "William Mouw": 0.2,
-    "Tyrrell Hatton": 0.2,
-    "Spencer Tibbits": 0.1,
     "Ryuichi Oiwa": 0.1,
     "Rory McIlroy": 4.6,
-    "Neal Shipley": 0.1,
-    "Max Greyserman": 0.2,
-    "Maverick McNealy": 0.8,
     "Mason Howell": 0.1,
-    "Marcelo Rozo": 0.1,
-    "J.B. Holmes": 0.1,
-    "Graeme McDowell": 0.1,
-    "Giuseppe Puebla": 0.1,
     "Daniel Berger": 0.1,
-    "Chase Kyes": 0.1,
-    "Cameron Smith": 0.1,
-    "Andrew Novak": 0.1,
-    "Alex Smalley": 0.1,
-    "Matthew Robles": 0.1,
-    "Jackson Ormond": 0.1,
-    "Marek Fleming": 0.1,
-    "Hamilton Coleman": 0.1,
-    "Ryder Cowan": 0.2,
-    "Ethan Fang": 0.1,
-    "Ugo Coussaud": 0.1,
-    "Matthew Jordan": 0.1,
-    "Sahith Theegala": 0.6,
-    "Aaron Rai": 0.3,
-    "Ben Griffin": 0.1,
-    "Chris Gotterup": 0.1,
-    "Justin Rose": 0.4,
-    "Bryson DeChambeau": 0.1,
-    "Zac Blair": 0.1,
-    "Vaughn Harber": 0.1,
-    "Taylor Montgomery": 0.1,
-    "Robbie Higgins": 0.1,
-    "Logan Reilly": 0.1,
-    "Kaito Onishi": 0.1,
-    "John Parry": 0.1,
-    "Jack Schoenberger": 0.1,
-    "Greyson Leach": 0.1,
-    "Bud Cauley": 0.1,
-    "Bryan Lee": 0.1,
-    "Benjamin Silverman": 0.1,
-    "Alejandro Tosti": 0.1,
-    "Xander Schauffele": 11.0,
-    "Wyndham Clark": 35.7,
-    "Viktor Hovland": 0.1,
-    "Tom Kim": 2.7,
-    "Tommy Fleetwood": 1.1,
-    "Taihei Sato": 0.1,
-    "Sungjae Im": 0.1,
     "Sudarshan Yellamaraju": 0.1,
-    "Si Woo Kim": 0.1,
-    "Shane Lowry": 0.1,
+    "Sam Burns": 2.7,
+    "Rocco Paolo Repetto Taylor": 0.1,
+    "Patrick Reed": 0.1,
+    "Nicolas Echavarria": 0.1,
+    "Kevin Roy": 0.1,
+    "Keith Mitchell": 0.4,
+    "Jake Knapp": 0.1,
+    "Jackson Koivun": 0.1,
+    "Dylan Wu": 0.1,
+    "Arni Sveinsson": 0.1,
+    "Angel Hidalgo": 0.1,
+    "Russell Henley": 0.1,
+    "Rickie Fowler": 0.1,
+    "Nick Taylor": 0.1,
+    "Matt McCarty": 0.1,
+    "Jordan Spieth": 0.1,
+    "Harry Higgs": 0.2,
+    "Hamilton Coleman": 0.1,
+    "Yechun Yuan": 0.1,
+    "Xander Schauffele": 11.3,
+    "Wyndham Clark": 35.5,
+    "Viktor Hovland": 0.1,
+    "Vaughn Harber": 0.1,
+    "Ugo Coussaud": 0.1,
+    "Tyrrell Hatton": 0.3,
+    "Tom Kim": 2.7,
+    "Tommy Fleetwood": 1.2,
+    "Taylor Montgomery": 0.1,
+    "Taihei Sato": 0.1,
     "Sepp Straka": 0.1,
     "Scottie Scheffler": 8.0,
     "Sam Stevens": 2.4,
-    "Sam Burns": 2.7,
+    "Sahith Theegala": 0.8,
     "Ryo Hisatsune": 0.2,
+    "Ryder Cowan": 0.2,
     "Ryan Gerard": 0.1,
-    "Ryan Fox": 0.1,
-    "Russell Henley": 0.1,
-    "Rocco Paolo Repetto Taylor": 0.1,
     "Robert MacIntyre": 0.1,
-    "Rickie Fowler": 0.1,
-    "Pierceson Coody": 0.1,
-    "Peter Uihlein": 0.1,
+    "Robbie Higgins": 0.1,
     "Patrick Rodgers": 0.1,
-    "Patrick Reed": 0.1,
     "Patrick Cantlay": 0.1,
     "Padraig Harrington": 0.1,
     "Niklas Norgaard Moller": 0.1,
-    "Nick Taylor": 0.1,
     "Nicolai Hojgaard": 0.1,
     "Nick Hardy": 0.1,
-    "Nicolas Echavarria": 0.1,
     "Nathan Kimsey": 0.1,
     "Min Woo Lee": 0.1,
     "Miles Russell": 0.1,
     "Michael Kim": 0.1,
     "Michael Brennan": 0.1,
     "Max McGreevy": 0.1,
+    "Max Greyserman": 0.2,
+    "Maverick McNealy": 0.8,
     "Matthias Schmid": 0.1,
+    "Matthew Robles": 0.1,
     "Mateo Pulcini": 0.1,
-    "Matt McCarty": 0.1,
+    "Matthew Jordan": 0.1,
     "Matt Fitzpatrick": 10.0,
+    "Marcelo Rozo": 0.1,
     "Manav Shah": 0.1,
     "Ludvig \u00c5berg": 1.2,
     "Lucas Herbert": 0.1,
+    "Logan Reilly": 0.1,
     "Laurie Canter": 0.1,
     "Kurt Kitayama": 0.1,
     "Kristoffer Reitan": 0.1,
-    "Kevin Roy": 0.1,
-    "Keith Mitchell": 0.3,
     "Keegan Bradley": 0.3,
-    "Justin Thomas": 2.9,
+    "Justin Rose": 0.4,
     "J.T. Poston": 0.2,
     "J.J. Spaun": 0.1,
-    "Jordan Spieth": 0.1,
     "Jon Rahm": 0.1,
+    "John Parry": 0.1,
     "Johnny Keefer": 0.1,
-    "Joaquin Niemann": 0.2,
     "Jimmy Stanger": 0.1,
     "Jayden Schaper": 0.1,
     "James Nicholas": 0.1,
     "Jake Sollon": 0.1,
     "Jake Peacock": 0.1,
-    "Jake Knapp": 0.1,
     "Jackson Suber": 0.1,
+    "Jack Schoenberger": 0.1,
     "Jackson Van Paris": 0.1,
-    "Jackson Koivun": 0.1,
+    "Jackson Ormond": 0.1,
     "Jackson Herrington": 0.1,
     "Jacob Bridgeman": 0.1,
     "Hideki Matsuyama": 0.1,
     "Hendrik Du Plessis": 0.1,
-    "Harry Higgs": 0.2,
     "Harry Hall": 0.1,
     "Harris English": 0.1,
-    "Gary Woodland": 0.5,
+    "Greyson Leach": 0.1,
+    "Graeme McDowell": 0.1,
+    "Giuseppe Puebla": 0.1,
+    "Gary Woodland": 0.6,
     "Filippo Celli": 0.1,
+    "Ethan Fang": 0.1,
     "Emiliano Grillo": 0.1,
-    "Dylan Wu": 0.1,
     "Dustin Johnson": 0.1,
-    "Davis Thompson": 0.1,
     "David Puig": 0.1,
     "Corey Conners": 0.1,
     "Cooper Dossey": 0.1,
     "Collin Morikawa": 5.0,
     "Cole Hammer": 0.1,
     "Chris Kirk": 0.1,
+    "Chris Gotterup": 0.1,
+    "Chase Kyes": 0.1,
     "Carlos Ortiz": 0.1,
     "Cameron Young": 0.6,
+    "Cameron Smith": 0.1,
     "Caleb Surratt": 0.1,
+    "Bud Cauley": 0.1,
+    "Bryan Lee": 0.1,
+    "Bryson DeChambeau": 0.1,
     "Brooks Koepka": 0.1,
     "Brian Harman": 0.4,
     "Brandon Wu": 0.1,
     "Brandon Holtz": 0.1,
     "Billy Horschel": 0.1,
+    "Benjamin Silverman": 0.1,
     "Ben Kohles": 0.1,
     "Benjamin James": 0.2,
-    "Angel Hidalgo": 0.1,
+    "Ben Griffin": 0.1,
     "Andrew Putnam": 0.1,
+    "Andrew Novak": 0.1,
+    "Alejandro Tosti": 0.1,
+    "Alex Smalley": 0.1,
     "Alexander Noren": 0.1,
     "Alex Fitzpatrick": 0.8,
     "Akshay Bhatia": 0.5,
     "Adrien Saddier": 0.1,
     "Adrien Dumont de Chassart": 0.1,
     "Adam Scott": 0.1,
-    "Arni Sveinsson": 0.1
+    "Aaron Rai": 0.3,
+    "Davis Thompson": 0.1,
+    "Ryan Fox": 0.1,
+    "Kaito Onishi": 0.1,
+    "Zac Blair": 0.1,
+    "Sungjae Im": 0.1,
+    "Spencer Tibbits": 0.1,
+    "Si Woo Kim": 0.1,
+    "Shane Lowry": 0.1,
+    "Pierceson Coody": 0.1,
+    "Peter Uihlein": 0.1,
+    "Neal Shipley": 0.1,
+    "Marek Fleming": 0.1,
+    "Justin Thomas": 2.9,
+    "Joaquin Niemann": 0.1,
+    "J.B. Holmes": 0.1
   },
   "market_token_map": {
     "Patrick Reed": "tec-pga-us-2026-06-21-w-patree",
