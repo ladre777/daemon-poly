@@ -692,8 +692,8 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
         return False, f"PF-01: R4 needs edge >15% (got {edge:.1f}%)"
     if edge < 8:
         return False, f"PF-02: Edge {edge:.1f}% below 8% minimum"
-    if len(state["open_positions"]) >= 4:
-        return False, "PF-03: Max 4 open positions"
+    if len(state["open_positions"]) >= 6:
+        return False, "PF-03: Max 6 open positions"
     if sum(1 for p in state["open_positions"] if p["player"] == player) >= 2:
         return False, f"PF-04: Already 2 positions on {player}"
     shot_gate = 4 if round_num == 4 else 6
@@ -716,16 +716,16 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
 def calculate_size(edge: float, confidence: str) -> float:
     bankroll = state["bankroll"]
     if confidence == "High" and edge > 15:
-        pct = 0.05
+        pct = 0.10
     elif confidence == "High":
-        pct = 0.03
+        pct = 0.06
     elif confidence == "Medium" and edge > 12:
-        pct = 0.02
+        pct = 0.04
     else:
-        pct = 0.01
+        pct = 0.02
     size = round(bankroll * pct, 2)
     current_exposure = sum(p["size_usd"] for p in state["open_positions"])
-    max_exposure     = bankroll * 0.10
+    max_exposure     = bankroll * 0.25
     if current_exposure + size > max_exposure:
         size = max(0.0, max_exposure - current_exposure)
     return size
@@ -1720,8 +1720,8 @@ def get_current_round() -> int:
 def schedule_loop():
     flags = {k: False for k in [
         "r1_brief",  "r1_half",  "r1_monitor",
-        "r2_brief",  "r2_half",  "r2_scan1", "r2_scan2",
-        "r3_brief",  "r3_half",  "r3_morning", "r3_scan1", "r3_scan2", "r3_night",
+        "r2_brief",  "r2_half",  "r2_mid1", "r2_mid2", "r2_scan1", "r2_scan2",
+        "r3_brief",  "r3_half",  "r3_morning", "r3_mid1", "r3_mid2", "r3_scan1", "r3_scan2", "r3_night",
         "r4_brief",  "r4_half",  "r4_morning", "r4_11", "r4_14", "r4_17", "r4_18",
     ]}
     r2_scan1_time = r3_scan1_time = None
@@ -1772,6 +1772,14 @@ def schedule_loop():
                 send_halftime_report(2)
                 flags["r2_half"] = True
 
+            if hour == 16 and minute < 10 and not flags["r2_mid1"]:
+                run_scan(2, "SCHEDULED_R2_MID1")
+                flags["r2_mid1"] = True
+
+            if hour == 19 and minute < 10 and not flags["r2_mid2"]:
+                run_scan(2, "SCHEDULED_R2_MID2")
+                flags["r2_mid2"] = True
+
             if state["all_groups_finished"] and not flags["r2_scan1"]:
                 tg("R2 COMPLETE — running Scan 1...")
                 run_scan(2, "SCHEDULED_R2_S1")
@@ -1809,6 +1817,14 @@ def schedule_loop():
                 tg("R3 PRE-ROUND CHECK")
                 send_cycle_report(3)
                 flags["r3_morning"] = True
+
+            if hour == 16 and minute < 10 and not flags["r3_mid1"]:
+                run_scan(3, "SCHEDULED_R3_MID1")
+                flags["r3_mid1"] = True
+
+            if hour == 19 and minute < 10 and not flags["r3_mid2"]:
+                run_scan(3, "SCHEDULED_R3_MID2")
+                flags["r3_mid2"] = True
 
             fetch_leaderboard()
             if state["all_groups_finished"] and not flags["r3_scan1"]:
