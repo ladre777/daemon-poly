@@ -800,17 +800,26 @@ def queue_trade(player: str, edge: float, confidence: str,
     Sends a Telegram alert with a VETO_WINDOW_SECS countdown.
     If no VETO is received the veto_worker fires the order automatically.
     """
-    trade = {
-        "player":       player,
-        "edge":         edge,
-        "confidence":   confidence,
-        "entry_pct":    entry_pct,
-        "round":        round_num,
-        "from_cycle":   from_cycle_pool,
-        "queued_at":    time.time(),
-        "vetoed":       False,
-    }
     with state["veto_lock"]:
+        # Atomic dedupe + cap guard — protects ALL entry sources (Claude + model).
+        already_pending  = any(t["player"] == player for t in state["pending_trades"])
+        total_for_player = (
+            sum(1 for p in state["open_positions"] if p["player"] == player)
+            + sum(1 for t in state["pending_trades"] if t["player"] == player)
+        )
+        total_committed  = len(state["open_positions"]) + len(state["pending_trades"])
+        if already_pending or total_for_player >= 2 or total_committed >= 6:
+            return False
+        trade = {
+            "player":       player,
+            "edge":         edge,
+            "confidence":   confidence,
+            "entry_pct":    entry_pct,
+            "round":        round_num,
+            "from_cycle":   from_cycle_pool,
+            "queued_at":    time.time(),
+            "vetoed":       False,
+        }
         state["pending_trades"].append(trade)
 
     size = calculate_size(edge, confidence)
@@ -824,6 +833,7 @@ def queue_trade(player: str, edge: float, confidence: str,
         f"\nReply VETO {player}  or  VETO ALL  to cancel.\n"
         f"Otherwise fires in {VETO_WINDOW_SECS}s automatically."
     )
+    return True
 
 
 def veto_worker():
@@ -1028,8 +1038,61 @@ def check_movement_triggers(round_num: int):
             state["suspended"] = True
             threading.Timer(1800, lambda: state.update({"suspended": False})).start()
 
+    # T6: GUARANTEED deterministic entries (no Claude) — model vs live market
+    deterministic_entry_check(round_num, new_lb, new_odds)
+
     state["prev_leaderboard"] = new_lb
     state["prev_odds"]        = new_odds
+
+
+def deterministic_entry_check(round_num: int, lb: dict = None, odds: dict = None):
+    """
+    GUARANTEED entry path — no Claude, fully deterministic.
+    Compares the shots-back win-probability model (_estimate_true_probs) against
+    live Polymarket odds. Whenever model edge >= threshold and every preflight
+    gate passes, the trade is queued (fires after the veto window) every single
+    time. This removes Claude's non-deterministic judgment from the trigger path.
+    """
+    if round_num < 2 or state["suspended"] or not state["autopilot"]:
+        return  # OFF = signal-only, never auto-queue real orders
+    lb = lb if lb is not None else state["last_leaderboard"]
+    if not lb:
+        return
+    odds = odds if odds is not None else fetch_polymarket_odds(list(lb.keys()))
+    if not any(v and v > 0 for v in odds.values()):
+        return  # no live market to price against
+
+    true_probs = _estimate_true_probs(lb)
+    held    = {p["player"] for p in state["open_positions"]}
+    pending = {t["player"] for t in state["pending_trades"]}
+
+    candidates = []
+    for name, true_pct in true_probs.items():
+        mkt_pct = odds.get(name)
+        if mkt_pct is None or mkt_pct <= 0:
+            continue
+        if name in held or name in pending:
+            continue
+        edge = round(true_pct - mkt_pct, 1)
+        if edge < 5:
+            continue
+        candidates.append((edge, name, mkt_pct))
+
+    candidates.sort(reverse=True)  # best edge first
+    capacity = 6 - len(state["open_positions"]) - len(state["pending_trades"])
+    queued   = 0
+    for edge, name, mkt_pct in candidates:
+        if queued >= capacity:
+            break
+        confidence = "High" if edge >= 10 else "Medium" if edge >= 6 else "Low"
+        ok, reason = run_preflight(name, edge, confidence, round_num)
+        if not ok:
+            continue
+        if queue_trade(name, edge, confidence, mkt_pct, round_num, from_cycle_pool=False):
+            tg(f"🤖 AUTO-TRIGGER (deterministic model) — {name}\n"
+               f"Model {true_probs[name]:.1f}% vs Mkt {mkt_pct:.1f}% | "
+               f"Edge +{edge:.1f}% | {confidence}")
+            queued += 1
 
 # ─────────────────────────────────────────────
 # REPORTING
