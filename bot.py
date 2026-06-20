@@ -466,7 +466,7 @@ Entry mid-tournament only (R2-R3). Never pre-tournament. Target players 3-6 shot
 SHINNECOCK HILLS EDGE:
 Fade bombers, reward accuracy and low ball-flight. SG:APP is #1 differentiator. Public over-bets Scheffler. Find value in top-30 OWGR players priced under 8%. R2 movers gaining 3+ shots still outside top 10 are primary targets. R4 field historically goes over par.
 
-FOR EACH PLAYER OUTPUT EXACTLY:
+FOR EACH PLAYER OUTPUT EXACTLY THIS FORMAT — NO asterisks, NO bold, NO markdown, NO stars, plain text only:
 PLAYER: [Name]
 MARKET: [%]
 FAIR VALUE: [%]
@@ -475,17 +475,17 @@ SIGNAL: [ENTER / HOLD / AVOID]
 CONFIDENCE: [High / Medium / Low]
 WHY: [1 sentence]
 
-Rank by edge descending. Mark top pick with ★
-If no edge >8%: reply NO TRADE — WAIT
-R4 rule: only signal ENTER if edge >15% and player within 4 shots of lead."""
+Rank by edge descending. Top pick gets a line with just: TOP PICK
+If no edge >5%: reply NO TRADE — WAIT
+R4 rule: only signal ENTER if edge >10% and player within 4 shots of lead."""
 
 def claude_signal_scan(leaderboard: dict, odds: dict, active_positions: list, round_num: int) -> str:
     try:
         lb_text = "\n".join([
             f"{v['position']} | {name} | {v['score']:+d} | Today: {v['today']:+d} | Thru: {v['thru']}"
-            for name, v in sorted(leaderboard.items(), key=lambda x: x[1].get("position", 999))[:20]
+            for name, v in sorted(leaderboard.items(), key=lambda x: x[1].get("position", 999))[:30]
         ])
-        odds_text  = "\n".join([f"{name}: {pct}%" for name, pct in sorted(odds.items(), key=lambda x: -x[1])[:20]])
+        odds_text  = "\n".join([f"{name}: {pct}%" for name, pct in sorted(odds.items(), key=lambda x: -x[1])[:30]])
         pos_text   = "\n".join([
             f"  {p['player']} YES @ {p['entry_pct']}% — now {odds.get(p['player'], '?')}%"
             for p in active_positions
@@ -690,9 +690,9 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
 
     if round_num < 2:
         return False, "PF-01: R1 blackout"
-    if round_num == 4 and edge < 15:
-        return False, f"PF-01: R4 needs edge >15% (got {edge:.1f}%)"
-    if edge < 8:
+    if round_num == 4 and edge < 10:
+        return False, f"PF-01: R4 needs edge >10% (got {edge:.1f}%)"
+    if edge < 5:
         return False, f"PF-02: Edge {edge:.1f}% below 8% minimum"
     if len(state["open_positions"]) >= 6:
         return False, "PF-03: Max 6 open positions"
@@ -923,7 +923,7 @@ def run_scan(round_num: int, trigger: str = "SCHEDULED", from_cycle: bool = Fals
     lines          = signal_text.split("\n")
     current_player = {}
     for line in lines:
-        line = line.strip()
+        line = line.strip().replace("**", "").replace("*", "").replace("★", "").strip()
         if line.startswith("PLAYER:"):
             current_player = {"player": line.split(":", 1)[1].strip().lstrip("★ ")}
         elif line.startswith("MARKET:"):
