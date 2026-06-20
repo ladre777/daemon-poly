@@ -266,8 +266,9 @@ def fetch_leaderboard() -> dict:
                 "cut":      status in ("CUT", "WD", "DQ", "WITHDRAWN"),
             }
         state["last_leaderboard"] = leaderboard
-        state["all_groups_finished"] = all(
-            str(p.get("thru", "")) == "F" for p in players
+        active = [d for d in leaderboard.values() if not d.get("cut")]
+        state["all_groups_finished"] = bool(active) and all(
+            str(d.get("thru", "")).upper().startswith("F") for d in active
         )
         state["data_stale"] = False
         return leaderboard
@@ -684,7 +685,8 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
     lb          = state["last_leaderboard"]
     player_data = lb.get(player, {})
     position    = player_data.get("position", 999)
-    shots_back  = max(position - 1, 0)
+    leader_score = min((d.get("score", 0) for d in lb.values() if not d.get("cut")), default=0)
+    shots_back   = max(player_data.get("score", 999) - leader_score, 0)
 
     if round_num < 2:
         return False, "PF-01: R1 blackout"
@@ -696,7 +698,7 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
         return False, "PF-03: Max 6 open positions"
     if sum(1 for p in state["open_positions"] if p["player"] == player) >= 2:
         return False, f"PF-04: Already 2 positions on {player}"
-    shot_gate = 4 if round_num == 4 else 6
+    shot_gate = 4 if round_num == 4 else 8
     if shots_back > shot_gate:
         return False, f"PF-05: {player} {shots_back} shots back (gate: {shot_gate})"
     if state["cooldown_active"]:
@@ -895,7 +897,7 @@ def run_scan(round_num: int, trigger: str = "SCHEDULED", from_cycle: bool = Fals
     if cur_hour != state["scan_hour_reset"]:
         state["scan_count_this_hour"] = 0
         state["scan_hour_reset"]      = cur_hour
-    if trigger != "SCHEDULED":
+    if not trigger.startswith("SCHEDULED"):
         if state["scan_count_this_hour"] >= 3:
             tg("SCAN QUEUED: rate limit 3/hr. Will run at next 10-min mark.")
             return
