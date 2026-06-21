@@ -262,6 +262,9 @@ def fetch_leaderboard() -> dict:
             timeout=10,
         )
         data = r.json()
+        if r.status_code != 200:
+            msg = data.get("message", f"HTTP {r.status_code}") if isinstance(data, dict) else f"HTTP {r.status_code}"
+            raise RuntimeError(f"Slash Golf {r.status_code}: {msg}")
         leaderboard = {}
         players = data.get("leaderboardRows", data.get("leaderboard", data.get("players", [])))
         for p in players:
@@ -276,6 +279,8 @@ def fetch_leaderboard() -> dict:
                 "thru":     p.get("thru", "F"),
                 "cut":      status in ("CUT", "WD", "DQ", "WITHDRAWN"),
             }
+        if not leaderboard:
+            raise RuntimeError("empty leaderboard response (no rows)")
         state["last_leaderboard"] = leaderboard
         active = [d for d in leaderboard.values() if not d.get("cut")]
         state["all_groups_finished"] = bool(active) and all(
@@ -284,8 +289,14 @@ def fetch_leaderboard() -> dict:
         state["data_stale"] = False
         return leaderboard
     except Exception as e:
-        tg(f"SLASH GOLF ERROR: {e}")
+        # Never treat a failed/empty fetch as valid data — flag stale so PF-07
+        # blocks blind trading, keep last good leaderboard, and alert (throttled).
         state["data_stale"] = True
+        now = time.time()
+        if now - state.get("_last_stale_alert", 0) > 1800:
+            state["_last_stale_alert"] = now
+            tg(f"⚠️ DATA STALE — leaderboard unavailable: {e}\n"
+               f"Trading is paused (PF-07) until the feed recovers.")
         return state["last_leaderboard"]
 
 # ─────────────────────────────────────────────

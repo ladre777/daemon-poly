@@ -20,3 +20,7 @@ Gates that exist beyond the edge/position/shot thresholds:
 ## Rule: drawdown RESUME must re-anchor, not just clear
 **Why:** clearing `suspended` alone is useless if bankroll is still below the 20% threshold — the next preflight instantly re-suspends, contradicting the "resume" message.
 **How to apply:** `AUTOPILOT: RESUME` sets `drawdown_baseline = bankroll` so the gate measures the *next* 20% from the resume point. `starting_bankroll` is left untouched so session P&L reporting stays accurate.
+
+## Slash Golf API quota = silent no-trade
+**Why:** the bot stopped trading entirely because the Slash Golf (RapidAPI live-golf-data) leaderboard returned HTTP 429 "exceeded MONTHLY quota for BASIC plan". The old `fetch_leaderboard` parsed the 429 JSON, found no `leaderboardRows`, and stored an empty leaderboard with `data_stale=False` — a silent fallback. No leaderboard ⇒ `_estimate_true_probs` empty ⇒ zero edge candidates ⇒ no auto-trades, with no alert.
+**How to apply:** any external-feed fetch must treat non-200 status AND empty payloads as failures (raise → set `data_stale=True`, keep last good data, alert throttled). If the live bot "isn't trading," check the data feed first (leaderboard count vs odds count) before suspecting the trade gates. Polymarket odds working while leaderboard is empty is the tell. Fix requires the user to upgrade/reset the RapidAPI plan — not a code change.
