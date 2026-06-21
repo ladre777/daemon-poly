@@ -36,6 +36,8 @@ PERSIST_KEYS = [
     "current_round", "last_leaderboard", "last_odds",
     "market_token_map", "cut_players",
     "total_wins", "total_losses",
+    "saturday_trade_count",
+    "suspended", "drawdown_baseline",
 ]
 
 def save_state():
@@ -66,6 +68,13 @@ def load_state():
                 state[k] = set(v)
             else:
                 state[k] = v
+        # Backfill PF-10 Saturday counter from history so a mid-event restart
+        # cannot reset the cap and allow extra R3 trades.
+        r3_fills = (
+            sum(1 for p in state["open_positions"] if p.get("round_entered") == 3)
+            + sum(1 for p in state["closed_positions"] if p.get("round_entered") == 3)
+        )
+        state["saturday_trade_count"] = max(state.get("saturday_trade_count", 0), r3_fills)
         pos_count  = len(state["open_positions"])
         closed_count = len(state["closed_positions"])
         print(f"[STATE] Restored — bankroll ${state['bankroll']:.2f} | "
@@ -179,7 +188,9 @@ state = {
     "all_groups_finished":  False,
     "cut_players":          set(),
     "suspended":            False,
+    "drawdown_baseline":    None,  # re-anchored to current bankroll on AUTOPILOT: RESUME
     "data_stale":           False,
+    "saturday_trade_count": 0,   # PF-10: hard cap of 2 trades on Saturday (R3)
     "total_wins":           0,
     "total_losses":         0,
     "scan_count_this_hour": 0,
@@ -690,10 +701,23 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
 
     if round_num < 2:
         return False, "PF-01: R1 blackout"
+    # Auto-suspension gates (block before any order leaves the bot)
+    if state["suspended"]:
+        return False, "SUSPENDED — send AUTOPILOT: RESUME"
+    dd_base = state.get("drawdown_baseline") or state["starting_bankroll"]
+    if state["bankroll"] < dd_base * 0.8:
+        state["suspended"] = True
+        save_state()
+        tg(f"🛑 AUTO-SUSPENDED — bankroll ${state['bankroll']:.2f} down >20% "
+           f"from baseline ${dd_base:.2f}. All trading halted. "
+           f"Send AUTOPILOT: RESUME to re-anchor and continue.")
+        return False, "SUSPENDED: drawdown >20%"
     if round_num == 4 and edge < 10:
         return False, f"PF-01: R4 needs edge >10% (got {edge:.1f}%)"
     if edge < 5:
         return False, f"PF-02: Edge {edge:.1f}% below 5% minimum"
+    if round_num == 3 and state.get("saturday_trade_count", 0) >= 2:
+        return False, "PF-10: Saturday cap (2 trades) reached"
     if len(state["open_positions"]) >= 6:
         return False, "PF-03: Max 6 open positions"
     if sum(1 for p in state["open_positions"] if p["player"] == player) >= 2:
@@ -707,8 +731,16 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
         return False, "PF-07: Stale data — leaderboard unavailable"
     if confidence not in ("High", "Medium"):
         return False, f"PF-08: Confidence '{confidence}' too low"
+    # PF-09: Loss-position gate — never add to a player already down >30% from entry
+    cur_odds = state["last_odds"].get(player)
+    if cur_odds is not None:
+        for p in state["open_positions"]:
+            if p["player"] == player and p.get("entry_pct", 0) > 0:
+                chg = (cur_odds - p["entry_pct"]) / p["entry_pct"]
+                if chg <= -0.30:
+                    return False, f"PF-09: {player} down {chg*100:.0f}% on open position — no add"
     if player not in state["market_token_map"]:
-        return False, f"PF-09: No Polymarket token found for {player}"
+        return False, f"PF-00: No Polymarket token found for {player}"
     return True, "PASS"
 
 # ─────────────────────────────────────────────
@@ -783,6 +815,8 @@ def execute_trade(player: str, edge: float, confidence: str,
     })
     if from_cycle_pool:
         state["cycle_pool"] -= size
+    if round_num == 3:
+        state["saturday_trade_count"] = state.get("saturday_trade_count", 0) + 1
 
     state["consecutive_losses"] = 0
     tg(f"✅ FILLED: {player} YES | {shares} shares @ ${fill_pct/100:.2f} | Order: {order_id}")
@@ -1639,10 +1673,12 @@ def handle_command(text: str):
         save_state()
 
     elif cmd == "AUTOPILOT: RESUME":
-        state["autopilot"]       = True
-        state["suspended"]       = False
-        state["cooldown_active"] = False
-        tg("🟢 AUTOPILOT: RESUMED — all systems active")
+        state["autopilot"]         = True
+        state["suspended"]         = False
+        state["cooldown_active"]   = False
+        state["drawdown_baseline"] = state["bankroll"]  # re-anchor so the 20% gate won't instantly re-fire
+        tg(f"🟢 AUTOPILOT: RESUMED — all systems active | "
+           f"drawdown baseline re-anchored to ${state['bankroll']:.2f}")
         save_state()
 
     elif cmd in ("STATUS", "POSITIONS"):

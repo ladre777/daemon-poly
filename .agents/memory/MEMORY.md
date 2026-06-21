@@ -1,2 +1,3 @@
 - [Polymarket US trade integration](polymarket-us.md) — DAEMON-POLY trades the custodial Polymarket US app via the `polymarket_us` SDK, not the empty self-custody CLOB; SDK quirks + secret-overwrite gotcha.
 - [DAEMON-POLY autopilot gating](daemon-poly-autopilot-gating.md) — `execute_trade` does NOT gate on autopilot; any new entry path must check `state['autopilot']` itself or it bypasses OFF (signal-only) safety.
+- [DAEMON-POLY preflight safety](daemon-poly-preflight-safety.md) — `run_preflight` is the single order chokepoint; any new stateful safety flag MUST be in PERSIST_KEYS or a restart silently bypasses it.
