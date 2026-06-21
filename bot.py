@@ -712,8 +712,8 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
            f"from baseline ${dd_base:.2f}. All trading halted. "
            f"Send AUTOPILOT: RESUME to re-anchor and continue.")
         return False, "SUSPENDED: drawdown >20%"
-    if round_num == 4 and edge < 10:
-        return False, f"PF-01: R4 needs edge >10% (got {edge:.1f}%)"
+    if round_num == 4 and edge < 7:
+        return False, f"PF-01: R4 needs edge >7% (got {edge:.1f}%)"
     if edge < 5:
         return False, f"PF-02: Edge {edge:.1f}% below 5% minimum"
     if round_num == 3 and state.get("saturday_trade_count", 0) >= 2:
@@ -722,7 +722,7 @@ def run_preflight(player: str, edge: float, confidence: str, round_num: int) -> 
         return False, "PF-03: Max 6 open positions"
     if sum(1 for p in state["open_positions"] if p["player"] == player) >= 2:
         return False, f"PF-04: Already 2 positions on {player}"
-    shot_gate = 4 if round_num == 4 else 8
+    shot_gate = 6 if round_num == 4 else 8
     if shots_back > shot_gate:
         return False, f"PF-05: {player} {shots_back} shots back (gate: {shot_gate})"
     if state["cooldown_active"]:
@@ -1978,7 +1978,7 @@ def schedule_loop():
                 flags["r4_half"] = True
 
             if hour == 12 and minute < 10 and not flags["r4_morning"]:
-                tg("R4 ACTIVE — 10% edge min, 4-shot gate")
+                tg("R4 ACTIVE — 7% edge min, 6-shot gate")
                 send_cycle_report(4)
                 flags["r4_morning"] = True
 
