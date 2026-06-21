@@ -122,6 +122,13 @@ SESSION_BANKROLL          = float(os.environ.get("SESSION_BANKROLL", "300"))
 
 TOURNAMENT_ID    = "026"
 SLASH_GOLF_HOST  = "https://live-golf-data.p.rapidapi.com"
+# Leaderboard source priority. ESPN public API is live + free (primary); Claude web
+# search is a best-effort fallback; Slash Golf (RapidAPI) is exhausted. Set to
+# "slashgolf" to restore the original feed once the RapidAPI plan is back.
+LEADERBOARD_SOURCE     = "espn"   # "espn" | "claude" | "slashgolf"
+ESPN_GOLF_URL          = "https://site.api.espn.com/apis/site/v2/sports/golf/leaderboard"
+USE_CLAUDE_LEADERBOARD = True     # also try Claude if ESPN fails before flagging stale
+CLAUDE_LB_CACHE_SECS   = 480      # web search is expensive — dedupe fetches per cycle
 TELEGRAM_API     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 ANTHROPIC_API    = "https://api.anthropic.com/v1/messages"
 
@@ -248,8 +255,173 @@ def _parse_score(v) -> int:
     except (ValueError, TypeError):
         return 0
 
+def fetch_leaderboard_via_claude() -> dict:
+    """Best-effort leaderboard via Claude web search (fallback when no sports API).
+
+    NOTE: live in-play golf scores are usually NOT indexed on the open web, so this
+    often returns only start-of-round standings. If nothing usable parses, the data
+    is flagged stale and PF-07 blocks trading rather than acting on bad data.
+    """
+    now = time.time()
+    if state.get("last_leaderboard") and now - state.get("_claude_lb_ts", 0) < CLAUDE_LB_CACHE_SECS:
+        return state["last_leaderboard"]
+    try:
+        prompt = (
+            "Use web search to find the most current leaderboard for the 2026 U.S. Open "
+            "golf championship at Shinnecock Hills (final round, Sunday June 21 2026). "
+            "Return ONLY a JSON array (no prose, no markdown) of up to 30 players, each an "
+            "object with EXACTLY these keys: "
+            '"name" (full name string), '
+            '"position" (integer place, 999 if unknown), '
+            '"score" (integer total to par; negative=under par, 0=even), '
+            '"today" (integer today\'s round to par, 0 if unknown), '
+            '"thru" (string holes done e.g. "12" or "F", or tee time if not started), '
+            '"cut" (boolean true if missed cut/WD/DQ). '
+            "If live data is unavailable, return the latest standings you can find. "
+            "Output JUST the JSON array."
+        )
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 4096,
+            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        headers = {
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        r = requests.post(ANTHROPIC_API, headers=headers, json=payload, timeout=90)
+        d = r.json()
+        if r.status_code != 200:
+            raise RuntimeError(d.get("error", {}).get("message", f"HTTP {r.status_code}"))
+        text = "".join(b.get("text", "") for b in d.get("content", []) if b.get("type") == "text")
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end == -1:
+            raise RuntimeError("Claude returned no JSON leaderboard")
+        rows = json.loads(text[start:end + 1])
+        leaderboard = {}
+        for p in rows:
+            name = str(p.get("name", "")).strip()
+            if not name:
+                continue
+            leaderboard[name] = {
+                "position": _parse_pos(p.get("position", 999)),
+                "score":    _parse_score(p.get("score", 0)),
+                "today":    _parse_score(p.get("today", 0)),
+                "thru":     str(p.get("thru", "F")),
+                "cut":      bool(p.get("cut", False)),
+            }
+        if not leaderboard:
+            raise RuntimeError("empty leaderboard from Claude")
+        state["last_leaderboard"] = leaderboard
+        state["_claude_lb_ts"]    = now
+        # Claude often labels start-of-round standings as "thru F"; do NOT trust that
+        # to mean the tournament is over (would trigger false auto-settlement).
+        state["all_groups_finished"] = False
+        state["data_stale"] = False
+        return leaderboard
+    except Exception as e:
+        state["data_stale"] = True
+        if now - state.get("_last_stale_alert", 0) > 1800:
+            state["_last_stale_alert"] = now
+            tg(f"⚠️ DATA STALE — Claude leaderboard fetch failed: {e}\n"
+               f"Trading paused (PF-07) until data resumes.")
+        return state.get("last_leaderboard", {})
+
+def fetch_leaderboard_via_espn() -> dict:
+    """Live leaderboard from ESPN's public golf API (free, no key). Primary source.
+
+    Provides real in-play data: current-round position, total + today score to par,
+    holes thru, completion status, and cut flags. Raises on any failure so the caller
+    can fall back to Claude or flag the data stale (never trades on bad data).
+    """
+    r = requests.get(ESPN_GOLF_URL, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"ESPN HTTP {r.status_code}")
+    d = r.json()
+    events = d.get("events", []) or []
+    # HARD requirement: only ever ingest the U.S. Open. Never fall back to another
+    # event — trading on the wrong tournament would be a silent real-money disaster.
+    ev = next((e for e in events if "u.s. open" in str(e.get("name", "")).lower()), None)
+    if not ev:
+        names = ", ".join(str(e.get("name", "?")) for e in events) or "none"
+        raise RuntimeError(f"ESPN: U.S. Open not found in feed (events: {names})")
+    if not ev.get("competitions"):
+        raise RuntimeError("ESPN: U.S. Open event has no competition data")
+    state["last_event_name"] = ev.get("name")
+    comp = ev["competitions"][0]
+    cur_period = (comp.get("status") or {}).get("period")
+    competitors = comp.get("competitors", []) or []
+    if not competitors:
+        raise RuntimeError("ESPN: no competitors in feed")
+
+    leaderboard = {}
+    active_completed = []
+    for p in competitors:
+        name = ((p.get("athlete") or {}).get("displayName") or "").strip()
+        if not name:
+            continue
+        st     = p.get("status", {}) or {}
+        tinfo  = st.get("type", {}) or {}
+        tname  = (tinfo.get("name") or "").upper()
+        detail = (tinfo.get("shortDetail") or tinfo.get("description") or "").upper()
+        cut = ("CUT" in tname) or ("WITHDRAW" in tname) or ("DISQ" in tname) \
+            or any(tok in detail for tok in ("CUT", "WD", "DQ"))
+        total = _parse_score((p.get("score") or {}).get("displayValue", 0))
+        today = 0
+        for ls in (p.get("linescores") or []):
+            if ls.get("period") == cur_period:
+                today = _parse_score(ls.get("displayValue", 0))
+                break
+        completed = (tinfo.get("state") == "post") or bool(tinfo.get("completed"))
+        thru_n = st.get("thru")
+        if cut:
+            thru = "CUT"
+        elif completed:
+            thru = "F"
+        elif thru_n:
+            thru = str(thru_n)
+        else:
+            thru = "-"   # not yet teed off
+        leaderboard[name] = {
+            "position": 999 if cut else _parse_pos((st.get("position") or {}).get("displayName", 999)),
+            "score":    total,
+            "today":    today,
+            "thru":     thru,
+            "cut":      cut,
+        }
+        if not cut:
+            active_completed.append(completed)
+    if not leaderboard:
+        raise RuntimeError("ESPN: empty leaderboard parsed")
+
+    state["last_leaderboard"] = leaderboard
+    # ESPN reports completion reliably, so this flag is trustworthy here.
+    state["all_groups_finished"] = bool(active_completed) and all(active_completed)
+    state["data_stale"] = False
+    return leaderboard
+
 def fetch_leaderboard() -> dict:
-    """Pull live leaderboard from Slash Golf API."""
+    """Pull live leaderboard. ESPN primary → Claude fallback → Slash Golf legacy."""
+    if LEADERBOARD_SOURCE == "espn":
+        try:
+            return fetch_leaderboard_via_espn()
+        except Exception as e:
+            if USE_CLAUDE_LEADERBOARD:
+                try:
+                    return fetch_leaderboard_via_claude()
+                except Exception:
+                    pass
+            state["data_stale"] = True
+            now = time.time()
+            if now - state.get("_last_stale_alert", 0) > 1800:
+                state["_last_stale_alert"] = now
+                tg(f"⚠️ DATA STALE — ESPN leaderboard fetch failed: {e}\n"
+                   f"Trading is paused (PF-07) until the feed recovers.")
+            return state.get("last_leaderboard", {})
+    if LEADERBOARD_SOURCE == "claude":
+        return fetch_leaderboard_via_claude()
     try:
         headers = {
             "X-RapidAPI-Key": SLASH_GOLF_KEY,
