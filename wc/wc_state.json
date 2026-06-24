@@ -1,0 +1,17 @@
+{
+  "active_positions": [],
+  "closed_positions": [],
+  "current_phase": "GROUP_STAGE",
+  "dry_run": true,
+  "bankroll_usdc": 100,
+  "phase_trade_counts": {
+    "GROUP_STAGE": 0,
+    "R32": 0,
+    "R16": 0,
+    "QF": 0,
+    "SF": 0,
+    "FINAL": 0
+  },
+  "total_bankroll_deployed_pct": 0.0,
+  "last_signal_time": null
+}
