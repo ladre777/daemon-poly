@@ -1,14 +1,12 @@
 #!/bin/bash
 echo "=== DAEMON-POLY -> GitHub push ==="
 echo ""
-read -r -p "Paste your GitHub token, then press return: " RAW
-TOKEN=$(printf '%s' "$RAW" | tr -d '[:space:]')
-echo ""
-echo "Token received: ${#TOKEN} characters."
-if [ "${#TOKEN}" -lt 30 ]; then
-  echo "!! Too short - the paste got cut off. Copy the token again and re-run: bash push.sh"
+TOKEN=$(printf '%s' "$GH_TOKEN" | tr -d '[:space:]')
+if [ -z "$TOKEN" ]; then
+  echo "!! GH_TOKEN secret is not set. Add it in the Secrets panel and re-run."
   exit 1
 fi
+echo "Token loaded from Secrets: ${#TOKEN} characters."
 echo ""
 echo "Step 1: Checking the token with GitHub..."
 RESP=$(curl -s -i -H "Authorization: token ${TOKEN}" https://api.github.com/user)
@@ -19,7 +17,7 @@ echo "  GitHub replied: $STATUS"
 
 if ! printf '%s' "$STATUS" | grep -q ' 200'; then
   echo "  !! Token was REJECTED by GitHub (not a valid token)."
-  echo "  !! Generate a brand-new classic token and run: bash push.sh"
+  echo "  !! Generate a brand-new classic token, update the GH_TOKEN secret, and re-run."
   exit 1
 fi
 
@@ -28,16 +26,14 @@ echo "  Token permissions (scopes): $SCOPES"
 
 if ! printf '%s' "$SCOPES" | grep -q 'repo'; then
   echo "  !! This token is MISSING the 'repo' scope - it cannot push code."
-  echo "  !! Regenerate the token, TICK the 'repo' checkbox, then re-run: bash push.sh"
+  echo "  !! Regenerate the token, TICK 'repo', update the GH_TOKEN secret, then re-run."
   exit 1
 fi
 
 if [ "$LOGIN" != "ladre777" ]; then
   echo ""
   echo "  !! IMPORTANT: this token is for account '$LOGIN', but the repo is owned by 'ladre777'."
-  echo "  !! Either: (a) log into GitHub as 'ladre777' and make a token there, OR"
-  echo "  !!         (b) tell the agent to create the repo under '$LOGIN' instead."
-  echo "  !! Stopping here so we do not push to the wrong place."
+  echo "  !! Use a token from the 'ladre777' account."
   exit 1
 fi
 
