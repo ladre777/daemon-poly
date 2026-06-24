@@ -1,0 +1,10 @@
+node_modules/
+.cache/
+__pycache__/
+*.pyc
+.git/
+attached_assets/
+artifacts/
+.local/
+.agents/
+pnpm-lock.yaml
