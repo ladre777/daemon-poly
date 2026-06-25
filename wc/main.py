@@ -13,7 +13,7 @@ from gates import (
     check_gates, record_signal_sent, record_trade_opened,
     record_trade_closed, update_phase, set_dry_run,
     get_state_summary, load_state, save_state, STATE_FILE,
-    KILL_SWITCH_DRAWDOWN_PCT,
+    KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log
 
@@ -117,6 +117,11 @@ def handle_command(text: str):
         else:
             send_error("Usage: CLOSE <market> <outcome> [pnl_pct]")
 
+    # RESET DRAWDOWN — disarm the kill switch after a reviewed drawdown
+    elif cmd in ("RESET_DRAWDOWN", "RESET DRAWDOWN", "RESETDRAWDOWN"):
+        reset_drawdown()
+        send_status("♻️ Realized drawdown reset to 0%. Kill switch disarmed.")
+
     # LOG
     elif cmd in ("LOG", "/LOG"):
         rows = read_trade_log()
@@ -148,6 +153,7 @@ def handle_command(text: str):
             "PHASE: R32|R16|QF|SF|FINAL — update phase\n"
             "DRY: ON|OFF — toggle dry run mode\n"
             "CLOSE: <market> <outcome> [pnl_pct] — mark position closed\n"
+            "RESET_DRAWDOWN — disarm the 5% kill switch\n"
             "LOG — last 5 logged signals\n"
             "MARKETS: <query> — search Polymarket markets\n"
             "HELP — this menu"
@@ -287,10 +293,24 @@ def run_in_play_check():
                 passed, violations = check_gates(signal)
                 signal["gate_check"] = "PASS" if passed else "FAIL"
                 signal["gate_notes"] = "; ".join(violations) if violations else ""
-                log_signal(signal)
-                if passed:
-                    send_trade_signal(signal)
-                    record_signal_sent(signal)
+
+                if not passed:
+                    log_signal(signal)
+                    print(f"  GATE FAIL (in-play): {signal['gate_notes']}")
+                else:
+                    # CHECKER: verify in-play TRADE signals too, before sending.
+                    signal = run_checker(signal)
+                    print(f"  Checker: {signal.get('checker_verdict')} — {signal.get('checker_reason')}")
+                    log_signal(signal)
+                    if signal.get("checker_verdict") == "APPROVED":
+                        send_trade_signal(signal)
+                        record_signal_sent(signal)
+                    else:
+                        print(f"  CHECKER KILLED (in-play): {signal.get('checker_reason')}")
+                        send_error(
+                            f"⚡ CHECKER KILLED (in-play)\n{signal.get('checker_reason')}\n"
+                            f"Market: {signal.get('market')} | Edge: {signal.get('edge')}"
+                        )
 
 
 # ── HEARTBEAT ───────────────────────────────────────────────────────────────
