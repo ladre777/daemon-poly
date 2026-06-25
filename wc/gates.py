@@ -19,6 +19,7 @@ DEFAULT_STATE = {
         "FINAL":       0,
     },
     "total_bankroll_deployed_pct": 0.0,
+    "total_realized_loss_pct":     0.0,
     "last_signal_time":        None,
 }
 
@@ -34,6 +35,9 @@ MAX_CONCURRENT       = 3
 MAX_TRADES_PER_PHASE = 5
 MAX_WINNER_ENTRY_PCT = 25
 MAX_PROPS_TOTAL_PCT  = 15
+
+# Halt ALL new trading once realized losses reach this % of bankroll.
+KILL_SWITCH_DRAWDOWN_PCT = 5.0
 
 
 def load_state() -> dict:
@@ -54,6 +58,16 @@ def save_state(state: dict):
 def check_gates(signal: dict) -> tuple:
     state      = load_state()
     violations = []
+
+    # KILL SWITCH (hard halt): block every new trade once realized drawdown
+    # reaches the limit. Reset requires clearing total_realized_loss_pct.
+    realized_loss = state.get("total_realized_loss_pct", 0.0)
+    if realized_loss >= KILL_SWITCH_DRAWDOWN_PCT:
+        violations.append(
+            f"KILL_SWITCH: realized drawdown {realized_loss:.1f}% ≥ "
+            f"{KILL_SWITCH_DRAWDOWN_PCT}% — all trading halted"
+        )
+        return False, violations
 
     edge         = signal.get("edge", "")
     size         = float(signal.get("size_pct_bankroll", 0))
@@ -130,12 +144,15 @@ def record_trade_opened(signal: dict):
     save_state(state)
 
 
-def record_trade_closed(market: str, outcome: str):
+def record_trade_closed(market: str, outcome: str, pnl_pct: float = 0.0) -> float:
+    """Close a position. Optionally pass realized pnl_pct (negative = loss) to
+    feed the drawdown kill switch. Returns total_realized_loss_pct after update."""
     state = load_state()
     remaining = []
     for pos in state["active_positions"]:
         if pos.get("market") == market and pos.get("outcome") == outcome:
             pos["closed_at"] = datetime.now(timezone.utc).isoformat()
+            pos["pnl_pct"]   = pnl_pct
             state["closed_positions"].append(pos)
             size = float(pos.get("size_pct", 0))
             state["total_bankroll_deployed_pct"] = max(
@@ -144,7 +161,15 @@ def record_trade_closed(market: str, outcome: str):
         else:
             remaining.append(pos)
     state["active_positions"] = remaining
+
+    # Track realized losses for the kill switch.
+    if pnl_pct < 0:
+        state["total_realized_loss_pct"] = round(
+            state.get("total_realized_loss_pct", 0.0) + abs(pnl_pct), 2
+        )
+
     save_state(state)
+    return state.get("total_realized_loss_pct", 0.0)
 
 
 def update_phase(new_phase: str):
