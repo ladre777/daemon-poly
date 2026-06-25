@@ -3,7 +3,8 @@ import os
 import json
 
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-MODEL  = "claude-sonnet-4-5"
+MODEL         = "claude-sonnet-4-5"
+CHECKER_MODEL = "claude-opus-4-6"
 
 SYSTEM_PROMPT = """You are SIGNAL, the intelligence core of DÆMON-POLY — a prediction market trading agent.
 
@@ -131,6 +132,59 @@ Match winner markets settle at 90 min regulation ONLY (not extra time or penalti
         return {"signal_type": "ERROR", "reason": f"Claude returned non-JSON: {e}", "raw": raw}
     except Exception as e:
         return {"signal_type": "ERROR", "reason": str(e)}
+
+
+CHECKER_PROMPT = """You are CHECKER, the verification agent for DÆMON-POLY.
+A separate agent called SIGNAL just generated a trade signal. Your only job is to reject it or approve it.
+
+You are more skeptical than SIGNAL. You need a real reason to approve.
+
+Reject if ANY of the following are true:
+- The edge rationale is vague or narrative-based rather than structural
+- Entry price is within 3% of theoretical fair value (no real edge)
+- The confidence is SPECULATIVE and the market is illiquid
+- The signal is entering a Winner market for a team above 25% in QF or later
+- The rationale references something that already happened >4 hours ago (stale cascade)
+- Gate check is FAIL
+
+Approve only if the edge is specific, structural, and the entry price represents a genuine mispricing.
+
+Output ONLY valid JSON, no other text:
+{
+  "verdict": "APPROVED" | "REJECTED",
+  "reason": "<one sentence>"
+}"""
+
+
+def run_checker(signal: dict) -> dict:
+    """
+    Passes SIGNAL's TRADE signal to Opus for independent verification.
+    Returns the original signal with checker_verdict and checker_reason added.
+    On any error it fails safe to REJECTED so a broken checker never lets a
+    trade through unverified.
+    """
+    try:
+        message = client.messages.create(
+            model=CHECKER_MODEL,
+            max_tokens=256,
+            system=CHECKER_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Verify this signal:\n{json.dumps(signal, indent=2)}",
+            }],
+        )
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        result = json.loads(raw)
+        signal["checker_verdict"] = result.get("verdict", "REJECTED")
+        signal["checker_reason"]  = result.get("reason", "No reason given")
+    except Exception as e:
+        signal["checker_verdict"] = "REJECTED"
+        signal["checker_reason"]  = f"Checker error: {str(e)}"
+    return signal
 
 
 def run_in_play_signal(match: dict, match_detail: dict, current_odds: dict) -> dict:
