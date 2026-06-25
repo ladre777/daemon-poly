@@ -296,24 +296,33 @@ def main():
         return
 
     # Fail fast if state can't be persisted (e.g. Railway volume not mounted) —
-    # otherwise dry_run/positions would silently reset on every restart.
-    sd = os.path.dirname(STATE_FILE) or "."
-    try:
-        os.makedirs(sd, exist_ok=True)
-        _probe = os.path.join(sd, ".write_test")
-        with open(_probe, "w") as f:
-            f.write("ok")
-        os.remove(_probe)
-    except Exception as e:
-        msg = (f"🚨 CRITICAL: cannot write state to '{STATE_FILE}' ({e}). "
-               f"State would NOT persist across restarts — halting. "
-               f"Check the Railway volume / STATE_FILE path.")
+    # otherwise dry_run/positions would silently reset on every restart. We do
+    # NOT create the dir: a custom path must pre-exist as a mounted volume.
+    sd = os.path.dirname(STATE_FILE)
+    if sd and not os.path.isdir(sd):
+        msg = (f"🚨 CRITICAL: state dir '{sd}' does not exist — the Railway volume "
+               f"for STATE_FILE='{STATE_FILE}' is not mounted. Halting.")
         print(f"FATAL: {msg}")
         try:
             send_error(msg)
         except Exception:
             pass
-        return
+        raise SystemExit(1)
+    try:
+        _probe = os.path.join(sd or ".", ".write_test")
+        with open(_probe, "w") as f:
+            f.write("ok")
+        os.remove(_probe)
+    except Exception as e:
+        msg = (f"🚨 CRITICAL: cannot write state to '{STATE_FILE}' ({e}). "
+               f"State would NOT persist across restarts — halting.")
+        print(f"FATAL: {msg}")
+        try:
+            send_error(msg)
+        except Exception:
+            pass
+        raise SystemExit(1)
+    print(f"Persistence OK -> {STATE_FILE}")
 
     threading.Thread(target=start_status_server, daemon=True).start()
     threading.Thread(target=telegram_listener,   daemon=True).start()
