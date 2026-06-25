@@ -2210,6 +2210,26 @@ def telegram_listener():
 # MAIN
 # ─────────────────────────────────────────────
 
+def assert_state_writable():
+    """Fail fast if STATE_FILE's location isn't writable. Without this, a
+    missing/mis-mounted Railway volume would silently fall back to ephemeral
+    disk and the bot would lose bankroll/open positions on every restart."""
+    d = os.path.dirname(STATE_FILE) or "."
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, ".write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+    except Exception as e:
+        msg = (f"🚨 CRITICAL: cannot write state to '{STATE_FILE}' ({e}). "
+               f"State would NOT persist across restarts — halting to avoid "
+               f"untracked live positions. Check the Railway volume / STATE_FILE.")
+        print(f"[STATE] {msg}")
+        tg(msg)
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     print("=" * 52)
     print("  DAEMON-POLY | US Open 2026 | Shinnecock Hills")
@@ -2220,6 +2240,8 @@ if __name__ == "__main__":
     print()
     print("  Connecting to Polymarket US...")
     get_pm_client()
+    print("  Verifying state storage is writable...")
+    assert_state_writable()
     print("  Restoring saved state (if any)...")
     load_state()
     print("  Pre-loading leaderboard + market tokens...")
