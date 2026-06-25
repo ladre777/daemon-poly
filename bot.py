@@ -2211,23 +2211,31 @@ def telegram_listener():
 # ─────────────────────────────────────────────
 
 def assert_state_writable():
-    """Fail fast if STATE_FILE's location isn't writable. Without this, a
-    missing/mis-mounted Railway volume would silently fall back to ephemeral
-    disk and the bot would lose bankroll/open positions on every restart."""
-    d = os.path.dirname(STATE_FILE) or "."
+    """Fail fast if STATE_FILE's location isn't a writable, pre-existing dir.
+    A custom STATE_FILE path (e.g. /data/...) MUST already exist as a mounted
+    Railway volume — we deliberately do NOT create it, so a missing mount is
+    caught instead of silently falling back to ephemeral disk (which would
+    lose bankroll/open positions on every restart)."""
+    d = os.path.dirname(STATE_FILE)
+    if d and not os.path.isdir(d):
+        msg = (f"🚨 CRITICAL: state dir '{d}' does not exist — the Railway volume "
+               f"for STATE_FILE='{STATE_FILE}' is not mounted. Halting so state "
+               f"isn't silently lost on restart.")
+        print(f"[STATE] {msg}")
+        tg(msg)
+        raise SystemExit(1)
     try:
-        os.makedirs(d, exist_ok=True)
-        probe = os.path.join(d, ".write_test")
+        probe = os.path.join(d or ".", ".write_test")
         with open(probe, "w") as f:
             f.write("ok")
         os.remove(probe)
     except Exception as e:
         msg = (f"🚨 CRITICAL: cannot write state to '{STATE_FILE}' ({e}). "
-               f"State would NOT persist across restarts — halting to avoid "
-               f"untracked live positions. Check the Railway volume / STATE_FILE.")
+               f"State would NOT persist across restarts — halting.")
         print(f"[STATE] {msg}")
         tg(msg)
         raise SystemExit(1)
+    print(f"[STATE] Persistence OK -> {STATE_FILE}")
 
 
 if __name__ == "__main__":
