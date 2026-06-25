@@ -1,0 +1,34 @@
+Railway deployment failed — Build Error
+
+Regenerate pnpm-lock.yaml by running `pnpm install` locally and committing the updated file. The build fails because pnpm-lock.yaml is out of sync with the overrides and catalog entries in pnpm-workspace.yaml. Running `pnpm install --frozen-lockfile` (Railpack's default) rejects any mismatch between the lockfile and workspace config.
+
+Repository: https://github.com/ladre777/daemon-poly
+Branch: main · Commit: 577bde3 — fix: add railpack.json to force Node.js provider detection (#1)
+
+Co-authored-by: railway-app[bot] <68434857+railway-app[bot]@users.noreply.github.com>
+Deployment ID: 035bcb9f-99d9-4fe5-89af-d084adddf9e1
+Service ID: 151fd4c1-68e0-42f4-8f43-f461e5877b1b
+Environment ID: 2fa8e1f0-cdd6-46ad-b8a6-9e0df7feec99
+
+---
+
+## Problem
+The service `@workspace/mockup-sandbox` fails at the BUILD_IMAGE stage using Railpack (Node.js provider). The exact error from build logs is:
+
+```
+ERR_PNPM_LOCKFILE_CONFIG_MISMATCH  Cannot proceed with the frozen installation. The current "overrides" configuration doesn't match the value found in the lockfile
+Update your lockfile using "pnpm install --no-frozen-lockfile"
+```
+
+Railpack runs `pnpm install --frozen-lockfile --prefer-offline` by default. The SNAPSHOT stage completed successfully. Node 22.22.3 and pnpm 9.15.9 installed without issue. All service config comes from dashboard settings (no railway.toml/railway.json in the repo).
+
+## Diagnosis
+The `pnpm-workspace.yaml` file at the repo root defines an `overrides` section (extensive platform-specific exclusions for esbuild, lightningcss, @tailwindcss/oxide, rollup, @expo/ngrok-bin, plus an esbuild version pin and esm-loader alias) and a `catalog` section that includes entries for `wouter: ^3.3.5` and `@replit/vite-plugin-dev-banner: ^0.1.1`. The current `pnpm-lock.yaml` does not include these catalog entries in its `catalogs` block, indicating the lockfile was generated from an older version of `pnpm-workspace.yaml` before these entries were added. pnpm's `--frozen-lockfile` flag strictly requires the lockfile to exactly match the workspace configuration — any discrepancy causes an immediate abort.
+
+## Fix
+1. **Action:** In the repo root, run `pnpm install` (without `--frozen-lockfile`) to regenerate `pnpm-lock.yaml` so it reflects the current state of `pnpm-workspace.yaml`.
+2. **Command:** `pnpm install`
+3. **File to commit:** `pnpm-lock.yaml` (repo root) — the regenerated file will include the correct `overrides` and `catalogs` sections matching `pnpm-workspace.yaml`.
+4. **Why this fixes it:** Once the lockfile is in sync with the workspace config, Railpack's `pnpm install --frozen-lockfile` will succeed and the build will proceed.
+
+This fix is NOT auto-fixable because regenerating a lockfile requires executing the pnpm package manager — the file cannot be correctly produced by editing it directly.
