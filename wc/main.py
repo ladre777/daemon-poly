@@ -7,12 +7,13 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from scout import get_live_scoreboard, get_live_matches, get_match_detail, is_hydration_break_window
 from market_reader import get_winner_odds, get_golden_boot_odds, scan_stage_elimination_ladders, get_market_by_slug, search_markets
-from signal_engine import run_signal, run_in_play_signal
+from signal_engine import run_signal, run_in_play_signal, run_checker
 from telegram_ops import send_trade_signal, send_monitor_signal, send_status, send_error, get_updates
 from gates import (
     check_gates, record_signal_sent, record_trade_opened,
     record_trade_closed, update_phase, set_dry_run,
     get_state_summary, load_state, save_state, STATE_FILE,
+    KILL_SWITCH_DRAWDOWN_PCT,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log
 
@@ -93,16 +94,28 @@ def handle_command(text: str):
             set_dry_run(True)
             send_status("⚪ DRY RUN enabled. No real orders will be placed.")
 
-    # CLOSE: <market> <outcome>
+    # CLOSE: <market> <outcome> [pnl_pct]
     elif cmd.startswith("CLOSE:") or cmd.startswith("CLOSE "):
-        parts = text.split(None, 2)
+        parts = text.split(None, 3)
         if len(parts) >= 3:
             market  = parts[1]
             outcome = parts[2]
-            record_trade_closed(market, outcome)
-            send_status(f"✅ Position closed: {market} / {outcome}")
+            pnl_pct = 0.0
+            if len(parts) >= 4:
+                try:
+                    pnl_pct = float(parts[3].replace("%", "").replace("+", ""))
+                except ValueError:
+                    pass
+            total_loss = record_trade_closed(market, outcome, pnl_pct)
+            extra = f" | PnL {pnl_pct:+.1f}%" if pnl_pct else ""
+            send_status(f"✅ Position closed: {market} / {outcome}{extra}")
+            if total_loss >= KILL_SWITCH_DRAWDOWN_PCT:
+                send_error(
+                    f"🛑 KILL SWITCH ARMED — realized drawdown {total_loss:.1f}% ≥ "
+                    f"{KILL_SWITCH_DRAWDOWN_PCT}%. All new trades are now blocked."
+                )
         else:
-            send_error("Usage: CLOSE <market> <outcome>")
+            send_error("Usage: CLOSE <market> <outcome> [pnl_pct]")
 
     # LOG
     elif cmd in ("LOG", "/LOG"):
@@ -134,7 +147,7 @@ def handle_command(text: str):
             "SCAN — force analysis now\n"
             "PHASE: R32|R16|QF|SF|FINAL — update phase\n"
             "DRY: ON|OFF — toggle dry run mode\n"
-            "CLOSE: <market> <outcome> — mark position closed\n"
+            "CLOSE: <market> <outcome> [pnl_pct] — mark position closed\n"
             "LOG — last 5 logged signals\n"
             "MARKETS: <query> — search Polymarket markets\n"
             "HELP — this menu"
@@ -198,37 +211,48 @@ def run_main_analysis(triggered_by: str = "SCHEDULED"):
             signal["gate_check"] = "PASS" if passed else "FAIL"
             signal["gate_notes"] = "; ".join(violations) if violations else "All gates passed"
 
-            log_signal(signal, executed=False)
-
-            if passed:
-                send_trade_signal(signal)
-                record_signal_sent(signal)
-
-                if dry:
-                    result = dry_run_signal(signal)
-                    print(f"  {result}")
-                else:
-                    state2   = load_state()
-                    bankroll = state2.get("bankroll_usdc", 100)
-                    size_usd = bankroll * float(signal.get("size_pct_bankroll", 5)) / 100
-                    result   = place_order(signal, size_usd)
-                    if "error" in result:
-                        send_error(f"Order failed: {result['error']}")
-                    else:
-                        signal["order_id"] = result.get("orderID", "")
-                        record_trade_opened(signal)
-                        send_status(
-                            f"✅ ORDER PLACED\n"
-                            f"{signal.get('outcome')} {signal.get('direction')} @ "
-                            f"{result.get('price', '?')} | {result.get('shares', '?')} shares\n"
-                            f"Order ID: {result.get('orderID', '?')}"
-                        )
-            else:
+            if not passed:
                 print(f"  GATE FAIL: {signal['gate_notes']}")
+                log_signal(signal, executed=False)
                 send_error(
                     f"Signal blocked by gates:\n{signal['gate_notes']}\n"
                     f"Market: {signal.get('market')} | Edge: {signal.get('edge')}"
                 )
+            else:
+                # CHECKER: independent Opus verification before any execution.
+                signal = run_checker(signal)
+                print(f"  Checker: {signal.get('checker_verdict')} — {signal.get('checker_reason')}")
+                log_signal(signal, executed=False)
+
+                if signal.get("checker_verdict") != "APPROVED":
+                    print(f"  CHECKER KILLED: {signal.get('checker_reason')}")
+                    send_error(
+                        f"⚡ CHECKER KILLED\n{signal.get('checker_reason')}\n"
+                        f"Market: {signal.get('market')} | Edge: {signal.get('edge')}"
+                    )
+                else:
+                    send_trade_signal(signal)
+                    record_signal_sent(signal)
+
+                    if dry:
+                        result = dry_run_signal(signal)
+                        print(f"  {result}")
+                    else:
+                        state2   = load_state()
+                        bankroll = state2.get("bankroll_usdc", 100)
+                        size_usd = bankroll * float(signal.get("size_pct_bankroll", 5)) / 100
+                        result   = place_order(signal, size_usd)
+                        if "error" in result:
+                            send_error(f"Order failed: {result['error']}")
+                        else:
+                            signal["order_id"] = result.get("orderID", "")
+                            record_trade_opened(signal)
+                            send_status(
+                                f"✅ ORDER PLACED\n"
+                                f"{signal.get('outcome')} {signal.get('direction')} @ "
+                                f"{result.get('price', '?')} | {result.get('shares', '?')} shares\n"
+                                f"Order ID: {result.get('orderID', '?')}"
+                            )
 
         elif stype == "MONITOR":
             send_monitor_signal(signal)
