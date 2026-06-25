@@ -24,7 +24,7 @@ from datetime import datetime, timezone, date as dt
 
 import requests
 
-STATE_FILE = "daemon_state.json"
+STATE_FILE = os.environ.get("STATE_FILE", "daemon_state.json")
 
 # Keys persisted to disk — excludes ephemeral runtime fields
 PERSIST_KEYS = [
