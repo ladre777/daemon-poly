@@ -12,7 +12,7 @@ from telegram_ops import send_trade_signal, send_monitor_signal, send_status, se
 from gates import (
     check_gates, record_signal_sent, record_trade_opened,
     record_trade_closed, update_phase, set_dry_run,
-    get_state_summary, load_state, save_state,
+    get_state_summary, load_state, save_state, STATE_FILE,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log
 
@@ -293,6 +293,26 @@ def main():
     missing  = [s for s in required if not os.environ.get(s)]
     if missing:
         print(f"FATAL: Missing secrets: {missing}")
+        return
+
+    # Fail fast if state can't be persisted (e.g. Railway volume not mounted) —
+    # otherwise dry_run/positions would silently reset on every restart.
+    sd = os.path.dirname(STATE_FILE) or "."
+    try:
+        os.makedirs(sd, exist_ok=True)
+        _probe = os.path.join(sd, ".write_test")
+        with open(_probe, "w") as f:
+            f.write("ok")
+        os.remove(_probe)
+    except Exception as e:
+        msg = (f"🚨 CRITICAL: cannot write state to '{STATE_FILE}' ({e}). "
+               f"State would NOT persist across restarts — halting. "
+               f"Check the Railway volume / STATE_FILE path.")
+        print(f"FATAL: {msg}")
+        try:
+            send_error(msg)
+        except Exception:
+            pass
         return
 
     threading.Thread(target=start_status_server, daemon=True).start()
