@@ -1,8 +1,9 @@
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-STATE_FILE = "wc_state.json"
+STATE_FILE = os.environ.get("STATE_FILE", "wc_state.json")
 
 DEFAULT_STATE = {
     "active_positions":        [],
