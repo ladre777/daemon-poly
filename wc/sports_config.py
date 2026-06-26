@@ -16,6 +16,9 @@ SPORT_CONFIGS = {
         "emoji":        "⚽",
         "active":       True,
         "espn_paths":   ["soccer/fifa.world"],
+        # Polymarket US (live execution venue) futures discovery.
+        "us_search":     ["world cup winner"],
+        "us_title_match": ["World Cup Winner"],
         "futures": {
             "Winner":       "world-cup-winner",
             "Golden Boot":  "world-cup-golden-boot-winner",
@@ -39,6 +42,8 @@ SPORT_CONFIGS = {
         "emoji":        "⚾",
         "active":       True,
         "espn_paths":   ["baseball/mlb"],
+        "us_search":     ["mlb world series"],
+        "us_title_match": ["World Series Champion"],
         "futures": {
             "World Series": "mlb-world-series-champion-2026",
             "AL Champion":  "mlb-2026-american-league-champion",
@@ -59,6 +64,8 @@ SPORT_CONFIGS = {
         "emoji":        "🏀",
         "active":       True,
         "espn_paths":   ["basketball/wnba"],
+        "us_search":     ["wnba champion"],
+        "us_title_match": ["WNBA Champion"],
         "futures": {
             "Champion": "wnba-2026-champion-464",
         },
@@ -76,6 +83,8 @@ SPORT_CONFIGS = {
         "emoji":        "🎾",
         "active":       True,
         "espn_paths":   ["tennis/atp", "tennis/wta"],
+        "us_search":     ["wimbledon"],
+        "us_title_match": ["Wimbledon Winner"],
         "futures": {
             "Men's Winner":   "2026-mens-wimbledon-winner",
             "Women's Winner": "2026-womens-wimbledon-winner",

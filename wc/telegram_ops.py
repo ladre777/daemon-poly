@@ -3,7 +3,7 @@ import requests
 from datetime import datetime
 
 BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID   = "8486909237"
+CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "8486909237")
 BASE_URL  = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 EDGE_EMOJI = {
