@@ -1,11 +1,37 @@
 import os
 import csv
-import json
-import requests
 from datetime import datetime
 
-CLOB_API = "https://clob.polymarket.com"
+import pm_us
+from gates import MAX_TRADE_USD
+
 TRADE_LOG = "wc_trade_log.csv"
+
+# Reject an auto-trade if the live ask has drifted more than this many percentage
+# points from the price the signal was generated at (the edge has moved/vanished).
+PRICE_TOLERANCE_PCT = 3.0
+
+def _norm_tokens(s: str) -> set:
+    """Lowercase alphanumeric token set. NO stopword removal on purpose: tokens
+    like 'City' / 'FC' are team-distinctive (Man City vs Man United, LAFC vs LA
+    Galaxy), so stripping them would create false matches."""
+    cleaned = "".join(c.lower() if c.isalnum() else " " for c in str(s))
+    return {t for t in cleaned.split() if t}
+
+
+def _outcome_matches(signal_outcome: str, catalog_outcome: str) -> bool:
+    """True only if one outcome's token set FULLY CONTAINS the other's — i.e. the
+    model's label is an abbreviation/expansion of the catalog name, not merely a
+    name that shares a city. Examples:
+      'Dodgers' ⊆ 'Los Angeles Dodgers'         -> True  (abbreviation)
+      'New York' ⊆ 'New York Liberty'           -> True  (catalog city-only)
+      'New York Yankees' vs 'New York Mets'     -> False (shared city only)
+      'Los Angeles Dodgers' vs 'L.A. Angels'    -> False (shared city only)
+    Fails closed on an empty or merely-overlapping pair."""
+    a, b = _norm_tokens(signal_outcome), _norm_tokens(catalog_outcome)
+    if not a or not b:
+        return False
+    return a <= b or b <= a
 
 FIELDNAMES = [
     "timestamp", "signal_type", "edge", "market", "direction",
@@ -50,86 +76,101 @@ def dry_run_signal(signal: dict) -> str:
     )
 
 
-def _get_pm_client():
+def place_order(signal: dict, size_usdc: float, catalog=None) -> dict:
+    """Place a REAL marketable-limit YES order on Polymarket US.
+
+    This is the FINAL safety boundary before money moves. Every check fails closed
+    (returns {"error": ...} and logs — never raises):
+      * market_slug must be present AND in the current cycle's catalog (slug->meta)
+      * the signal's outcome label must match that slug's catalog outcome
+      * only YES / long is auto-executable (NO / short is alert-only here)
+      * a live best-ask must exist and be within PRICE_TOLERANCE_PCT of the signal
+      * notional is hard-capped at min(requested, MAX_TRADE_USD, buying power)
+      * integer shares, notional re-verified after tick rounding
     """
-    Returns a Polymarket CLOB client using Ed25519 credentials (same as golf bot).
-    Used only when DRY_RUN=False.
-    """
-    try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import ApiCreds
-
-        host   = "https://clob.polymarket.com"
-        key_id = os.environ.get("POLYMARKET_KEY_ID", "")
-        secret = os.environ.get("POLYMARKET_SECRET_KEY", "")
-        pk     = os.environ.get("POLYMARKET_PK", "")
-
-        creds  = ApiCreds(api_key=key_id, api_secret=secret, api_passphrase="")
-        client = ClobClient(host, key=pk, chain_id=137, creds=creds, signature_type=1)
-        return client
-    except Exception as e:
-        return None
-
-
-def place_order(signal: dict, size_usdc: float) -> dict:
-    """
-    Places a real order on Polymarket.
-    token_id must be resolved from the market slug before calling.
-    Requires DRY_RUN=False and valid credentials.
-    """
-    market = signal.get("market", "")
-    direction = signal.get("direction", "YES")
-    outcome   = signal.get("outcome", "")
-    price_pct = float(signal.get("entry_price_pct", 50))
-
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('POLYMARKET_API_KEY', '')}",
-        "Content-Type":  "application/json",
-    }
+    market_slug = (signal.get("market_slug") or "").strip()
+    direction   = (signal.get("direction") or "YES").upper()
+    entry_pct   = float(signal.get("entry_price_pct", 0) or 0)
+    catalog     = catalog or {}
+    meta        = catalog.get(market_slug, {})
+    tick        = str(meta.get("tick") or signal.get("_tick") or "0.001")
 
     try:
-        search = requests.get(
-            "https://gamma-api.polymarket.com/markets",
-            params={"slug": market},
-            headers=headers,
-            timeout=10,
-        )
-        search.raise_for_status()
-        markets = search.json()
-        if not markets:
-            raise ValueError(f"Market slug not found: {market}")
+        if not market_slug:
+            raise ValueError("no market_slug — not an auto-executable US market")
+        if not catalog:
+            raise ValueError("no catalog supplied — refusing to trade without validation")
+        if market_slug not in catalog:
+            raise ValueError(f"slug '{market_slug}' not in current US catalog (stale/unverified)")
+        cat_outcome = meta.get("outcome", "")
+        if cat_outcome and not _outcome_matches(signal.get("outcome", ""), cat_outcome):
+            raise ValueError(
+                f"outcome mismatch: signal '{signal.get('outcome','')}' vs "
+                f"catalog '{cat_outcome}' for slug {market_slug}"
+            )
+        if direction not in ("YES", "BUY", "LONG"):
+            raise ValueError(f"direction '{direction}' not auto-executable (YES/long only)")
 
-        mkt    = markets[0] if isinstance(markets, list) else markets
-        tokens = mkt.get("tokens", [])
-        token  = next((t for t in tokens if t.get("outcome", "").lower() == outcome.lower()), None)
-        if not token:
-            raise ValueError(f"Outcome '{outcome}' not found in market tokens: {[t.get('outcome') for t in tokens]}")
-
-        token_id = token.get("token_id") or token.get("id")
-
-        client = _get_pm_client()
+        client = pm_us.get_pm_client()
         if not client:
-            return {"error": "CLOB client unavailable — check credentials"}
+            raise ValueError("Polymarket US client unavailable — check POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY")
 
-        price  = round(price_pct / 100, 4)
-        shares = int(size_usdc / max(price, 0.001))
+        ask = pm_us.live_ask(market_slug)
+        if not ask or ask <= 0:
+            raise ValueError(f"no live ask for {market_slug} (illiquid / no book)")
+        ask_pct = ask * 100
+        if entry_pct > 0 and abs(ask_pct - entry_pct) > PRICE_TOLERANCE_PCT:
+            raise ValueError(
+                f"price moved: live ask {ask_pct:.1f}¢ vs signal {entry_pct:.1f}¢ "
+                f"(>±{PRICE_TOLERANCE_PCT}pp)"
+            )
+
+        bp     = pm_us.get_buying_power()
+        budget = min(float(size_usdc), float(MAX_TRADE_USD), bp if bp > 0 else float(MAX_TRADE_USD))
+        price  = pm_us.round_to_tick(ask, tick)
+        if budget < price:
+            raise ValueError(f"budget ${budget:.2f} below one share at {ask_pct:.1f}¢")
+
+        shares = int(budget / max(price, 0.001))
+        while shares > 0 and shares * price > MAX_TRADE_USD:
+            shares -= 1
         if shares < 1:
-            return {"error": f"Size ${size_usdc:.2f} too small at price {price}"}
+            raise ValueError(f"cannot fit a whole share under ${MAX_TRADE_USD} cap at {price}")
 
         result = client.orders.create({
-            "marketSlug": market,
-            "intent":     "ORDER_INTENT_BUY_LONG" if direction == "YES" else "ORDER_INTENT_SELL_LONG",
+            "marketSlug": market_slug,
+            "intent":     "ORDER_INTENT_BUY_LONG",
             "type":       "ORDER_TYPE_LIMIT",
             "price":      {"value": f"{price:.4f}", "currency": "USD"},
             "quantity":   shares,
             "tif":        "TIME_IN_FORCE_GOOD_TILL_CANCEL",
         })
-        order_id = result.get("order", result).get("id", "")
+        order_id = ""
+        if isinstance(result, dict):
+            order_id = result.get("id") or (result.get("order") or {}).get("id", "")
         log_signal(signal, executed=True, execution_id=order_id)
-        return {"orderID": order_id, "shares": shares, "price": price, "raw": result}
+        return {
+            "orderID":  order_id,
+            "shares":   shares,
+            "price":    price,
+            "notional": round(shares * price, 2),
+            "raw":      result,
+        }
 
     except Exception as e:
         log_signal(signal, executed=False, error=str(e))
+        return {"error": str(e)}
+
+
+def close_position(market_slug: str) -> dict:
+    """Close an open Polymarket US position by market slug (operator CLOSE flow)."""
+    try:
+        client = pm_us.get_pm_client()
+        if not client:
+            return {"error": "Polymarket US client unavailable"}
+        result = client.orders.close_position({"marketSlug": market_slug})
+        return {"ok": True, "raw": result}
+    except Exception as e:
         return {"error": str(e)}
 
 

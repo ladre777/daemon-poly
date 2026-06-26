@@ -33,6 +33,14 @@ PRE-FLIGHT GATE RULES (hard — never violate; the system also enforces these):
 - Max 5 trades per phase
 - Wait >=2 hours after a major result before entering a reprice
 
+LIVE EXECUTION (CRITICAL): Only outcomes present in the provided "POLYMARKET US
+FUTURES CATALOG" can be auto-traded with real money. When you emit a TRADE on a
+catalog outcome, copy that outcome's "slug" VERBATIM into the "market_slug" field
+and base "entry_price_pct" on that outcome's "implied_pct". If your edge is on a
+market NOT in the catalog (in-play, ladder, cascade, bracket, prop), you may still
+emit the TRADE but set "market_slug" to "" — the system will send it as an alert
+only and will NOT place an order. Never invent or guess a slug.
+
 OUTPUT FORMAT — return ONLY valid JSON, no markdown, no prose.
 
 Trade signal:
@@ -41,6 +49,7 @@ Trade signal:
   "sport": "<sport label>",
   "edge": "CASCADE | BRACKET | IN_PLAY | LADDER | PROP | FUTURES",
   "market": "<exact Polymarket market / event name>",
+  "market_slug": "<US catalog slug copied verbatim for an auto-executable futures outcome, else \"\">",
   "direction": "YES | NO",
   "outcome": "<which outcome — e.g. 'France', 'New York Yankees', 'Round of 16'>",
   "entry_price_pct": <number — current price you are entering at>,
@@ -81,7 +90,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
 === GAMES (ESPN — live & scheduled) ===
 {json.dumps(matches, indent=2)[:6000]}
 
-=== POLYMARKET FUTURES ODDS (market -> outcome -> implied %) ===
+=== POLYMARKET US FUTURES CATALOG (auto-executable — market -> outcome -> {{implied_pct, slug, tick}}) ===
 {json.dumps(futures_odds, indent=2)[:6000]}
 
 === CONTEXT ===

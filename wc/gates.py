@@ -36,6 +36,11 @@ MAX_TRADES_PER_PHASE = 5
 MAX_WINNER_ENTRY_PCT = 25
 MAX_PROPS_TOTAL_PCT  = 15
 
+# Hard per-trade dollar ceiling for LIVE execution. This is the final money
+# boundary — enforced again inside executor.place_order regardless of any
+# upstream % sizing, so no signal can ever risk more than this on one trade.
+MAX_TRADE_USD        = 10.0
+
 # Halt ALL new trading once realized losses reach this % of bankroll.
 KILL_SWITCH_DRAWDOWN_PCT = 5.0
 
