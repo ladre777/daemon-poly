@@ -20,6 +20,13 @@ CONFIDENCE_EMOJI = {
     "SPECULATIVE": "⚪",
 }
 
+SPORT_EMOJI = {
+    "World Cup":  "⚽",
+    "MLB":        "⚾",
+    "WNBA":       "🏀",
+    "Wimbledon":  "🎾",
+}
+
 
 def send_message(text: str, parse_mode: str = "HTML") -> dict:
     try:
@@ -40,9 +47,11 @@ def send_trade_signal(signal: dict) -> dict:
     conf_emoji  = CONFIDENCE_EMOJI.get(conf, "⚪")
     gate        = signal.get("gate_check", "UNKNOWN")
     gate_icon   = "✅" if gate == "PASS" else "⚠️"
+    sport       = signal.get("sport", "")
+    sport_emoji = SPORT_EMOJI.get(sport, "🏟")
 
     text = (
-        f"{conf_emoji} <b>DÆMON-POLY ⚽ SIGNAL</b>\n"
+        f"{conf_emoji} <b>DÆMON-POLY {sport_emoji} {sport} SIGNAL</b>\n"
         f"──────────────────────\n"
         f"<b>TYPE:</b> {edge_emoji} {edge}\n"
         f"<b>MARKET:</b> {signal.get('market', 'N/A')}\n"
@@ -63,8 +72,10 @@ def send_trade_signal(signal: dict) -> dict:
 
 
 def send_monitor_signal(signal: dict) -> dict:
+    sport       = signal.get("sport", "")
+    sport_emoji = SPORT_EMOJI.get(sport, "🏟")
     text = (
-        f"🟡 <b>DÆMON-POLY ⚽ MONITOR</b>\n"
+        f"🟡 <b>DÆMON-POLY {sport_emoji} {sport} MONITOR</b>\n"
         f"──────────────────────\n"
         f"<b>WATCHING:</b> {signal.get('watch', 'N/A')}\n"
         f"<b>TRIGGER:</b> {signal.get('trigger', 'N/A')}\n"
