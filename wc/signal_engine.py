@@ -40,6 +40,19 @@ def _get_signal_client():
         )
     return signal_client
 
+
+def _msg_text(response) -> str:
+    """Extract usable text from an OpenAI-format response.
+    Kimi thinking models sometimes exhaust max_tokens on reasoning and leave
+    content empty — fall back to reasoning_content, which usually still
+    contains the JSON the model was building."""
+    msg = response.choices[0].message
+    text = (msg.content or "").strip()
+    if not text:
+        text = (getattr(msg, "reasoning_content", None) or "").strip()
+    return text
+
+
 SYSTEM_PROMPT = """You are SIGNAL, the intelligence core of DÆMON-POLY — a multi-sport prediction-market trading agent on Polymarket.
 
 For the single sport and the data provided, output ONE of:
@@ -170,7 +183,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
     try:
         response = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL,
-            max_tokens=3000,
+            max_tokens=8000,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -184,7 +197,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
                 },
             ],
         )
-        raw    = response.choices[0].message.content.strip()
+        raw    = _msg_text(response)
         signal = _parse_json_response(raw)
         signal.setdefault("sport", sport_cfg.get("label"))
         return signal
@@ -261,13 +274,13 @@ Output JSON signal only.
     try:
         response = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL,
-            max_tokens=1500,
+            max_tokens=4000,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
         )
-        signal = _parse_json_response(response.choices[0].message.content.strip())
+        signal = _parse_json_response(_msg_text(response))
         signal.setdefault("sport", sport_cfg.get("label"))
         return signal
     except Exception as e:
