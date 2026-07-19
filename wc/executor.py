@@ -3,7 +3,7 @@ import csv
 from datetime import datetime
 
 import pm_us
-from gates import MAX_TRADE_USD
+from gates import MAX_TRADE_USD, get_trade_cap
 
 TRADE_LOG = "wc_trade_log.csv"
 
@@ -126,16 +126,17 @@ def place_order(signal: dict, size_usdc: float, catalog=None) -> dict:
             )
 
         bp     = pm_us.get_buying_power()
-        budget = min(float(size_usdc), float(MAX_TRADE_USD), bp if bp > 0 else float(MAX_TRADE_USD))
+        cap    = get_trade_cap(bp)
+        budget = min(float(size_usdc), cap, bp if bp > 0 else cap)
         price  = pm_us.round_to_tick(ask, tick)
         if budget < price:
             raise ValueError(f"budget ${budget:.2f} below one share at {ask_pct:.1f}¢")
 
         shares = int(budget / max(price, 0.001))
-        while shares > 0 and shares * price > MAX_TRADE_USD:
+        while shares > 0 and shares * price > cap:
             shares -= 1
         if shares < 1:
-            raise ValueError(f"cannot fit a whole share under ${MAX_TRADE_USD} cap at {price}")
+            raise ValueError(f"cannot fit a whole share under ${cap:.2f} cap at {price}")
 
         result = client.orders.create({
             "marketSlug": market_slug,

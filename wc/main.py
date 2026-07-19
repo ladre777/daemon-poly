@@ -21,7 +21,7 @@ from gates import (
     check_gates, record_signal_sent, record_trade_opened,
     record_trade_closed, update_phase, set_dry_run, dedupe_active_positions,
     get_state_summary, load_state, save_state, STATE_FILE,
-    KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, MAX_TRADE_USD,
+    KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, MAX_TRADE_USD, get_trade_cap,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
@@ -387,7 +387,7 @@ def _queue_live_trade(signal: dict, size_usd: float, catalog: dict):
         f"⏳ PENDING LIVE TRADE #{pid} — {VETO_WINDOW_SEC}s to veto\n"
         f"{signal.get('sport','')} | {signal.get('market','?')}\n"
         f"BUY {cat_outcome} @ ~{signal.get('entry_price_pct','?')}¢ "
-        f"| ${size_usd:.2f} (cap ${MAX_TRADE_USD:.0f})\n"
+        f"| ${size_usd:.2f} (cap ${get_trade_cap(pm_us.get_buying_power()):.0f})\n"
         f"slug: {slug}\n"
         f"Reply  VETO {pid}  or  VETO ALL  to cancel.\n"
         f"Otherwise fires automatically in {VETO_WINDOW_SEC}s."
@@ -508,9 +508,10 @@ def analyze_sport(sport_cfg: dict, dry: bool):
                     log_signal(signal, executed=False, error="no US slug (alert-only)")
                 else:
                     bankroll = pm_us.get_buying_power()
+                    cap      = get_trade_cap(bankroll)
                     size_usd = min(
                         bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
-                        MAX_TRADE_USD,
+                        cap,
                     )
                     _queue_live_trade(signal, size_usd, idx)
 
@@ -662,7 +663,7 @@ def main():
         f"🟢 Agent online — MULTI-SPORT\n"
         f"Sports: {_active_label()}\n"
         f"Mode: {'DRY RUN' if dry else '🔴 LIVE'}\n"
-        f"Buying power: ${buying_power:.2f} | Cap: ${MAX_TRADE_USD:.0f}/trade | Veto: {VETO_WINDOW_SEC}s\n"
+        f"Buying power: ${buying_power:.2f} | Cap: ${get_trade_cap(buying_power):.0f}/trade | Veto: {VETO_WINDOW_SEC}s\n"
         f"Poll: every {POLL_INTERVAL_MIN} min\n"
         f"Phase: {state.get('current_phase', 'GROUP_STAGE')}"
     )

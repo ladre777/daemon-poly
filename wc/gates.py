@@ -37,10 +37,23 @@ MAX_TRADES_PER_PHASE = 5
 MAX_WINNER_ENTRY_PCT = 25
 MAX_PROPS_TOTAL_PCT  = 15
 
-# Hard per-trade dollar ceiling for LIVE execution. This is the final money
-# boundary — enforced again inside executor.place_order regardless of any
-# upstream % sizing, so no signal can ever risk more than this on one trade.
-MAX_TRADE_USD        = 10.0
+# Scaling per-trade cap: 20% of live buying power, floor $10, ceiling $50.
+# At $43 bankroll → $10 cap (same as before).
+# At $100 → $20, at $200 → $40, at $300+ → $50 (hard ceiling).
+MAX_TRADE_CAP_PCT   = 20.0   # % of buying power
+MAX_TRADE_CAP_FLOOR = 10.0   # never below $10
+MAX_TRADE_CAP_CEIL  = 50.0   # never above $50
+
+
+def get_trade_cap(buying_power: float) -> float:
+    """Return the per-trade dollar cap scaled to live buying power."""
+    return max(MAX_TRADE_CAP_FLOOR,
+               min(buying_power * MAX_TRADE_CAP_PCT / 100, MAX_TRADE_CAP_CEIL))
+
+
+# Backward-compat alias used in display strings (Telegram/logs).
+# At runtime this is the floor; call get_trade_cap(bp) for the live cap.
+MAX_TRADE_USD = MAX_TRADE_CAP_FLOOR
 
 # Halt ALL new trading once realized losses reach this % of bankroll.
 KILL_SWITCH_DRAWDOWN_PCT = 5.0
