@@ -653,7 +653,7 @@ def main():
 
     # Probe the live execution venue so startup surfaces any auth/funding issue.
     buying_power = pm_us.get_buying_power()
-    print(f"Polymarket US buying power: ${buying_power:.2f} | Per-trade cap: ${MAX_TRADE_USD:.0f}")
+    print(f"Polymarket US buying power: ${buying_power:.2f} | Per-trade cap: ${get_trade_cap(buying_power):.2f}")
 
     threading.Thread(target=start_status_server, daemon=True).start()
     threading.Thread(target=telegram_listener,   daemon=True).start()
