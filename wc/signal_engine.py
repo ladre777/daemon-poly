@@ -1,18 +1,30 @@
-"""SIGNAL (maker) + CHECKER (Opus verifier), generalized to multi-sport.
+"""SIGNAL (maker) + CHECKER (Haiku verifier), generalized to multi-sport.
 
-The SYSTEM_PROMPT is sport-agnostic — the per-sport edge catalogue and data are
-injected per call. The CHECKER is unchanged in spirit: an independent, skeptical
-Opus pass that fails CLOSED (any error => REJECTED) so a broken verifier can
-never let a trade through.
+SIGNAL calls use a Kimi K2 client (OpenAI-compatible, OPENAI_API_KEY) via
+Moonshot's API — free-tier / very cheap, handles the high-frequency polling.
+CHECKER stays on Claude Haiku (ANTHROPIC_API_KEY) — cheapest Claude, only
+fires on rare TRADE signals, still fails CLOSED on any error.
 """
 
 import anthropic
+import openai
 import os
 import json
 
-client        = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-MODEL         = "claude-sonnet-4-6"
-CHECKER_MODEL = "claude-opus-4-6"
+# ── SIGNAL client: Kimi K2 via Moonshot (OpenAI-compatible) ─────────────────
+signal_client = openai.OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY", ""),
+    base_url=os.environ.get("OPENAI_BASE_URL", "https://api.moonshot.cn/v1"),
+)
+SIGNAL_MODEL = os.environ.get("SIGNAL_MODEL", "kimi-k2")
+
+# ── CHECKER client: Claude Haiku (Anthropic) — safety gate only ──────────────
+checker_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+CHECKER_MODEL  = "claude-haiku-4-5"
+
+# Legacy aliases so learning.py and any other importer still works
+client = signal_client
+MODEL  = SIGNAL_MODEL
 
 SYSTEM_PROMPT = """You are SIGNAL, the intelligence core of DÆMON-POLY — a multi-sport prediction-market trading agent on Polymarket.
 
@@ -142,29 +154,28 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
 """
     raw = ""
     try:
-        message = client.messages.create(
-            model=MODEL,
-            # sonnet-4-6 tends to prepend analysis prose before the JSON, so
-            # give it room — truncated JSON was causing ERROR signals. The
-            # balanced-scan parser then extracts the JSON from any prose.
+        response = signal_client.chat.completions.create(
+            model=SIGNAL_MODEL,
             max_tokens=3000,
-            system=SYSTEM_PROMPT,
-            messages=[{
-                "role":    "user",
-                "content": (
-                    f"Analyze the following {sport_cfg.get('label')} data and output a signal:\n\n"
-                    f"{data_summary}\n\n"
-                    "IMPORTANT: Your reply MUST end with the JSON signal object. "
-                    "Keep any analysis before it brief."
-                ),
-            }],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Analyze the following {sport_cfg.get('label')} data and output a signal:\n\n"
+                        f"{data_summary}\n\n"
+                        "IMPORTANT: Your reply MUST end with the JSON signal object. "
+                        "Keep any analysis before it brief."
+                    ),
+                },
+            ],
         )
-        raw    = message.content[0].text.strip()
+        raw    = response.choices[0].message.content.strip()
         signal = _parse_json_response(raw)
         signal.setdefault("sport", sport_cfg.get("label"))
         return signal
     except json.JSONDecodeError as e:
-        return {"signal_type": "ERROR", "reason": f"Claude returned non-JSON: {e}", "raw": raw}
+        return {"signal_type": "ERROR", "reason": f"Kimi returned non-JSON: {e}", "raw": raw}
     except Exception as e:
         return {"signal_type": "ERROR", "reason": str(e)}
 
@@ -192,10 +203,10 @@ Output ONLY valid JSON, no other text:
 
 
 def run_checker(signal: dict) -> dict:
-    """Independent Opus verification of a TRADE signal. Fails CLOSED to REJECTED
+    """Claude Haiku verification of a TRADE signal. Fails CLOSED to REJECTED
     on any error so a broken checker never lets a trade through unverified."""
     try:
-        message = client.messages.create(
+        message = checker_client.messages.create(
             model=CHECKER_MODEL,
             max_tokens=256,
             system=CHECKER_PROMPT,
@@ -234,13 +245,15 @@ Output JSON signal only.
 """
     raw = ""
     try:
-        message = client.messages.create(
-            model=MODEL,
+        response = signal_client.chat.completions.create(
+            model=SIGNAL_MODEL,
             max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
         )
-        signal = _parse_json_response(message.content[0].text.strip())
+        signal = _parse_json_response(response.choices[0].message.content.strip())
         signal.setdefault("sport", sport_cfg.get("label"))
         return signal
     except Exception as e:
