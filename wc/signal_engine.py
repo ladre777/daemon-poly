@@ -69,9 +69,11 @@ def _signal_chat_json(messages: list, max_tokens: int) -> dict:
             # Moonshot supports disabling thinking entirely — verified live.
             extra_body={"thinking": {"type": "disabled"}},
         )
+        text = _msg_text(response)
         try:
-            return _parse_json_response(_msg_text(response))
+            return _parse_json_response(text)
         except json.JSONDecodeError as e:
+            e.raw_model_text = text[:500]
             last_err = e
     raise last_err
 
@@ -227,7 +229,8 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
         signal.setdefault("sport", sport_cfg.get("label"))
         return signal
     except json.JSONDecodeError as e:
-        return {"signal_type": "ERROR", "reason": f"Kimi returned non-JSON: {e}", "raw": raw}
+        return {"signal_type": "ERROR", "reason": f"Kimi returned non-JSON: {e}",
+                "raw": getattr(e, "raw_model_text", "")}
     except Exception as e:
         return {"signal_type": "ERROR", "reason": str(e)}
 
