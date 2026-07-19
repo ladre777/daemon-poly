@@ -279,6 +279,57 @@ def run_checker(signal: dict) -> dict:
     return signal
 
 
+DISCOVERY_SYSTEM_PROMPT = """You are SIGNAL, scanning a broad catalog of Polymarket US sports markets for structural mispricing.
+
+Find the SINGLE best opportunity across all markets shown. Be strict — only output a TRADE if the edge is specific and quantifiable.
+
+What counts as a structural edge:
+- Outcomes sum to significantly more or less than 100% (arithmetic mispricing)
+- A market that clearly hasn't adjusted to a recent publicly known result
+- A futures market where a team/player's odds are obviously wrong vs objective data
+
+What is NOT an edge:
+- Narrative hunches or vibes
+- Markets where you have no specific information advantage
+- Small inefficiencies within normal spread/vig
+
+Output format — ONLY valid JSON, no markdown:
+- TRADE signal (same schema as normal) if you find a clear, structural edge
+- NO_SIGNAL if nothing qualifies
+
+Confidence: only HIGH or MEDIUM — never emit SPECULATIVE discoveries.
+Size cap: 5% of bankroll max for all discovery trades."""
+
+
+def run_discovery_signal(catalog: dict) -> dict:
+    """Scan the full discovered catalog for the single best cross-sport edge."""
+    from datetime import datetime, timezone
+    if not catalog:
+        return {"signal_type": "NO_SIGNAL", "sport": "Discovery", "reason": "Empty catalog"}
+    now_utc = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
+    prompt = (
+        f"CURRENT TIME: {now_utc}\n\n"
+        f"POLYMARKET US SPORTS CATALOG — all markets below are auto-executable (slug present):\n"
+        f"{json.dumps(_compact_futures(catalog), indent=1)[:10000]}\n\n"
+        "Scan every market. Output the single best structural edge as a TRADE, or NO_SIGNAL."
+    )
+    try:
+        signal = _signal_chat_json(
+            messages=[
+                {"role": "system", "content": DISCOVERY_SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            max_tokens=4000,
+        )
+        signal.setdefault("sport", "Discovery")
+        return signal
+    except json.JSONDecodeError as e:
+        return {"signal_type": "ERROR", "reason": f"Discovery non-JSON: {e}",
+                "raw": getattr(e, "raw_model_text", "")}
+    except Exception as e:
+        return {"signal_type": "ERROR", "reason": str(e)}
+
+
 def run_in_play_signal(sport_cfg: dict, match: dict, match_detail: dict, current_odds: dict) -> dict:
     from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")

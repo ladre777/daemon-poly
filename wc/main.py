@@ -12,7 +12,7 @@ from market_reader import (
     scan_stage_elimination_ladders,
     find_game_market_odds, search_markets,
 )
-from signal_engine import run_signal, run_in_play_signal, run_checker
+from signal_engine import run_signal, run_in_play_signal, run_checker, run_discovery_signal
 from telegram_ops import (
     send_trade_signal, send_monitor_signal, send_status, send_error, get_updates,
     CHAT_ID as AUTHORIZED_CHAT_ID,
@@ -532,6 +532,53 @@ def analyze_sport(sport_cfg: dict, dry: bool):
         send_error(msg)
 
 
+def run_discovery_scan(dry: bool):
+    """Broad Polymarket US market discovery — finds edges across all sports,
+    not just the 5 pre-configured ones. Runs after the per-sport loop."""
+    try:
+        catalog = pm_us.discover_us_markets()
+        if not catalog:
+            print("  [🔭 Discovery] No markets found")
+            return
+        n_markets = sum(len(v) for v in catalog.values())
+        print(f"  [🔭 Discovery] Scanning {len(catalog)} events / {n_markets} outcomes…")
+        signal = run_discovery_signal(catalog)
+        stype  = signal.get("signal_type", "NO_SIGNAL")
+        print(f"  [🔭 Discovery] Signal: {stype} | Edge: {signal.get('edge', 'N/A')}")
+        if stype == "NO_SIGNAL":
+            print(f"  [🔭 Discovery] {signal.get('reason', '')[:180]}")
+        elif stype == "TRADE":
+            idx = pm_us.catalog_index(catalog)
+            slug = (signal.get("market_slug") or "").strip()
+            executable = bool(slug) and slug in idx
+            if executable:
+                signal["_tick"] = idx[slug].get("tick", "0.001")
+            if _passes_gates_and_checker(signal):
+                send_trade_signal(signal)
+                record_signal_sent(signal)
+                if dry:
+                    tag = "" if executable else " (alert-only: no US slug)"
+                    print(f"  {dry_run_signal(signal)}{tag}")
+                elif not executable:
+                    send_status(
+                        f"ℹ️ Discovery signal is ALERT-ONLY — no auto-executable slug.\n"
+                        f"{signal.get('market','?')} / {signal.get('outcome','?')}"
+                    )
+                    log_signal(signal, executed=False, error="discovery: no US slug")
+                else:
+                    bankroll = pm_us.get_buying_power()
+                    cap      = get_trade_cap(bankroll)
+                    size_usd = min(
+                        bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
+                        cap,
+                    )
+                    _queue_live_trade(signal, size_usd, idx)
+        elif stype == "ERROR":
+            print(f"  [🔭 Discovery] ERROR: {signal.get('reason', '')[:180]}")
+    except Exception as e:
+        print(f"  [🔭 Discovery] scan error: {e}")
+
+
 def run_main_analysis(triggered_by: str = "SCHEDULED"):
     now = datetime.now(timezone.utc)
     print(f"\n[{now.strftime('%H:%M:%S UTC')}] Analysis [{triggered_by}]")
@@ -539,6 +586,7 @@ def run_main_analysis(triggered_by: str = "SCHEDULED"):
     dry   = state.get("dry_run", True)
     for sport_cfg in active_sports():
         analyze_sport(sport_cfg, dry)
+    run_discovery_scan(dry)
 
 
 # ── IN-PLAY EDGE CHECK (per sport) ──────────────────────────────────────────

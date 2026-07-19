@@ -207,3 +207,74 @@ def live_ask(market_slug: str) -> Optional[float]:
     except Exception as e:
         print(f"[PM-US] bbo error {market_slug}: {e}")
         return None
+
+
+# ── MARKET DISCOVERY ────────────────────────────────────────────────────────
+
+DISCOVERY_QUERIES = [
+    "NFL Super Bowl",
+    "NBA championship",
+    "Premier League winner",
+    "UEFA Champions League",
+    "UFC fight",
+    "Formula 1 championship",
+    "US Open tennis",
+    "boxing",
+    "NHL Stanley Cup",
+    "college football championship",
+    "NASCAR championship",
+    "golf major",
+]
+
+# Title keywords covered by configured sports — skip to avoid double-analysis.
+DISCOVERY_SKIP_KEYWORDS = [
+    "world cup", "mlb world series", "wnba champion",
+    "open championship", "the open", "wimbledon",
+]
+
+
+def discover_us_markets(max_per_query: int = 4) -> dict:
+    """Broad Polymarket US market discovery across all sports categories.
+    Returns {event_title: {outcome: {implied_pct, slug, tick}}} — same
+    format as get_sport_futures_us so it feeds the standard signal pipeline."""
+    client = get_pm_client()
+    if not client:
+        return {}
+    catalog: dict = {}
+    seen_slugs: set = set()
+    for query in DISCOVERY_QUERIES:
+        try:
+            resp = client.search.query({"query": query})
+        except Exception as e:
+            print(f"[DISCOVERY] '{query}' error: {e}")
+            continue
+        events = resp.get("events", []) if isinstance(resp, dict) else []
+        count = 0
+        for ev in events:
+            if count >= max_per_query:
+                break
+            title = ev.get("title") or ""
+            tl = title.lower()
+            if any(kw in tl for kw in DISCOVERY_SKIP_KEYWORDS):
+                continue
+            book: dict = {}
+            for m in ev.get("markets", []):
+                if m.get("closed") or m.get("active") is False:
+                    continue
+                pct  = _implied_pct(m)
+                slug = m.get("slug")
+                if pct is None or not slug or slug in seen_slugs:
+                    continue
+                seen_slugs.add(slug)
+                book[_outcome_label(m)] = {
+                    "implied_pct": pct,
+                    "slug":        slug,
+                    "tick":        str(m.get("orderPriceMinTickSize", "0.001")),
+                }
+            if book:
+                if title in catalog:
+                    catalog[title].update(book)
+                else:
+                    catalog[title] = book
+                count += 1
+    return catalog
