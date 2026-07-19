@@ -144,7 +144,10 @@ def handle_command(text: str):
                 except ValueError:
                     pass
             # Actually sell on Polymarket in LIVE mode (state-only before).
-            sell_note = ""
+            # FAIL-CLOSED: if any real sell fails, keep the position in state so
+            # exposure is never hidden — operator must retry or sell manually.
+            sell_note  = ""
+            sell_error = False
             if not load_state().get("dry_run", True):
                 slugs = {
                     p.get("market_slug") for p in load_state().get("active_positions", [])
@@ -155,11 +158,22 @@ def handle_command(text: str):
                     results = []
                     for slug in slugs:
                         r = close_position(slug)
-                        results.append(f"{slug}: {'sold ✅' if r.get('ok') else 'SELL FAILED — ' + str(r.get('error'))}")
+                        if r.get("ok"):
+                            results.append(f"{slug}: sold ✅")
+                        else:
+                            sell_error = True
+                            results.append(f"{slug}: SELL FAILED — {r.get('error')}")
                     sell_note = "\n" + "\n".join(results)
                 else:
                     sell_note = ("\n⚠️ No market slug stored for this position — "
                                  "state cleared, but sell the shares manually in the Polymarket app if you don't want to hold to resolution.")
+            if sell_error:
+                send_error(
+                    f"❌ CLOSE aborted: Polymarket sell failed — position kept in state "
+                    f"so exposure stays visible.{sell_note}\n"
+                    f"Retry CLOSE, or sell manually in the Polymarket app and then re-run CLOSE."
+                )
+                return
             total_loss = record_trade_closed(market, outcome, pnl_pct)
             extra = f" | PnL {pnl_pct:+.1f}%" if pnl_pct else ""
             send_status(f"✅ Position closed: {market} / {outcome}{extra}{sell_note}")
