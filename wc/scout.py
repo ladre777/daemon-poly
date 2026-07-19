@@ -156,9 +156,13 @@ def is_in_play_window(sport_cfg: dict, match: dict) -> bool:
             minutes = int(str(match.get("clock", "0:00")).split(":")[0])
         except Exception:
             return False
-        if period == 1 and 24 <= minutes <= 31:
+        # Hydration-break windows + buffer: market often lags during these pauses.
+        if period == 1 and 22 <= minutes <= 34:
             return True
-        if period == 2 and 69 <= minutes <= 76:
+        if period == 2 and 67 <= minutes <= 78:
+            return True
+        # Late drama window: red cards, penalties, desperate attack in final 10 min.
+        if period == 2 and minutes >= 83:
             return True
         return False
 

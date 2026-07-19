@@ -233,6 +233,35 @@ DISCOVERY_SKIP_KEYWORDS = [
 ]
 
 
+def find_us_game_market(home: str, away: str) -> Optional[dict]:
+    """Search Polymarket US for a live per-game market (e.g. 'Argentina vs Spain').
+    Returns {slug, title, implied_pct} or None if not found."""
+    client = get_pm_client()
+    if not client:
+        return None
+    queries = [f"{home} vs {away}", f"{away} vs {home}", f"{home} {away}"]
+    for q in queries:
+        try:
+            resp = client.search.query({"query": q})
+        except Exception:
+            continue
+        events = resp.get("events", []) if isinstance(resp, dict) else []
+        for ev in events:
+            title = ev.get("title", "")
+            tl = title.lower()
+            ht = str(home).lower().split()[-1] if home else ""
+            at = str(away).lower().split()[-1] if away else ""
+            if ht and at and (ht in tl and at in tl):
+                for m in ev.get("markets", []):
+                    if m.get("closed") or m.get("active") is False:
+                        continue
+                    slug = m.get("slug")
+                    pct  = _implied_pct(m)
+                    if slug and pct is not None:
+                        return {"slug": slug, "title": title, "implied_pct": pct}
+    return None
+
+
 def discover_us_markets(max_per_query: int = 4) -> dict:
     """Broad Polymarket US market discovery across all sports categories.
     Returns {event_title: {outcome: {implied_pct, slug, tick}}} — same

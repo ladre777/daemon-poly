@@ -592,6 +592,7 @@ def run_main_analysis(triggered_by: str = "SCHEDULED"):
 # ── IN-PLAY EDGE CHECK (per sport) ──────────────────────────────────────────
 
 def run_in_play_check():
+    dry = load_state().get("dry_run", True)
     for sport_cfg in active_sports():
         try:
             live = get_live_matches(sport_cfg)
@@ -606,19 +607,49 @@ def run_in_play_check():
                 match.get("home_team", ""), match.get("away_team", ""), sport_cfg["label"]
             )
             current_odds = game if game else {}
-            # Skip AI call entirely if Polymarket has no live market for this
-            # game — there's nothing to trade even with a perfect edge signal.
+            # Skip AI call if Polymarket has no live market for this game.
             if not current_odds:
                 continue
             print(f"  ⚡ IN-PLAY [{sport_cfg['label']}]: "
                   f"{match.get('home_team')} vs {match.get('away_team')} @ {match.get('clock')}")
-            detail       = get_match_detail(sport_cfg, match["id"])
-            signal       = run_in_play_signal(sport_cfg, match, detail, current_odds)
+            detail = get_match_detail(sport_cfg, match["id"])
+            signal = run_in_play_signal(sport_cfg, match, detail, current_odds)
 
             if signal.get("signal_type") == "TRADE":
+                # Try to resolve a US-executable per-game slug.
+                us_game = pm_us.find_us_game_market(
+                    match.get("home_team", ""), match.get("away_team", "")
+                )
+                slug       = (us_game.get("slug") or "") if us_game else ""
+                executable = bool(slug)
+                if executable:
+                    signal["market_slug"] = slug
+                    signal["entry_price_pct"] = us_game.get("implied_pct",
+                                                             signal.get("entry_price_pct", 0))
+                    signal["_tick"] = "0.001"
                 if _passes_gates_and_checker(signal):
                     send_trade_signal(signal)
                     record_signal_sent(signal)
+                    if dry:
+                        tag = "" if executable else " (alert-only: no US per-game slug)"
+                        print(f"  ⚡ {dry_run_signal(signal)}{tag}")
+                    elif not executable:
+                        send_status(
+                            f"ℹ️ In-play signal is ALERT-ONLY — no US per-game market.\n"
+                            f"{signal.get('market','?')} / {signal.get('outcome','?')}"
+                        )
+                        log_signal(signal, executed=False, error="in-play: no US slug")
+                    else:
+                        bankroll = pm_us.get_buying_power()
+                        cap      = get_trade_cap(bankroll)
+                        size_usd = min(
+                            bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
+                            cap,
+                        )
+                        _queue_live_trade(signal, size_usd, {slug: {
+                            "tick": "0.001", "outcome": signal.get("outcome"),
+                            "market": signal.get("market"), "implied_pct": signal.get("entry_price_pct"),
+                        }})
 
 
 # ── HEARTBEAT ───────────────────────────────────────────────────────────────
