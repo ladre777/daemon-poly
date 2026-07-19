@@ -102,6 +102,26 @@ def _parse_json_response(raw: str) -> dict:
     raise json.JSONDecodeError("no JSON object found in model reply", raw, 0)
 
 
+def _compact_futures(futures_odds: dict, top_n: int = 30) -> dict:
+    """Sort each market's outcomes by implied_pct DESC and keep top_n, so a
+    char-truncated prompt never hides the favorites (a 75-outcome golf catalog
+    once cut the tournament leader out of the model's view)."""
+    out = {}
+    for market, outcomes in futures_odds.items():
+        if isinstance(outcomes, dict) and outcomes and all(
+            isinstance(v, dict) for v in outcomes.values()
+        ):
+            ranked = sorted(
+                outcomes.items(),
+                key=lambda kv: kv[1].get("implied_pct", 0) or 0,
+                reverse=True,
+            )[:top_n]
+            out[market] = dict(ranked)
+        else:
+            out[market] = outcomes
+    return out
+
+
 def run_signal(sport_cfg: dict, matches: list, futures_odds: dict, extra_context: str = "") -> dict:
     data_summary = f"""
 SPORT: {sport_cfg.get('label')} {sport_cfg.get('emoji', '')}
@@ -115,7 +135,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
 {json.dumps(matches, indent=2)[:6000]}
 
 === POLYMARKET US FUTURES CATALOG (auto-executable — market -> outcome -> {{implied_pct, slug, tick}}) ===
-{json.dumps(futures_odds, indent=2)[:6000]}
+{json.dumps(_compact_futures(futures_odds), indent=1)[:9000]}
 
 === CONTEXT ===
 {extra_context}
