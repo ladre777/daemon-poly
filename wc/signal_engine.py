@@ -124,11 +124,19 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
     try:
         message = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            # sonnet-4-6 tends to prepend analysis prose before the JSON, so
+            # give it room — truncated JSON was causing ERROR signals. The
+            # balanced-scan parser then extracts the JSON from any prose.
+            max_tokens=3000,
             system=SYSTEM_PROMPT,
             messages=[{
                 "role":    "user",
-                "content": f"Analyze the following {sport_cfg.get('label')} data and output a signal:\n\n{data_summary}",
+                "content": (
+                    f"Analyze the following {sport_cfg.get('label')} data and output a signal:\n\n"
+                    f"{data_summary}\n\n"
+                    "IMPORTANT: Your reply MUST end with the JSON signal object. "
+                    "Keep any analysis before it brief."
+                ),
             }],
         )
         raw    = message.content[0].text.strip()
@@ -208,7 +216,7 @@ Output JSON signal only.
     try:
         message = client.messages.create(
             model=MODEL,
-            max_tokens=512,
+            max_tokens=1500,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
