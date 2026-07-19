@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,19 +46,39 @@ MAX_TRADE_USD        = 10.0
 KILL_SWITCH_DRAWDOWN_PCT = 5.0
 
 
+# Single process-wide lock guarding every load->mutate->save cycle. The
+# Telegram bot, veto worker, and learning background threads all write state;
+# unlocked read-modify-write loses updates (real-money positions/drawdown).
+STATE_LOCK = threading.RLock()
+
+
 def load_state() -> dict:
-    if Path(STATE_FILE).exists():
-        with open(STATE_FILE) as f:
-            saved = json.load(f)
-        merged = DEFAULT_STATE.copy()
-        merged.update(saved)
-        return merged
-    return DEFAULT_STATE.copy()
+    with STATE_LOCK:
+        if Path(STATE_FILE).exists():
+            with open(STATE_FILE) as f:
+                saved = json.load(f)
+            merged = DEFAULT_STATE.copy()
+            merged.update(saved)
+            return merged
+        return DEFAULT_STATE.copy()
 
 
 def save_state(state: dict):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    with STATE_LOCK:
+        # Atomic write: never leave a half-written state file if killed mid-dump.
+        tmp = f"{STATE_FILE}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, STATE_FILE)
+
+
+def update_state(mutator):
+    """Locked read-modify-write: mutator(state) edits in place; returns state."""
+    with STATE_LOCK:
+        state = load_state()
+        mutator(state)
+        save_state(state)
+        return state
 
 
 def check_gates(signal: dict) -> tuple:
@@ -120,87 +141,93 @@ def check_gates(signal: dict) -> tuple:
 
 
 def record_signal_sent(signal: dict):
-    state = load_state()
-    state["last_signal_time"] = datetime.now(timezone.utc).isoformat()
-    save_state(state)
+    with STATE_LOCK:
+        state = load_state()
+        state["last_signal_time"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
 
 
 def record_trade_opened(signal: dict):
-    state  = load_state()
-    phase  = state.get("current_phase", "GROUP_STAGE")
+    with STATE_LOCK:
+        state  = load_state()
+        phase  = state.get("current_phase", "GROUP_STAGE")
 
-    position = {
-        "market":       signal.get("market"),
-        "direction":    signal.get("direction"),
-        "outcome":      signal.get("outcome"),
-        "entry_price":  signal.get("entry_price_pct"),
-        "target_exit":  signal.get("target_exit_pct"),
-        "size_pct":     signal.get("size_pct_bankroll"),
-        "edge":         signal.get("edge"),
-        "opened_at":    datetime.now(timezone.utc).isoformat(),
-        "order_id":     signal.get("order_id", ""),
-    }
+        position = {
+            "market":       signal.get("market"),
+            "direction":    signal.get("direction"),
+            "outcome":      signal.get("outcome"),
+            "entry_price":  signal.get("entry_price_pct"),
+            "target_exit":  signal.get("target_exit_pct"),
+            "size_pct":     signal.get("size_pct_bankroll"),
+            "edge":         signal.get("edge"),
+            "opened_at":    datetime.now(timezone.utc).isoformat(),
+            "order_id":     signal.get("order_id", ""),
+        }
 
-    state["active_positions"].append(position)
-    state["phase_trade_counts"][phase] = state["phase_trade_counts"].get(phase, 0) + 1
-    state["total_bankroll_deployed_pct"] = (
-        state.get("total_bankroll_deployed_pct", 0) + float(signal.get("size_pct_bankroll", 0))
-    )
-    save_state(state)
+        state["active_positions"].append(position)
+        state["phase_trade_counts"][phase] = state["phase_trade_counts"].get(phase, 0) + 1
+        state["total_bankroll_deployed_pct"] = (
+            state.get("total_bankroll_deployed_pct", 0) + float(signal.get("size_pct_bankroll", 0))
+        )
+        save_state(state)
 
 
 def record_trade_closed(market: str, outcome: str, pnl_pct: float = 0.0) -> float:
     """Close a position. Optionally pass realized pnl_pct (negative = loss) to
     feed the drawdown kill switch. Returns total_realized_loss_pct after update."""
-    state      = load_state()
-    dry        = state.get("dry_run", True)
-    remaining  = []
-    closed_any = False
-    for pos in state["active_positions"]:
-        if pos.get("market") == market and pos.get("outcome") == outcome:
-            closed_any       = True
-            pos["closed_at"] = datetime.now(timezone.utc).isoformat()
-            pos["pnl_pct"]   = pnl_pct
-            state["closed_positions"].append(pos)
-            size = float(pos.get("size_pct", 0))
-            state["total_bankroll_deployed_pct"] = max(
-                0, state.get("total_bankroll_deployed_pct", 0) - size
+    with STATE_LOCK:
+        state      = load_state()
+        dry        = state.get("dry_run", True)
+        remaining  = []
+        closed_any = False
+        for pos in state["active_positions"]:
+            if pos.get("market") == market and pos.get("outcome") == outcome:
+                closed_any       = True
+                pos["closed_at"] = datetime.now(timezone.utc).isoformat()
+                pos["pnl_pct"]   = pnl_pct
+                state["closed_positions"].append(pos)
+                size = float(pos.get("size_pct", 0))
+                state["total_bankroll_deployed_pct"] = max(
+                    0, state.get("total_bankroll_deployed_pct", 0) - size
+                )
+            else:
+                remaining.append(pos)
+        state["active_positions"] = remaining
+
+        # Track realized losses for the kill switch. In LIVE mode only count a loss
+        # when a tracked position actually closed (guards against a typo'd CLOSE
+        # arming the switch). In DRY RUN positions aren't persisted, so trust the
+        # operator-supplied pnl so the switch can be exercised during testing.
+        if pnl_pct < 0 and (closed_any or dry):
+            state["total_realized_loss_pct"] = round(
+                state.get("total_realized_loss_pct", 0.0) + abs(pnl_pct), 2
             )
-        else:
-            remaining.append(pos)
-    state["active_positions"] = remaining
 
-    # Track realized losses for the kill switch. In LIVE mode only count a loss
-    # when a tracked position actually closed (guards against a typo'd CLOSE
-    # arming the switch). In DRY RUN positions aren't persisted, so trust the
-    # operator-supplied pnl so the switch can be exercised during testing.
-    if pnl_pct < 0 and (closed_any or dry):
-        state["total_realized_loss_pct"] = round(
-            state.get("total_realized_loss_pct", 0.0) + abs(pnl_pct), 2
-        )
-
-    save_state(state)
-    return state.get("total_realized_loss_pct", 0.0)
+        save_state(state)
+        return state.get("total_realized_loss_pct", 0.0)
 
 
 def reset_drawdown() -> None:
     """Operator recovery: clear realized-loss tally so the kill switch disarms."""
-    state = load_state()
-    state["total_realized_loss_pct"] = 0.0
-    save_state(state)
+    with STATE_LOCK:
+        state = load_state()
+        state["total_realized_loss_pct"] = 0.0
+        save_state(state)
 
 
 def update_phase(new_phase: str):
-    state = load_state()
-    state["current_phase"] = new_phase
-    save_state(state)
-    return state
+    with STATE_LOCK:
+        state = load_state()
+        state["current_phase"] = new_phase
+        save_state(state)
+        return state
 
 
 def set_dry_run(enabled: bool):
-    state = load_state()
-    state["dry_run"] = enabled
-    save_state(state)
+    with STATE_LOCK:
+        state = load_state()
+        state["dry_run"] = enabled
+        save_state(state)
 
 
 def get_state_summary() -> str:

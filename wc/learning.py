@@ -20,7 +20,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from gates import STATE_FILE, load_state, save_state
+from gates import STATE_FILE, STATE_LOCK, load_state, save_state
 
 # Lessons persist next to the state file so they live on the Railway volume.
 LESSONS_FILE = os.environ.get(
@@ -113,18 +113,21 @@ def record_edge_result(edge: str, sport: str, pnl_pct: float):
     try:
         if not edge:
             edge = "UNKNOWN"
-        state = load_state()
-        stats = state.setdefault("edge_stats", {})
-        s = stats.setdefault(edge, {"wins": 0, "losses": 0, "total_pnl_pct": 0.0, "by_sport": {}})
-        if pnl_pct >= 0:
-            s["wins"] += 1
-        else:
-            s["losses"] += 1
-        s["total_pnl_pct"] = round(s.get("total_pnl_pct", 0.0) + pnl_pct, 2)
-        if sport:
-            sp = s["by_sport"].setdefault(sport, {"wins": 0, "losses": 0})
-            sp["wins" if pnl_pct >= 0 else "losses"] += 1
-        save_state(state)
+        # Runs on a background thread — hold the state lock across the whole
+        # read-modify-write so we never clobber concurrent position updates.
+        with STATE_LOCK:
+            state = load_state()
+            stats = state.setdefault("edge_stats", {})
+            s = stats.setdefault(edge, {"wins": 0, "losses": 0, "total_pnl_pct": 0.0, "by_sport": {}})
+            if pnl_pct >= 0:
+                s["wins"] += 1
+            else:
+                s["losses"] += 1
+            s["total_pnl_pct"] = round(s.get("total_pnl_pct", 0.0) + pnl_pct, 2)
+            if sport:
+                sp = s["by_sport"].setdefault(sport, {"wins": 0, "losses": 0})
+                sp["wins" if pnl_pct >= 0 else "losses"] += 1
+            save_state(state)
     except Exception as e:
         print(f"[LEARN] edge stat update failed (non-fatal): {e}")
 
