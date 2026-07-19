@@ -70,12 +70,36 @@ No signal:
 
 
 def _parse_json_response(raw: str) -> dict:
+    """Extract the JSON object from a model reply. Robust to code fences and
+    to models that prepend analysis prose before the JSON (sonnet-4-6 does
+    this even when told to output only JSON)."""
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    return json.loads(raw)
+        raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Fall back: scan for the first balanced {...} block that parses.
+    start = raw.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(raw)):
+            ch = raw[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+        start = raw.find("{", start + 1)
+    raise json.JSONDecodeError("no JSON object found in model reply", raw, 0)
 
 
 def run_signal(sport_cfg: dict, matches: list, futures_odds: dict, extra_context: str = "") -> dict:
