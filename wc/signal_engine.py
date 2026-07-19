@@ -11,7 +11,7 @@ import os
 import json
 
 client        = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-MODEL         = "claude-sonnet-4-5"
+MODEL         = "claude-sonnet-4-6"
 CHECKER_MODEL = "claude-opus-4-6"
 
 SYSTEM_PROMPT = """You are SIGNAL, the intelligence core of DÆMON-POLY — a multi-sport prediction-market trading agent on Polymarket.
