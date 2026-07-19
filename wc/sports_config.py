@@ -77,6 +77,33 @@ SPORT_CONFIGS = {
             "EDGE PROP — MVP / Rookie-of-the-Year markets mispriced vs season trajectory."
         ),
     },
+    "golf": {
+        "key":          "golf",
+        "label":        "Golf — The Open",
+        "emoji":        "⛳",
+        "active":       True,
+        "espn_paths":   ["golf/pga"],
+        # HARD event match — ESPN's golf scoreboard lists multiple concurrent
+        # tournaments; only trade the one that matches (memory lesson: never
+        # trade the wrong tournament).
+        "event_match":  ["The Open"],
+        "us_search":     ["open championship"],
+        "us_title_match": ["Open Championship Winner"],
+        "futures": {
+            "The Open Winner": "2026-the-open-championship-winner",
+        },
+        "in_play_type": None,  # no separate in-play loop; 3-min main cycle IS live for golf
+        "settle_note":  "Winner market settles on the official tournament champion (playoff included).",
+        "edges": (
+            "EDGE LEADERBOARD — Winner market lags the live leaderboard: a player holds/extends a "
+            "multi-shot lead late (final round, back nine) but the market hasn't repriced. "
+            "Weight holes-remaining and chaser quality.\n"
+            "EDGE COLLAPSE — A leader's price stays elevated after consecutive dropped shots while "
+            "an in-form chaser within 2 is still cheap.\n"
+            "EDGE WEATHER/WAVE — Late-wave players face materially worse conditions than the market "
+            "has priced into their winner odds."
+        ),
+    },
     "wimbledon": {
         "key":          "wimbledon",
         "label":        "Wimbledon",

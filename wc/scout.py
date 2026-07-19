@@ -63,13 +63,51 @@ def _parse_event(event: dict, sport_key: str) -> dict:
     }
 
 
+def _parse_golf_event(event: dict, sport_key: str) -> dict:
+    """Golf is a leaderboard sport — return the event with a top-15 leaderboard
+    instead of home/away teams."""
+    status = event.get("status", {})
+    comp   = event.get("competitions", [{}])[0]
+    board  = []
+    for c in sorted(comp.get("competitors", []), key=lambda x: x.get("order", 999))[:15]:
+        ath = c.get("athlete", {}) or {}
+        ls  = c.get("linescores", []) or []
+        board.append({
+            "pos":    c.get("order"),
+            "player": ath.get("displayName", "?"),
+            "score":  c.get("score"),
+            "rounds": [l.get("value") for l in ls if l.get("value") is not None],
+        })
+    return {
+        "sport":         sport_key,
+        "id":            event.get("id"),
+        "name":          event.get("name") or event.get("shortName", ""),
+        "date":          event.get("date"),
+        "status_type":   status.get("type", {}).get("name", "unknown"),
+        "status_detail": status.get("type", {}).get("detail", ""),
+        "period":        status.get("period", 0),   # round number for golf
+        "leaderboard":   board,
+    }
+
+
 def get_all_matches(sport_cfg: dict) -> list:
     """Every scheduled/live event for a sport across all its ESPN paths."""
     out = []
+    is_golf     = "golf" in "".join(sport_cfg.get("espn_paths", []))
+    event_match = sport_cfg.get("event_match")
     for path in sport_cfg.get("espn_paths", []):
         try:
             for ev in _fetch_scoreboard(path):
-                out.append(_parse_event(ev, sport_cfg["key"]))
+                # HARD event filter — some feeds (golf) list concurrent
+                # tournaments; only keep events the config explicitly matches.
+                if event_match:
+                    name = ev.get("name", "") or ""
+                    if not any(m.lower() in name.lower() for m in event_match):
+                        continue
+                if is_golf:
+                    out.append(_parse_golf_event(ev, sport_cfg["key"]))
+                else:
+                    out.append(_parse_event(ev, sport_cfg["key"]))
         except Exception as e:
             print(f"[scout] {sport_cfg.get('key')} {path} error: {e}")
     return out
