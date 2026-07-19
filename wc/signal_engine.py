@@ -12,9 +12,9 @@ import os
 import json
 
 # ── SIGNAL client: Kimi K2 via Moonshot (OpenAI-compatible) ─────────────────
-SIGNAL_MODEL = os.environ.get("SIGNAL_MODEL", "kimi-k2")
+SIGNAL_MODEL = os.environ.get("SIGNAL_MODEL", "kimi-k2.6")
 _OPENAI_KEY  = os.environ.get("OPENAI_API_KEY", "")
-_OPENAI_URL  = os.environ.get("OPENAI_BASE_URL", "https://api.moonshot.cn/v1")
+_OPENAI_URL  = os.environ.get("OPENAI_BASE_URL", "https://api.moonshot.ai/v1")
 # Lazy: only create the client if a key is present so a missing key causes a
 # clear signal ERROR rather than a hard crash at import time.
 signal_client = (
