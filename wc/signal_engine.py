@@ -64,6 +64,10 @@ def _signal_chat_json(messages: list, max_tokens: int) -> dict:
             max_tokens=budget,
             response_format={"type": "json_object"},
             messages=messages,
+            # Kimi thinking models can burn the whole token budget on
+            # reasoning and return empty content (finish_reason=length).
+            # Moonshot supports disabling thinking entirely — verified live.
+            extra_body={"thinking": {"type": "disabled"}},
         )
         try:
             return _parse_json_response(_msg_text(response))

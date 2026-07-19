@@ -54,6 +54,7 @@ def log_loss_and_learn(position: dict, pnl_pct: float):
         resp = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL, max_tokens=1024,
             response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
             messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.choices[0].message.content.strip()
