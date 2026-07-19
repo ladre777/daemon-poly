@@ -110,6 +110,16 @@ def check_gates(signal: dict) -> tuple:
     if active >= MAX_CONCURRENT:
         violations.append(f"PF-03: Already {active} active positions (max {MAX_CONCURRENT})")
 
+    # PF-04: Never hold duplicate positions in the same market
+    sig_market = (signal.get("market") or "").strip().lower()
+    for p in state.get("active_positions", []):
+        if (p.get("market") or "").strip().lower() == sig_market:
+            violations.append(
+                f"PF-04: Already holding a position in '{signal.get('market')}' "
+                f"({p.get('outcome')} {p.get('direction')}) — no doubling up"
+            )
+            break
+
     # PF-08: Winner market price ceiling in QF+
     if phase in ("QF", "SF", "FINAL") and "winner" in signal.get("market", "").lower():
         if entry_price > MAX_WINNER_ENTRY_PCT:
