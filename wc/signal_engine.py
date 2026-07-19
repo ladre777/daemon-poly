@@ -162,7 +162,12 @@ def _compact_futures(futures_odds: dict, top_n: int = 30) -> dict:
 
 
 def run_signal(sport_cfg: dict, matches: list, futures_odds: dict, extra_context: str = "") -> dict:
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
     data_summary = f"""
+CURRENT TIME: {now_utc} — the ESPN and Polymarket data below was fetched seconds ago and is LIVE.
+Trust it over your training knowledge. Judge staleness against CURRENT TIME, not your memory.
+
 SPORT: {sport_cfg.get('label')} {sport_cfg.get('emoji', '')}
 
 EDGES FOR THIS SPORT:
@@ -253,7 +258,12 @@ def run_checker(signal: dict) -> dict:
 
 
 def run_in_play_signal(sport_cfg: dict, match: dict, match_detail: dict, current_odds: dict) -> dict:
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
     prompt = f"""IN-PLAY ANALYSIS — {sport_cfg.get('label')} {sport_cfg.get('emoji', '')}
+
+CURRENT TIME: {now_utc} — the match data and odds below were fetched seconds ago and are LIVE.
+Trust them over your training knowledge.
 
 Match: {match.get('home_team')} {match.get('home_score')} - {match.get('away_score')} {match.get('away_team')}
 Clock: {match.get('clock')} | Period: {match.get('period')} | {match.get('status_detail')}

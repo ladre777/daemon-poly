@@ -110,6 +110,10 @@ SPORT_CONFIGS = {
         "emoji":        "🎾",
         "active":       True,
         "espn_paths":   ["tennis/atp", "tennis/wta"],
+        # HARD event match — ESPN tennis feeds list whatever tour events are
+        # running; without this the bot analyzes unrelated tournaments
+        # (e.g. Gstaad/Estoril) as "Wimbledon" once the slam ends.
+        "event_match":  ["Wimbledon"],
         "us_search":     ["wimbledon"],
         "us_title_match": ["Wimbledon Winner"],
         "futures": {
