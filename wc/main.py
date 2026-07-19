@@ -589,6 +589,16 @@ def main():
         raise SystemExit(1)
     print(f"Persistence OK -> {STATE_FILE}")
 
+    # Honour DRY_RUN env var set on Railway — overrides whatever is in state so
+    # the operator can flip live/dry without needing a Telegram command.
+    env_dry = os.environ.get("DRY_RUN", "").strip().lower()
+    if env_dry in ("false", "0", "no", "off"):
+        set_dry_run(False)
+        print("DRY_RUN env=false → LIVE mode")
+    elif env_dry in ("true", "1", "yes", "on"):
+        set_dry_run(True)
+        print("DRY_RUN env=true → DRY RUN mode")
+
     # Probe the live execution venue so startup surfaces any auth/funding issue.
     buying_power = pm_us.get_buying_power()
     print(f"Polymarket US buying power: ${buying_power:.2f} | Per-trade cap: ${MAX_TRADE_USD:.0f}")
