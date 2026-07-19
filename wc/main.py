@@ -598,6 +598,8 @@ def main():
     elif env_dry in ("true", "1", "yes", "on"):
         set_dry_run(True)
         print("DRY_RUN env=true → DRY RUN mode")
+    # Re-read after potential env override so banner + Telegram reflect true mode.
+    dry = load_state().get("dry_run", True)
 
     # Probe the live execution venue so startup surfaces any auth/funding issue.
     buying_power = pm_us.get_buying_power()
