@@ -53,6 +53,25 @@ def _msg_text(response) -> str:
     return text
 
 
+def _signal_chat_json(messages: list, max_tokens: int) -> dict:
+    """Call the signal model and parse JSON, retrying once with a doubled
+    token budget if the model exhausted it on reasoning and returned no JSON."""
+    client = _get_signal_client()
+    last_err = None
+    for attempt, budget in enumerate((max_tokens, max_tokens * 2)):
+        response = client.chat.completions.create(
+            model=SIGNAL_MODEL,
+            max_tokens=budget,
+            response_format={"type": "json_object"},
+            messages=messages,
+        )
+        try:
+            return _parse_json_response(_msg_text(response))
+        except json.JSONDecodeError as e:
+            last_err = e
+    raise last_err
+
+
 SYSTEM_PROMPT = """You are SIGNAL, the intelligence core of DÆMON-POLY — a multi-sport prediction-market trading agent on Polymarket.
 
 For the single sport and the data provided, output ONE of:
@@ -186,10 +205,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
 """
     raw = ""
     try:
-        response = _get_signal_client().chat.completions.create(
-            model=SIGNAL_MODEL,
-            max_tokens=8000,
-            response_format={"type": "json_object"},
+        signal = _signal_chat_json(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -202,9 +218,8 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
                     ),
                 },
             ],
+            max_tokens=8000,
         )
-        raw    = _msg_text(response)
-        signal = _parse_json_response(raw)
         signal.setdefault("sport", sport_cfg.get("label"))
         return signal
     except json.JSONDecodeError as e:
@@ -283,16 +298,13 @@ Output JSON signal only.
 """
     raw = ""
     try:
-        response = _get_signal_client().chat.completions.create(
-            model=SIGNAL_MODEL,
-            max_tokens=4000,
-            response_format={"type": "json_object"},
+        signal = _signal_chat_json(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
+            max_tokens=4000,
         )
-        signal = _parse_json_response(_msg_text(response))
         signal.setdefault("sport", sport_cfg.get("label"))
         return signal
     except Exception as e:
