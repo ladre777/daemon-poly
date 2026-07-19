@@ -24,6 +24,7 @@ from gates import (
     KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, MAX_TRADE_USD,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log
+from learning import log_loss_and_learn, record_edge_result, learning_context
 
 POLL_INTERVAL_MIN    = 3
 IN_PLAY_INTERVAL_SEC = 45
@@ -145,6 +146,28 @@ def handle_command(text: str):
             total_loss = record_trade_closed(market, outcome, pnl_pct)
             extra = f" | PnL {pnl_pct:+.1f}%" if pnl_pct else ""
             send_status(f"✅ Position closed: {market} / {outcome}{extra}")
+
+            # SELF-IMPROVEMENT: update per-edge stats and, on a loss, have
+            # Claude extract one preventive RULE. Runs in a background thread
+            # so a slow/failed API call never blocks the Telegram listener.
+            closed_pos = None
+            for p in reversed(load_state().get("closed_positions", [])):
+                if p.get("market") == market and p.get("outcome") == outcome:
+                    closed_pos = p
+                    break
+            if closed_pos is None:
+                closed_pos = {"market": market, "outcome": outcome}
+            record_edge_result(closed_pos.get("edge", ""), closed_pos.get("sport", ""), pnl_pct)
+            if pnl_pct < 0:
+                def _learn(pos=closed_pos, pnl=pnl_pct):
+                    lesson = log_loss_and_learn(pos, pnl)
+                    if lesson and lesson.get("new_rule"):
+                        send_status(
+                            f"📚 LESSON LEARNED\n{lesson.get('root_cause', '')}\n"
+                            f"{lesson['new_rule']}\n"
+                            f"(now enforced in every future signal)"
+                        )
+                threading.Thread(target=_learn, daemon=True).start()
             if total_loss >= KILL_SWITCH_DRAWDOWN_PCT:
                 send_error(
                     f"🛑 KILL SWITCH ARMED — realized drawdown {total_loss:.1f}% ≥ "
@@ -412,6 +435,12 @@ def analyze_sport(sport_cfg: dict, dry: bool):
         valid_slugs  = set(idx.keys())
 
         context = f"Games listed: {len(matches)} | {get_state_summary()}"
+
+        # SELF-IMPROVEMENT: inject learned rules + real per-edge performance
+        # so SIGNAL weights edges by actual results, not just theory.
+        learn_ctx = learning_context()
+        if learn_ctx:
+            context += f"\n\n{learn_ctx}"
 
         # World Cup keeps its Edge LADDER scan; alert-only context (no US slug).
         if sport_cfg["key"] == "world_cup":
