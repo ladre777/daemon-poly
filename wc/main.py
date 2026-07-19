@@ -267,6 +267,11 @@ def handle_command(text: str):
 
     else:
         print(f"[TG] Unrecognised command: {text!r}")
+        send_status(
+            f"🤖 Unknown command: '{text[:40]}'\n"
+            "Try: STATUS · SCAN · SPORTS · LOG · VETO · HELP\n"
+            "(Old-bot commands like CYCLE/AUTOPILOT no longer exist.)"
+        )
 
 
 def telegram_listener():
