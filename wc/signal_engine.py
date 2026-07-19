@@ -184,6 +184,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
         response = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL,
             max_tokens=8000,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -275,6 +276,7 @@ Output JSON signal only.
         response = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL,
             max_tokens=4000,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
