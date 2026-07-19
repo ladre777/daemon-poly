@@ -40,7 +40,7 @@ def log_loss_and_learn(position: dict, pnl_pct: float):
     if pnl_pct >= 0:
         return None
     try:
-        from signal_engine import signal_client, SIGNAL_MODEL
+        from signal_engine import _get_signal_client, SIGNAL_MODEL
         prompt = (
             "DÆMON-POLY closed a LOSING prediction-market position.\n"
             f"PnL: {pnl_pct}%\n"
@@ -51,7 +51,7 @@ def log_loss_and_learn(position: dict, pnl_pct: float):
             "not a platitude.\n"
             'Output ONLY JSON: {"root_cause": "<sentence>", "new_rule": "RULE: <rule>"}'
         )
-        resp = signal_client.chat.completions.create(
+        resp = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL, max_tokens=256,
             messages=[{"role": "user", "content": prompt}],
         )

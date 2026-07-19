@@ -12,11 +12,15 @@ import os
 import json
 
 # ── SIGNAL client: Kimi K2 via Moonshot (OpenAI-compatible) ─────────────────
-signal_client = openai.OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", ""),
-    base_url=os.environ.get("OPENAI_BASE_URL", "https://api.moonshot.cn/v1"),
-)
 SIGNAL_MODEL = os.environ.get("SIGNAL_MODEL", "kimi-k2")
+_OPENAI_KEY  = os.environ.get("OPENAI_API_KEY", "")
+_OPENAI_URL  = os.environ.get("OPENAI_BASE_URL", "https://api.moonshot.cn/v1")
+# Lazy: only create the client if a key is present so a missing key causes a
+# clear signal ERROR rather than a hard crash at import time.
+signal_client = (
+    openai.OpenAI(api_key=_OPENAI_KEY, base_url=_OPENAI_URL)
+    if _OPENAI_KEY else None
+)
 
 # ── CHECKER client: Claude Haiku (Anthropic) — safety gate only ──────────────
 checker_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -25,6 +29,16 @@ CHECKER_MODEL  = "claude-haiku-4-5"
 # Legacy aliases so learning.py and any other importer still works
 client = signal_client
 MODEL  = SIGNAL_MODEL
+
+
+def _get_signal_client():
+    """Return signal_client, or raise a clear error if OPENAI_API_KEY not set."""
+    if signal_client is None:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set — add your Moonshot/Kimi key to Railway "
+            "as OPENAI_API_KEY to enable signal generation."
+        )
+    return signal_client
 
 SYSTEM_PROMPT = """You are SIGNAL, the intelligence core of DÆMON-POLY — a multi-sport prediction-market trading agent on Polymarket.
 
@@ -154,7 +168,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
 """
     raw = ""
     try:
-        response = signal_client.chat.completions.create(
+        response = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL,
             max_tokens=3000,
             messages=[
@@ -245,7 +259,7 @@ Output JSON signal only.
 """
     raw = ""
     try:
-        response = signal_client.chat.completions.create(
+        response = _get_signal_client().chat.completions.create(
             model=SIGNAL_MODEL,
             max_tokens=1500,
             messages=[
