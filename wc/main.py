@@ -554,13 +554,17 @@ def run_in_play_check():
         for match in live:
             if not is_in_play_window(sport_cfg, match):
                 continue
-            print(f"  ⚡ IN-PLAY [{sport_cfg['label']}]: "
-                  f"{match.get('home_team')} vs {match.get('away_team')} @ {match.get('clock')}")
-            detail       = get_match_detail(sport_cfg, match["id"])
             game         = find_game_market_odds(
                 match.get("home_team", ""), match.get("away_team", ""), sport_cfg["label"]
             )
             current_odds = game if game else {}
+            # Skip AI call entirely if Polymarket has no live market for this
+            # game — there's nothing to trade even with a perfect edge signal.
+            if not current_odds:
+                continue
+            print(f"  ⚡ IN-PLAY [{sport_cfg['label']}]: "
+                  f"{match.get('home_team')} vs {match.get('away_team')} @ {match.get('clock')}")
+            detail       = get_match_detail(sport_cfg, match["id"])
             signal       = run_in_play_signal(sport_cfg, match, detail, current_odds)
 
             if signal.get("signal_type") == "TRADE":
