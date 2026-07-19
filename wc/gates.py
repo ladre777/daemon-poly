@@ -164,6 +164,7 @@ def record_trade_opened(signal: dict):
 
         position = {
             "market":       signal.get("market"),
+            "market_slug":  signal.get("market_slug", ""),
             "direction":    signal.get("direction"),
             "outcome":      signal.get("outcome"),
             "entry_price":  signal.get("entry_price_pct"),
@@ -180,6 +181,35 @@ def record_trade_opened(signal: dict):
             state.get("total_bankroll_deployed_pct", 0) + float(signal.get("size_pct_bankroll", 0))
         )
         save_state(state)
+
+
+def dedupe_active_positions() -> int:
+    """Collapse duplicate active positions (same market+outcome+direction) into
+    one, keeping the earliest. Returns how many duplicates were removed. Cleans
+    up state left behind before the PF-04 duplicate gate existed."""
+    with STATE_LOCK:
+        state   = load_state()
+        seen    = set()
+        kept    = []
+        removed = 0
+        for p in state.get("active_positions", []):
+            key = (
+                (p.get("market") or "").strip().lower(),
+                (p.get("outcome") or "").strip().lower(),
+                (p.get("direction") or "").strip().upper(),
+            )
+            if key in seen:
+                removed += 1
+                state["total_bankroll_deployed_pct"] = max(
+                    0, state.get("total_bankroll_deployed_pct", 0) - float(p.get("size_pct", 0) or 0)
+                )
+            else:
+                seen.add(key)
+                kept.append(p)
+        if removed:
+            state["active_positions"] = kept
+            save_state(state)
+        return removed
 
 
 def record_trade_closed(market: str, outcome: str, pnl_pct: float = 0.0) -> float:

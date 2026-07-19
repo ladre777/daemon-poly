@@ -19,11 +19,11 @@ from telegram_ops import (
 )
 from gates import (
     check_gates, record_signal_sent, record_trade_opened,
-    record_trade_closed, update_phase, set_dry_run,
+    record_trade_closed, update_phase, set_dry_run, dedupe_active_positions,
     get_state_summary, load_state, save_state, STATE_FILE,
     KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, MAX_TRADE_USD,
 )
-from executor import log_signal, dry_run_signal, place_order, read_trade_log
+from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
 
 POLL_INTERVAL_MIN    = 3
@@ -143,9 +143,26 @@ def handle_command(text: str):
                     pnl_pct = float(parts[3].replace("%", "").replace("+", ""))
                 except ValueError:
                     pass
+            # Actually sell on Polymarket in LIVE mode (state-only before).
+            sell_note = ""
+            if not load_state().get("dry_run", True):
+                slugs = {
+                    p.get("market_slug") for p in load_state().get("active_positions", [])
+                    if p.get("market") == market and p.get("outcome") == outcome
+                    and p.get("market_slug")
+                }
+                if slugs:
+                    results = []
+                    for slug in slugs:
+                        r = close_position(slug)
+                        results.append(f"{slug}: {'sold ✅' if r.get('ok') else 'SELL FAILED — ' + str(r.get('error'))}")
+                    sell_note = "\n" + "\n".join(results)
+                else:
+                    sell_note = ("\n⚠️ No market slug stored for this position — "
+                                 "state cleared, but sell the shares manually in the Polymarket app if you don't want to hold to resolution.")
             total_loss = record_trade_closed(market, outcome, pnl_pct)
             extra = f" | PnL {pnl_pct:+.1f}%" if pnl_pct else ""
-            send_status(f"✅ Position closed: {market} / {outcome}{extra}")
+            send_status(f"✅ Position closed: {market} / {outcome}{extra}{sell_note}")
 
             # SELF-IMPROVEMENT: update per-edge stats and, on a loss, have
             # Claude extract one preventive RULE. Runs in a background thread
@@ -593,6 +610,19 @@ def main():
             pass
         raise SystemExit(1)
     print(f"Persistence OK -> {STATE_FILE}")
+
+    # Clean up any duplicate positions left from before the PF-04 gate existed.
+    removed = dedupe_active_positions()
+    if removed:
+        print(f"Startup dedupe: removed {removed} duplicate position(s)")
+        try:
+            send_status(
+                f"🧹 Cleaned up {removed} duplicate position(s) from state — "
+                f"slots freed. (Note: any real shares from those duplicate buys "
+                f"remain in your Polymarket account until sold or resolved.)"
+            )
+        except Exception:
+            pass
 
     # Honour DRY_RUN env var set on Railway — overrides whatever is in state so
     # the operator can flip live/dry without needing a Telegram command.
