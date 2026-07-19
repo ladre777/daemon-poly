@@ -110,13 +110,18 @@ def check_gates(signal: dict) -> tuple:
     if active >= MAX_CONCURRENT:
         violations.append(f"PF-03: Already {active} active positions (max {MAX_CONCURRENT})")
 
-    # PF-04: Never hold duplicate positions in the same market
-    sig_market = (signal.get("market") or "").strip().lower()
+    # PF-04: Never hold duplicate positions in the same market+outcome.
+    # Different outcomes in one market are allowed (e.g. multiple golfers in a
+    # tournament-winner market is a valid hedge) — only stacking the identical
+    # bet is blocked.
+    sig_market  = (signal.get("market") or "").strip().lower()
+    sig_outcome = (signal.get("outcome") or "").strip().lower()
     for p in state.get("active_positions", []):
-        if (p.get("market") or "").strip().lower() == sig_market:
+        if ((p.get("market") or "").strip().lower() == sig_market
+                and (p.get("outcome") or "").strip().lower() == sig_outcome):
             violations.append(
-                f"PF-04: Already holding a position in '{signal.get('market')}' "
-                f"({p.get('outcome')} {p.get('direction')}) — no doubling up"
+                f"PF-04: Already holding {p.get('outcome')} {p.get('direction')} "
+                f"in '{signal.get('market')}' — no doubling up on the same outcome"
             )
             break
 
