@@ -7,7 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import pm_us
 from sports_config import active_sports, SPORT_CONFIGS
-from scout import get_all_matches, get_live_matches, get_match_detail, is_in_play_window
+from scout import get_all_matches, get_live_matches, get_match_detail, is_in_play_window, get_standings
 from market_reader import (
     scan_stage_elimination_ladders,
     find_game_market_odds, search_markets,
@@ -22,7 +22,7 @@ from gates import (
     record_trade_closed, update_phase, set_dry_run, dedupe_active_positions,
     get_state_summary, load_state, save_state, STATE_FILE,
     KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, reset_positions,
-    MAX_TRADE_USD, get_trade_cap,
+    MAX_TRADE_USD, get_trade_cap, auto_close_resolved_positions,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
@@ -46,6 +46,14 @@ _pending_seq    = 0
 # and the kill-switch alert are NEVER throttled — only routine repeats are deduped.
 _alert_history     = {}
 ALERT_COOLDOWN_SEC = 1800
+
+# Track how many consecutive main-loop cycles each sport's catalog came back empty.
+# Used by auto_close_resolved_positions to distinguish transient API failures from a
+# genuinely ended season/tournament.  Resets to 0 whenever a non-empty catalog is
+# fetched; a restart also resets all counters (intentional — a fresh start should
+# re-verify before acting).
+_empty_catalog_streak: dict = {}
+EMPTY_CATALOG_THRESHOLD = 3   # consecutive empty fetches required before force-close
 
 
 def _should_send(key: str) -> bool:
@@ -558,7 +566,47 @@ def analyze_sport(sport_cfg: dict, dry: bool):
         idx          = pm_us.catalog_index(futures_odds)
         valid_slugs  = set(idx.keys())
 
+        # Auto-close positions whose market resolved (slug gone from live catalog).
+        # Positions are matched by sport key + outcome-level market_slug (the slug
+        # stored at trade-open time, sourced from catalog_index).
+        #
+        # Empty-catalog safety: a single empty catalog fetch is ambiguous (transient
+        # API failure vs. tournament over). We track consecutive empty fetches and
+        # only force-close after EMPTY_CATALOG_THRESHOLD consecutive misses.
+        sport_key = sport_cfg["key"]
+        if valid_slugs:
+            _empty_catalog_streak[sport_key] = 0
+        else:
+            _empty_catalog_streak[sport_key] = _empty_catalog_streak.get(sport_key, 0) + 1
+            streak = _empty_catalog_streak[sport_key]
+            if streak < EMPTY_CATALOG_THRESHOLD:
+                print(f"  [{label}] Catalog empty (streak {streak}/{EMPTY_CATALOG_THRESHOLD}) "
+                      f"— skipping stale-position check until threshold reached")
+
+        streak = _empty_catalog_streak.get(sport_key, 0)
+        resolved_pos = auto_close_resolved_positions(
+            sport_key, valid_slugs, streak, EMPTY_CATALOG_THRESHOLD
+        )
+        for pos in resolved_pos:
+            slug_gone = pos.get("market_slug", "")
+            size_pct  = pos.get("size_pct", 0)
+            reason    = "slug absent from live catalog" if valid_slugs else f"catalog empty {streak} cycles"
+            print(f"  [{label}] 🏁 Auto-closed resolved position: "
+                  f"{pos.get('outcome')} ({slug_gone}) — {reason}")
+            send_status(
+                f"🏁 Position auto-closed: {pos.get('outcome')} — market resolved on Polymarket\n"
+                f"Market: {pos.get('market')} | Slug: {slug_gone}\n"
+                f"Bankroll deployed reduced by {size_pct:.1f}%\n"
+                f"⚠️ If real shares were held, verify settlement in the Polymarket app."
+            )
+
         context = f"Games listed: {len(matches)} | {get_state_summary()}"
+
+        # Standings give the AI win%, run/point differential, and playoff odds —
+        # the context it needs to spot futures mispricings for MLB and WNBA.
+        standings_ctx = get_standings(sport_cfg)
+        if standings_ctx:
+            context += f"\n\n{standings_ctx}"
 
         # SELF-IMPROVEMENT: inject learned rules + real per-edge performance
         # so SIGNAL weights edges by actual results, not just theory.
