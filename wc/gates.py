@@ -193,6 +193,7 @@ def record_trade_opened(signal: dict):
             "target_exit":  signal.get("target_exit_pct"),
             "size_pct":     signal.get("size_pct_bankroll"),
             "edge":         signal.get("edge"),
+            "sport":        signal.get("sport", ""),
             "opened_at":    datetime.now(timezone.utc).isoformat(),
             "order_id":     signal.get("order_id", ""),
         }
@@ -267,6 +268,72 @@ def record_trade_closed(market: str, outcome: str, pnl_pct: float = 0.0) -> floa
 
         save_state(state)
         return state.get("total_realized_loss_pct", 0.0)
+
+
+def auto_close_resolved_positions(
+    sport_key: str,
+    valid_slugs: set,
+    consecutive_empty: int,
+    consecutive_empty_threshold: int = 3,
+) -> list:
+    """Remove active positions for a sport whose market has resolved on Polymarket.
+
+    A position is considered resolved when its market_slug is absent from the live
+    catalog.  Two modes:
+
+    1. Non-empty catalog (valid_slugs is non-empty):
+       Any position for this sport whose market_slug is not in valid_slugs is
+       resolved — the outcome-level market is gone from the live exchange.
+
+    2. Empty catalog, consecutive threshold reached:
+       When the catalog fetch returns nothing for N consecutive cycles the market
+       is very likely settled/delisted.  Only then do we act, to avoid wiping
+       positions on a single transient API failure.
+
+    Removed positions are appended to closed_positions with closed_reason so the
+    operator has a full audit trail.  total_bankroll_deployed_pct is decremented.
+    Returns the list of position dicts that were removed."""
+    resolved = []
+    with STATE_LOCK:
+        state = load_state()
+        remaining = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for pos in state.get("active_positions", []):
+            slug = (pos.get("market_slug") or "").strip()
+            pos_sport = (pos.get("sport") or "").strip()
+
+            # Only inspect positions that belong to this sport and have a slug.
+            if pos_sport != sport_key or not slug:
+                remaining.append(pos)
+                continue
+
+            stale = False
+            if valid_slugs:
+                # Catalog healthy — slug is absent → market resolved.
+                stale = slug not in valid_slugs
+            elif consecutive_empty >= consecutive_empty_threshold:
+                # Catalog persistently empty → treat as season/tournament over.
+                stale = True
+
+            if stale:
+                resolved.append(pos)
+                closed = dict(pos)
+                closed["closed_at"]     = now_iso
+                closed["pnl_pct"]       = 0.0
+                closed["closed_reason"] = "auto_resolved/slug_missing"
+                state["closed_positions"].append(closed)
+                state["total_bankroll_deployed_pct"] = max(
+                    0,
+                    state.get("total_bankroll_deployed_pct", 0)
+                    - float(pos.get("size_pct", 0) or 0),
+                )
+            else:
+                remaining.append(pos)
+
+        if resolved:
+            state["active_positions"] = remaining
+            save_state(state)
+    return resolved
 
 
 def reset_positions() -> int:
