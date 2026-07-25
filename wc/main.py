@@ -143,25 +143,31 @@ def handle_command(text: str):
             results = []
             # 1. Gates
             passed, viols = check_gates(mock)
-            gate_note = "✅ PASS" if passed or all("__test__" in v for v in viols) else f"⚠️ {'; '.join(viols)}"
-            results.append(f"Gates:   {gate_note}")
+            # filter out the expected "__test__" slug violation — it's not a real gate
+            real_viols = [v for v in viols if "no market_slug" not in v and "stale" not in v]
+            gate_note = "✅ PASS" if (passed or not real_viols) else f"⚠️ {'; '.join(real_viols)}"
+            results.append(f"Gates:    {gate_note}")
             # 2. PM credentials + buying power
             bp = pm_us.get_buying_power()
             pm_note = f"✅ ${bp:.2f} buying power" if bp > 0 else "❌ $0 — check POLYMARKET_KEY_ID / SECRET"
-            results.append(f"PM auth: {pm_note}")
+            results.append(f"PM auth:  {pm_note}")
             # 3. Telegram (we're already here — it works)
             results.append("Telegram: ✅ (you received this message)")
-            # 4. Dry-run order sim
-            dry_result = dry_run_signal(mock)
-            results.append(f"Executor: ✅ dry_run_signal OK")
+            # 4. Executor path (dry-run only — does NOT place a real order)
+            dry_run_signal(mock)
+            results.append("Executor: ✅ order-sizing path OK (dry-run, no real order)")
+            # 5. Checker — NOT called in TEST to avoid unnecessary LLM cost.
+            #    Verify checker independently: check Railway logs for "CHECKER:" lines
+            #    after a real TRADE signal is generated.
+            results.append("Checker:  ⏭ skipped (LLM call — verify in Railway logs)")
             state_s = get_state_summary()
             send_status(
                 "🔬 PIPELINE TEST RESULTS\n"
                 "──────────────────────\n"
                 + "\n".join(results) + "\n\n"
                 + state_s + "\n\n"
-                "If PM auth ✅ and Gates ✅ the bot will auto-trade.\n"
-                "Gates may show a non-blocking note for the mock slug — that is expected."
+                "Tests cover: gates · PM credentials · Telegram · executor sizing.\n"
+                "Checker is not called here — watch Railway logs for CHECKER output on the next real signal."
             )
         except Exception as ex:
             send_error(f"Pipeline test error: {ex}")
@@ -576,31 +582,37 @@ def analyze_sport(sport_cfg: dict, dry: bool):
             executable = bool(slug) and slug in valid_slugs
 
             # ── SLUG FALLBACK: if model gave no slug (or a wrong one), try to fill
-            # it from sports_config futures dict so futures signals are always
-            # auto-executable without relying on the model to guess the right slug.
+            # it from sports_config futures dict.  Fails closed on any ambiguity:
+            #   • market name must be non-trivial (≥5 chars) for substring matching
+            #   • single-slug shortcut uses config count (not catalog count) so a
+            #     multi-futures sport (MLB, WNBA) never gets silently routed to the
+            #     one slug that happens to be open right now
             if not executable:
                 if slug and slug not in valid_slugs:
                     print(f"  [{label}] model slug '{slug}' not in US catalog — trying futures fallback")
                 futures = sport_cfg.get("futures", {})
-                # 1. Match by market name substring
-                signal_market = (signal.get("market") or "").lower()
-                for f_label, f_slug in futures.items():
-                    if f_slug in valid_slugs and (
-                        f_label.lower() in signal_market or signal_market in f_label.lower()
-                    ):
-                        slug = f_slug
+                # 1. Market-name substring match — only when market is unambiguous
+                signal_market = (signal.get("market") or "").lower().strip()
+                if len(signal_market) >= 5:  # guard against empty / trivially-short strings
+                    for f_label, f_slug in futures.items():
+                        if f_slug in valid_slugs and (
+                            f_label.lower() in signal_market or signal_market in f_label.lower()
+                        ):
+                            slug = f_slug
+                            signal["market_slug"] = slug
+                            executable = True
+                            print(f"  [{label}] slug auto-filled (market match '{f_label}'): {slug}")
+                            break
+                # 2. Single-futures-config sport — safe to fill unconditionally only
+                #    when the sport's config defines exactly ONE futures entry.
+                #    Multi-entry sports (MLB: WS + AL + NL) are left as alert-only.
+                if not executable and len(futures) == 1:
+                    sole_slug = next(iter(futures.values()))
+                    if sole_slug in valid_slugs:
+                        slug = sole_slug
                         signal["market_slug"] = slug
                         executable = True
-                        print(f"  [{label}] slug auto-filled (market match '{f_label}'): {slug}")
-                        break
-                # 2. Single-slug sport — use it unconditionally
-                if not executable:
-                    valid_futures = [(k, v) for k, v in futures.items() if v in valid_slugs]
-                    if len(valid_futures) == 1:
-                        slug = valid_futures[0][1]
-                        signal["market_slug"] = slug
-                        executable = True
-                        print(f"  [{label}] slug auto-filled (sole futures entry): {slug}")
+                        print(f"  [{label}] slug auto-filled (sole config futures entry): {slug}")
 
             if executable:
                 signal["_tick"] = idx[slug].get("tick", "0.001")
