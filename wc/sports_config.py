@@ -14,7 +14,7 @@ SPORT_CONFIGS = {
         "key":          "world_cup",
         "label":        "World Cup",
         "emoji":        "⚽",
-        "active":       True,
+        "active":       False,  # Spain won the 2026 final — all markets resolved.
         "espn_paths":   ["soccer/fifa.world"],
         # Polymarket US (live execution venue) futures discovery.
         "us_search":     ["world cup winner"],
@@ -81,7 +81,7 @@ SPORT_CONFIGS = {
         "key":          "golf",
         "label":        "Golf — The Open",
         "emoji":        "⛳",
-        "active":       True,
+        "active":       False,  # The Open 2026 ended July 19 — market closed/resolved. Re-enable for next major.
         "espn_paths":   ["golf/pga"],
         # HARD event match — ESPN's golf scoreboard lists multiple concurrent
         # tournaments; only trade the one that matches (memory lesson: never
@@ -108,7 +108,7 @@ SPORT_CONFIGS = {
         "key":          "wimbledon",
         "label":        "Wimbledon",
         "emoji":        "🎾",
-        "active":       True,
+        "active":       False,  # Wimbledon 2026 ended July 12 — both markets resolved.
         "espn_paths":   ["tennis/atp", "tennis/wta"],
         # HARD event match — ESPN tennis feeds list whatever tour events are
         # running; without this the bot analyzes unrelated tournaments
