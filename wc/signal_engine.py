@@ -226,7 +226,7 @@ SETTLEMENT: {sport_cfg.get('settle_note', '')}
             ],
             max_tokens=8000,
         )
-        signal.setdefault("sport", sport_cfg.get("label"))
+        signal.setdefault("sport", sport_cfg.get("key"))   # key not label — gates match on key
         return signal
     except json.JSONDecodeError as e:
         return {"signal_type": "ERROR", "reason": f"Kimi returned non-JSON: {e}",
@@ -363,7 +363,7 @@ Output JSON signal only.
             ],
             max_tokens=4000,
         )
-        signal.setdefault("sport", sport_cfg.get("label"))
+        signal.setdefault("sport", sport_cfg.get("key"))   # key not label — gates match on key
         return signal
     except Exception as e:
         return {"signal_type": "ERROR", "reason": str(e)}
