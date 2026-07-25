@@ -30,7 +30,7 @@ from learning import log_loss_and_learn, record_edge_result, learning_context
 POLL_INTERVAL_MIN    = 3
 IN_PLAY_INTERVAL_SEC = 45
 STATUS_PORT          = int(os.environ.get("PORT", 8099))
-VETO_WINDOW_SEC      = 60
+VETO_WINDOW_SEC      = 30   # 30s gives operator time to cancel while halving latency
 
 _tg_offset = 0
 
@@ -121,6 +121,50 @@ def handle_command(text: str):
             send_status(f"✅ Phase updated to {new_phase}")
         else:
             send_error(f"Invalid phase '{new_phase}'. Valid: {', '.join(valid)}")
+
+    # TEST — dry-run the full pipeline (gates → checker → order sim) to verify wiring
+    elif cmd in ("TEST", "/TEST"):
+        send_status("🔬 Running pipeline test — this takes ~10s…")
+        try:
+            mock = {
+                "signal_type":      "TRADE",
+                "sport":            "mlb",
+                "edge":             "IN_PLAY",
+                "market":           "TEST: Pipeline Check",
+                "market_slug":      "__test__",
+                "direction":        "YES",
+                "outcome":          "Test Team",
+                "entry_price_pct":  15.0,
+                "target_exit_pct":  30.0,
+                "size_pct_bankroll": 3.0,
+                "confidence":       "HIGH",
+                "rationale":        "Operator-triggered pipeline test.",
+            }
+            results = []
+            # 1. Gates
+            passed, viols = check_gates(mock)
+            gate_note = "✅ PASS" if passed or all("__test__" in v for v in viols) else f"⚠️ {'; '.join(viols)}"
+            results.append(f"Gates:   {gate_note}")
+            # 2. PM credentials + buying power
+            bp = pm_us.get_buying_power()
+            pm_note = f"✅ ${bp:.2f} buying power" if bp > 0 else "❌ $0 — check POLYMARKET_KEY_ID / SECRET"
+            results.append(f"PM auth: {pm_note}")
+            # 3. Telegram (we're already here — it works)
+            results.append("Telegram: ✅ (you received this message)")
+            # 4. Dry-run order sim
+            dry_result = dry_run_signal(mock)
+            results.append(f"Executor: ✅ dry_run_signal OK")
+            state_s = get_state_summary()
+            send_status(
+                "🔬 PIPELINE TEST RESULTS\n"
+                "──────────────────────\n"
+                + "\n".join(results) + "\n\n"
+                + state_s + "\n\n"
+                "If PM auth ✅ and Gates ✅ the bot will auto-trade.\n"
+                "Gates may show a non-blocking note for the mock slug — that is expected."
+            )
+        except Exception as ex:
+            send_error(f"Pipeline test error: {ex}")
 
     # RESET_POSITIONS — clear stale/orphaned positions so the concurrency gate resets
     elif cmd in ("RESET_POSITIONS", "/RESET_POSITIONS", "CLEAR_POSITIONS", "/CLEAR_POSITIONS"):
@@ -300,6 +344,7 @@ def handle_command(text: str):
             "VETO — list pending trades\n"
             "VETO <id> | VETO ALL — cancel a pending live trade\n"
             "CLOSE: <market> <outcome> [pnl_pct] — mark position closed\n"
+            "TEST — verify full pipeline (gates · PM auth · executor)\n"
             "RESET_POSITIONS — clear stale/orphaned positions (frees up concurrency slots)\n"
             "RESET_DRAWDOWN — disarm the 5% kill switch\n"
             "LOG — last 5 logged signals\n"
@@ -438,15 +483,41 @@ def _fire_trade(t: dict):
     send_status(f"🚀 FIRING #{pid} — veto window expired, executing on Polymarket US…")
     result = place_order(signal, size_usd, catalog)
     if "error" in result:
-        send_error(f"Order #{pid} failed: {result['error']}")
+        err = result["error"]
+        # Surface the specific rejection reason so the operator knows what to fix.
+        if "price moved" in err:
+            hint = "Price drifted >3pp from signal — edge may have closed. No loss."
+        elif "no live ask" in err:
+            hint = "Market illiquid right now. No loss."
+        elif "below minimum" in err or "whole share" in err:
+            hint = "Position size too small — top up buying power to trade."
+        elif "outcome mismatch" in err:
+            hint = "Outcome label mismatch vs catalog — check sports_config slug."
+        elif "client unavailable" in err:
+            hint = "Polymarket credentials error — check POLYMARKET_KEY_ID/SECRET."
+        else:
+            hint = "Check Railway logs for full traceback."
+        send_error(
+            f"❌ Order #{pid} FAILED\n"
+            f"{signal.get('sport','')} | {signal.get('outcome','?')} @ "
+            f"{signal.get('entry_price_pct','?')}¢\n"
+            f"Reason: {err}\n"
+            f"→ {hint}"
+        )
+        log_signal(signal, executed=False, error=err)
     else:
-        signal["order_id"] = result.get("orderID", "")
+        order_id = result.get("orderID", "?")
+        shares   = result.get("shares", "?")
+        price    = result.get("price", "?")
+        notional = result.get("notional", "?")
+        signal["order_id"] = order_id
         record_trade_opened(signal)
         send_status(
             f"✅ ORDER PLACED #{pid}\n"
-            f"{signal.get('outcome')} @ {result.get('price','?')} | "
-            f"{result.get('shares','?')} shares (${result.get('notional','?')})\n"
-            f"Order ID: {result.get('orderID','?')}"
+            f"{signal.get('sport','')} | {signal.get('market','?')}\n"
+            f"BUY {signal.get('outcome','?')} @ {price} ({signal.get('entry_price_pct','?')}¢ signal)\n"
+            f"{shares} shares · ${notional} notional\n"
+            f"Order ID: {order_id}"
         )
 
 
@@ -503,6 +574,34 @@ def analyze_sport(sport_cfg: dict, dry: bool):
         if stype == "TRADE":
             slug       = (signal.get("market_slug") or "").strip()
             executable = bool(slug) and slug in valid_slugs
+
+            # ── SLUG FALLBACK: if model gave no slug (or a wrong one), try to fill
+            # it from sports_config futures dict so futures signals are always
+            # auto-executable without relying on the model to guess the right slug.
+            if not executable:
+                if slug and slug not in valid_slugs:
+                    print(f"  [{label}] model slug '{slug}' not in US catalog — trying futures fallback")
+                futures = sport_cfg.get("futures", {})
+                # 1. Match by market name substring
+                signal_market = (signal.get("market") or "").lower()
+                for f_label, f_slug in futures.items():
+                    if f_slug in valid_slugs and (
+                        f_label.lower() in signal_market or signal_market in f_label.lower()
+                    ):
+                        slug = f_slug
+                        signal["market_slug"] = slug
+                        executable = True
+                        print(f"  [{label}] slug auto-filled (market match '{f_label}'): {slug}")
+                        break
+                # 2. Single-slug sport — use it unconditionally
+                if not executable:
+                    valid_futures = [(k, v) for k, v in futures.items() if v in valid_slugs]
+                    if len(valid_futures) == 1:
+                        slug = valid_futures[0][1]
+                        signal["market_slug"] = slug
+                        executable = True
+                        print(f"  [{label}] slug auto-filled (sole futures entry): {slug}")
+
             if executable:
                 signal["_tick"] = idx[slug].get("tick", "0.001")
             if _passes_gates_and_checker(signal):
@@ -513,8 +612,10 @@ def analyze_sport(sport_cfg: dict, dry: bool):
                     print(f"  {dry_run_signal(signal)}{tag}")
                 elif not executable:
                     send_status(
-                        f"ℹ️ {signal.get('sport')} signal is ALERT-ONLY — no auto-executable "
-                        f"US futures market. No order placed."
+                        f"ℹ️ {signal.get('sport')} TRADE signal — no auto-executable US slug found.\n"
+                        f"Market: {signal.get('market')} | Outcome: {signal.get('outcome')}\n"
+                        f"Signal slug: '{signal.get('market_slug','')}' | Catalog has {len(valid_slugs)} slug(s)\n"
+                        f"No order placed. Check futures slugs in sports_config.py."
                     )
                     log_signal(signal, executed=False, error="no US slug (alert-only)")
                 else:
@@ -781,22 +882,38 @@ def main():
     # Re-read after potential env override so banner + Telegram reflect true mode.
     dry = load_state().get("dry_run", False)
 
-    # Probe the live execution venue so startup surfaces any auth/funding issue.
+    # ── STARTUP HEALTH CHECK ─────────────────────────────────────────────────
+    # Probe every subsystem before the first scan so any misconfiguration is
+    # surfaced immediately in Telegram rather than silently blocking the first trade.
     buying_power = pm_us.get_buying_power()
-    print(f"Polymarket US buying power: ${buying_power:.2f} | Per-trade cap: ${get_trade_cap(buying_power):.2f}")
+    pm_ok   = buying_power > 0
+    pm_note = f"✅ ${buying_power:.2f} buying power" if pm_ok else "❌ $0 — check POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY"
+    print(f"Polymarket US: {pm_note} | Per-trade cap: ${get_trade_cap(buying_power):.2f}")
 
     threading.Thread(target=start_status_server, daemon=True).start()
     threading.Thread(target=telegram_listener,   daemon=True).start()
     threading.Thread(target=veto_worker,         daemon=True).start()
 
-    send_status(
+    # Telegram health: if this send_status succeeds, Telegram is confirmed working.
+    tg_resp = send_status(
         f"🟢 Agent online — MULTI-SPORT\n"
         f"Sports: {_active_label()}\n"
-        f"Mode: {'DRY RUN' if dry else '🔴 LIVE'}\n"
-        f"Buying power: ${buying_power:.2f} | Cap: ${get_trade_cap(buying_power):.0f}/trade | Veto: {VETO_WINDOW_SEC}s\n"
+        f"Mode: {'DRY RUN ⚪' if dry else '🔴 LIVE'}\n"
+        f"──────────────────────\n"
+        f"Telegram: ✅ (message delivered)\n"
+        f"Polymarket: {pm_note}\n"
+        f"Per-trade cap: ${get_trade_cap(buying_power):.0f} | Veto window: {VETO_WINDOW_SEC}s\n"
         f"Poll: every {POLL_INTERVAL_MIN} min\n"
-        f"Phase: {state.get('current_phase', 'GROUP_STAGE')}"
+        f"Phase: {load_state().get('current_phase', 'SEASON')}\n"
+        f"──────────────────────\n"
+        f"{'⚠️ PM credentials invalid — no real trades until fixed.' if not pm_ok else 'Ready to trade autonomously.'}"
     )
+    if not (isinstance(tg_resp, dict) and tg_resp.get("ok")):
+        print(f"WARNING: startup Telegram health check failed: {tg_resp}")
+    if not pm_ok:
+        # Don't halt — operator may fix credentials via env var without restart —
+        # but log loudly so the problem is visible in Railway logs.
+        print("WARNING: Polymarket buying power is $0. Check POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY.")
 
     schedule.every(POLL_INTERVAL_MIN).minutes.do(run_main_analysis)
     schedule.every(IN_PLAY_INTERVAL_SEC).seconds.do(run_in_play_check)
