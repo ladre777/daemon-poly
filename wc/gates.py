@@ -32,9 +32,9 @@ CAPS = {
     "PROP":    5,
 }
 
-MAX_CONCURRENT       = 3
-MAX_TRADES_PER_PHASE = 5
-MAX_WINNER_ENTRY_PCT = 25
+MAX_CONCURRENT       = 6   # 3 was too low for multi-sport (MLB + WNBA + Golf)
+MAX_TRADES_PER_PHASE = 10  # per-phase cap; WC-only phases reset per tournament
+MAX_WINNER_ENTRY_PCT = 25  # WC-only gate (see PF-08 below)
 MAX_PROPS_TOTAL_PCT  = 15
 
 # Scaling per-trade cap: 20% of live buying power, floor $10, ceiling $50.
@@ -138,8 +138,12 @@ def check_gates(signal: dict) -> tuple:
             )
             break
 
-    # PF-08: Winner market price ceiling in QF+
-    if phase in ("QF", "SF", "FINAL") and "winner" in signal.get("market", "").lower():
+    # PF-08: Winner market price ceiling — World Cup knockout rounds only.
+    # Golf/MLB/WNBA leaders routinely price above 25¢ in final rounds; this gate
+    # must NOT fire for non-WC sports or it blocks every legitimate golf trade.
+    if (signal.get("sport") == "world_cup"
+            and phase in ("QF", "SF", "FINAL")
+            and "winner" in signal.get("market", "").lower()):
         if entry_price > MAX_WINNER_ENTRY_PCT:
             violations.append(
                 f"PF-08: Winner entry at {entry_price}% exceeds {MAX_WINNER_ENTRY_PCT}% ceiling in {phase}"
@@ -263,6 +267,20 @@ def record_trade_closed(market: str, outcome: str, pnl_pct: float = 0.0) -> floa
 
         save_state(state)
         return state.get("total_realized_loss_pct", 0.0)
+
+
+def reset_positions() -> int:
+    """Operator recovery: wipe all active positions and reset deployed-% counter.
+    Use when Railway state contains stale/orphaned positions (e.g. after a
+    tournament ends and those markets resolved on Polymarket).
+    Returns the number of positions that were cleared."""
+    with STATE_LOCK:
+        state = load_state()
+        n = len(state.get("active_positions", []))
+        state["active_positions"] = []
+        state["total_bankroll_deployed_pct"] = 0.0
+        save_state(state)
+        return n
 
 
 def reset_drawdown() -> None:

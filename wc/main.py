@@ -21,7 +21,8 @@ from gates import (
     check_gates, record_signal_sent, record_trade_opened,
     record_trade_closed, update_phase, set_dry_run, dedupe_active_positions,
     get_state_summary, load_state, save_state, STATE_FILE,
-    KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, MAX_TRADE_USD, get_trade_cap,
+    KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, reset_positions,
+    MAX_TRADE_USD, get_trade_cap,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
@@ -120,6 +121,15 @@ def handle_command(text: str):
             send_status(f"✅ Phase updated to {new_phase}")
         else:
             send_error(f"Invalid phase '{new_phase}'. Valid: {', '.join(valid)}")
+
+    # RESET_POSITIONS — clear stale/orphaned positions so the concurrency gate resets
+    elif cmd in ("RESET_POSITIONS", "/RESET_POSITIONS", "CLEAR_POSITIONS", "/CLEAR_POSITIONS"):
+        n = reset_positions()
+        send_status(
+            f"🧹 Cleared {n} active position(s) from state.\n"
+            f"Bankroll-deployed counter reset to 0%.\n"
+            f"⚠️ If any real shares were held, sell them manually in the Polymarket app."
+        )
 
     # DRY: ON / DRY: OFF
     elif cmd.startswith("DRY:") or cmd.startswith("DRY "):
@@ -290,6 +300,7 @@ def handle_command(text: str):
             "VETO — list pending trades\n"
             "VETO <id> | VETO ALL — cancel a pending live trade\n"
             "CLOSE: <market> <outcome> [pnl_pct] — mark position closed\n"
+            "RESET_POSITIONS — clear stale/orphaned positions (frees up concurrency slots)\n"
             "RESET_DRAWDOWN — disarm the 5% kill switch\n"
             "LOG — last 5 logged signals\n"
             "MARKETS: <query> — search Polymarket markets\n"
@@ -721,6 +732,41 @@ def main():
             )
         except Exception:
             pass
+
+    # Auto-reset phase and orphaned positions when WC is no longer active.
+    # Any positions remaining in state from a concluded WC are stale — the markets
+    # have resolved on Polymarket and those slots permanently block new trades.
+    wc_active = SPORT_CONFIGS.get("world_cup", {}).get("active", False)
+    state = load_state()
+    if not wc_active:
+        # Reset WC-era phase so PF-08 / PF-10 gates no longer fire at FINAL limits.
+        if state.get("current_phase") in ("GROUP_STAGE", "R32", "R16", "QF", "SF", "FINAL"):
+            update_phase("SEASON")
+            print("WC inactive — phase reset to SEASON")
+        # Clear any positions that don't belong to a currently-active sport.
+        active_keys = {c["key"] for c in active_sports()}
+        stale = [p for p in state.get("active_positions", [])
+                 if p.get("sport", p.get("edge", "")) not in active_keys
+                 and p.get("sport", None) not in (None, "") or
+                 # also clear if market_slug matches a known resolved WC slug
+                 any(kw in (p.get("market_slug") or "").lower()
+                     for kw in ("world-cup", "golden-boot", "wc-winner"))]
+        if stale:
+            n_stale = len(stale)
+            for p in stale:
+                state["active_positions"].remove(p)
+                state["total_bankroll_deployed_pct"] = max(
+                    0, state.get("total_bankroll_deployed_pct", 0) - float(p.get("size_pct", 0) or 0))
+            save_state(state)
+            print(f"Startup: removed {n_stale} stale WC position(s) from state")
+            try:
+                send_status(
+                    f"🧹 Cleared {n_stale} stale World Cup position(s) — "
+                    f"WC is over, those markets resolved. Slots are free for new trades.\n"
+                    f"⚠️ If any real WC shares are still held, sell them manually in Polymarket."
+                )
+            except Exception:
+                pass
 
     # Honour DRY_RUN env var set on Railway — overrides whatever is in state so
     # the operator can flip live/dry without needing a Telegram command.
