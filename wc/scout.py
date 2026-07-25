@@ -34,10 +34,27 @@ def _competitor_name(c: dict) -> str:
     return name or ""
 
 
+def _team_record(competitor: dict) -> str:
+    """Overall W-L record string from competitor.records, e.g. '60-43'."""
+    recs = competitor.get("records", []) if competitor else []
+    return recs[0].get("summary", "") if recs else ""
+
+
+def _team_stats(competitor: dict) -> dict:
+    """Key in-game stats dict from competitor.statistics."""
+    return {
+        x["name"]: x.get("displayValue")
+        for x in (competitor.get("statistics", []) if competitor else [])
+        if x.get("name") in ("hits", "runs", "ERA", "avg", "errors",
+                              "assists", "rebounds", "fieldGoalsAttempted", "pointsInPaint")
+    }
+
+
 def _parse_event(event: dict, sport_key: str) -> dict:
     status      = event.get("status", {})
     comp        = event.get("competitions", [{}])[0]
     competitors = comp.get("competitors", [])
+    situation   = comp.get("situation", {})
 
     home = next((c for c in competitors if c.get("homeAway") == "home"), None)
     away = next((c for c in competitors if c.get("homeAway") == "away"), None)
@@ -46,7 +63,7 @@ def _parse_event(event: dict, sport_key: str) -> dict:
         home = home or (competitors[0] if len(competitors) > 0 else {})
         away = away or (competitors[1] if len(competitors) > 1 else {})
 
-    return {
+    result = {
         "sport":         sport_key,
         "id":            event.get("id"),
         "name":          event.get("name") or event.get("shortName", ""),
@@ -56,11 +73,34 @@ def _parse_event(event: dict, sport_key: str) -> dict:
         "clock":         status.get("displayClock", "0:00"),
         "period":        status.get("period", 0),
         "home_team":     _competitor_name(home),
-        "home_score":    home.get("score", "0"),
+        "home_record":   _team_record(home),
+        "home_score":    (home.get("score", "0") if home else "0"),
+        "home_stats":    _team_stats(home),
         "away_team":     _competitor_name(away),
-        "away_score":    away.get("score", "0"),
+        "away_record":   _team_record(away),
+        "away_score":    (away.get("score", "0") if away else "0"),
+        "away_stats":    _team_stats(away),
         "venue":         comp.get("venue", {}).get("fullName", ""),
     }
+
+    # Baseball in-play: include base/out/count state so SIGNAL can assess
+    # leverage index (how much this at-bat matters for win probability).
+    if situation:
+        pitcher_name = (situation.get("pitcher") or {}).get("athlete", {}).get("fullName", "")
+        batter_name  = (situation.get("batter")  or {}).get("athlete", {}).get("fullName", "")
+        result["situation"] = {
+            "balls":     situation.get("balls"),
+            "strikes":   situation.get("strikes"),
+            "outs":      situation.get("outs"),
+            "on_first":  situation.get("onFirst",  False),
+            "on_second": situation.get("onSecond", False),
+            "on_third":  situation.get("onThird",  False),
+            "pitcher":   pitcher_name,
+            "batter":    batter_name,
+            "last_play": (situation.get("lastPlay") or {}).get("text", ""),
+        }
+
+    return result
 
 
 def _parse_golf_event(event: dict, sport_key: str) -> dict:
@@ -88,6 +128,57 @@ def _parse_golf_event(event: dict, sport_key: str) -> dict:
         "period":        status.get("period", 0),   # round number for golf
         "leaderboard":   board,
     }
+
+
+def get_standings(sport_cfg: dict) -> str:
+    """Fetch current division standings for a sport.
+
+    Returns a compact text block injected into the signal prompt so the AI has
+    win%, run/point differential, and playoff odds — the data it needs to spot
+    futures mispricings. Returns '' if the sport has no standings_path or the
+    fetch fails (never raises)."""
+    path = sport_cfg.get("standings_path")
+    if not path:
+        return ""
+    try:
+        url  = f"https://site.web.api.espn.com/apis/v2/sports/{path}/standings?seasontype=2"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        d    = resp.json()
+        rows = []
+        for group in d.get("children", []):
+            div_name = group.get("name", "")
+            for entry in group.get("standings", {}).get("entries", []):
+                t     = entry.get("team", {})
+                stats = {x["name"]: x.get("displayValue") for x in entry.get("stats", [])}
+                rows.append({
+                    "div":        div_name,
+                    "team":       t.get("displayName", "?"),
+                    "record":     stats.get("overall", "?"),
+                    "win_pct":    stats.get("winPercent", "?"),
+                    "diff":       stats.get("pointDifferential") or stats.get("differential", "?"),
+                    "last10":     stats.get("Last Ten Games", ""),
+                    "playoff":    stats.get("playoffPercent", ""),
+                    "seed":       stats.get("playoffSeed", ""),
+                })
+        if not rows:
+            return ""
+        lines = [f"STANDINGS ({sport_cfg.get('label', path)}) — fetched live:"]
+        cur_div = None
+        for r in rows:
+            if r["div"] != cur_div:
+                cur_div = r["div"]
+                lines.append(f"  [{cur_div}]")
+            pct  = f" playoff:{r['playoff']}" if r.get("playoff") else ""
+            l10  = f" L10:{r['last10']}"      if r.get("last10")  else ""
+            lines.append(
+                f"    #{r['seed']:>2} {r['team']:<28} {r['record']:<7} "
+                f"({r['win_pct']}) diff:{r['diff']}{l10}{pct}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[scout] standings error {sport_cfg.get('key')}: {e}")
+        return ""
 
 
 def get_all_matches(sport_cfg: dict) -> list:
