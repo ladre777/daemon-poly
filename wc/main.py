@@ -724,15 +724,16 @@ def main():
 
     # Honour DRY_RUN env var set on Railway — overrides whatever is in state so
     # the operator can flip live/dry without needing a Telegram command.
-    env_dry = os.environ.get("DRY_RUN", "").strip().lower()
-    if env_dry in ("false", "0", "no", "off"):
-        set_dry_run(False)
-        print("DRY_RUN env=false → LIVE mode")
-    elif env_dry in ("true", "1", "yes", "on"):
+    # Default is LIVE unless DRY_RUN is explicitly set to a truthy value.
+    env_dry = os.environ.get("DRY_RUN", "false").strip().lower()
+    if env_dry in ("true", "1", "yes", "on"):
         set_dry_run(True)
         print("DRY_RUN env=true → DRY RUN mode")
+    else:
+        set_dry_run(False)
+        print("DRY_RUN env=false → LIVE mode")
     # Re-read after potential env override so banner + Telegram reflect true mode.
-    dry = load_state().get("dry_run", True)
+    dry = load_state().get("dry_run", False)
 
     # Probe the live execution venue so startup surfaces any auth/funding issue.
     buying_power = pm_us.get_buying_power()

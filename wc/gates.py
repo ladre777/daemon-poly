@@ -10,7 +10,7 @@ DEFAULT_STATE = {
     "active_positions":        [],
     "closed_positions":        [],
     "current_phase":           "GROUP_STAGE",
-    "dry_run":                 True,
+    "dry_run":                 False,  # default LIVE — use DRY_RUN=true env var to override
     "phase_trade_counts": {
         "GROUP_STAGE": 0,
         "R32":         0,
