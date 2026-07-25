@@ -24,7 +24,7 @@ signal_client = (
 
 # ── CHECKER client: Claude Haiku (Anthropic) — safety gate only ──────────────
 checker_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-CHECKER_MODEL  = "claude-haiku-4-5"
+CHECKER_MODEL  = "claude-sonnet-4-5"
 
 # Legacy aliases so learning.py and any other importer still works
 client = signal_client
