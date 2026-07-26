@@ -69,6 +69,36 @@ def get_pm_client():
         return None
 
 
+def get_real_positions() -> dict:
+    """Return a dict of {market_slug: position_info} for every position currently
+    held on Polymarket US.  Used by reconcile_positions() in gates.py to detect
+    ghost entries in state that are not backed by a real holding.
+
+    Returns an empty dict on any API failure so callers can fail-safe (keep state
+    unchanged rather than wiping real positions on a transient error).
+    """
+    try:
+        client = get_pm_client()
+        if not client:
+            return {}
+        resp = client.portfolio.positions()
+        raw = resp.get("positions", {})
+        out = {}
+        for slug, info in raw.items():
+            net = float(info.get("netPositionDecimal") or info.get("netPosition") or 0)
+            if net > 0:
+                out[slug] = {
+                    "slug":    slug,
+                    "shares":  net,
+                    "outcome": (info.get("marketMetadata") or {}).get("outcome", ""),
+                    "title":   (info.get("marketMetadata") or {}).get("title", ""),
+                }
+        return out
+    except Exception as e:
+        print(f"[PM-US] get_real_positions error: {e}")
+        return {}
+
+
 def get_buying_power() -> float:
     """Current Polymarket US USD buying power (0.0 on failure)."""
     try:
