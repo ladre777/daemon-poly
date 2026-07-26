@@ -394,25 +394,28 @@ def _passes_gates_and_checker(signal: dict) -> bool:
     if not passed:
         print(f"  GATE FAIL: {signal['gate_notes']}")
         log_signal(signal, executed=False)
-        if _should_send(f"gatefail:{signal.get('sport')}:{signal.get('market')}:{signal.get('edge')}"):
-            send_error(
-                f"Signal blocked by gates:\n{signal['gate_notes']}\n"
-                f"Market: {signal.get('market')} | Edge: {signal.get('edge')}"
-            )
+        # Always notify on a real TRADE rejection — never throttle.
+        # Task #10's 15-min signal dedup prevents the same edge flooding Telegram.
+        send_error(
+            f"🚫 Signal blocked by gates:\n{signal['gate_notes']}\n"
+            f"Sport: {signal.get('sport','')} | Market: {signal.get('market','?')} | Edge: {signal.get('edge','?')}"
+        )
         return False
 
-    # CHECKER: independent Opus verification before any execution.
+    # CHECKER: independent Sonnet verification before any execution.
     signal = run_checker(signal)
-    print(f"  Checker: {signal.get('checker_verdict')} — {signal.get('checker_reason')}")
+    verdict = signal.get("checker_verdict", "?")
+    reason  = signal.get("checker_reason", "")
+    print(f"  Checker: {verdict} — {reason}")
     log_signal(signal, executed=False)
 
-    if signal.get("checker_verdict") != "APPROVED":
-        print(f"  CHECKER KILLED: {signal.get('checker_reason')}")
-        if _should_send(f"killed:{signal.get('sport')}:{signal.get('market')}:{signal.get('edge')}"):
-            send_error(
-                f"⚡ CHECKER KILLED\n{signal.get('checker_reason')}\n"
-                f"Market: {signal.get('market')} | Edge: {signal.get('edge')}"
-            )
+    if verdict != "APPROVED":
+        print(f"  CHECKER KILLED: {reason}")
+        # Always notify — checker kills are real decisions, never throttle.
+        send_error(
+            f"⚡ Checker blocked trade:\n{reason}\n"
+            f"Sport: {signal.get('sport','')} | Market: {signal.get('market','?')} | Edge: {signal.get('edge','?')}"
+        )
         return False
 
     return True
