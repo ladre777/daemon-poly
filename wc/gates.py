@@ -350,6 +350,50 @@ def reset_positions() -> int:
         return n
 
 
+def reconcile_positions() -> tuple:
+    """Cross-check active_positions in state against real Polymarket US holdings.
+
+    Removes any position whose market_slug is NOT in the live portfolio (ghost
+    entries caused by orders that were recorded but never actually filled, or by
+    resolved markets whose per-outcome slug never appeared in the futures catalog
+    so auto_close_resolved_positions never cleaned them).
+
+    Positions with no market_slug are kept — they can't be verified and must be
+    closed manually.
+
+    Returns (removed: list[dict], kept: list[dict]).
+    Fails SAFE: if the portfolio API call returns an empty dict (error), the state
+    is left untouched so real positions are never wiped on a transient failure.
+    """
+    from pm_us import get_real_positions   # local import to avoid circular dep
+    real = get_real_positions()
+    # Empty dict = API error; do nothing.
+    if not isinstance(real, dict):
+        return [], []
+
+    removed, kept = [], []
+    with STATE_LOCK:
+        state = load_state()
+        for pos in state.get("active_positions", []):
+            slug = (pos.get("market_slug") or "").strip()
+            if not slug:
+                # Can't verify — leave in place.
+                kept.append(pos)
+            elif slug in real:
+                kept.append(pos)
+            else:
+                removed.append(pos)
+                state["total_bankroll_deployed_pct"] = max(
+                    0,
+                    state.get("total_bankroll_deployed_pct", 0)
+                    - float(pos.get("size_pct", 0) or 0),
+                )
+        if removed:
+            state["active_positions"] = kept
+            save_state(state)
+    return removed, kept
+
+
 def reset_drawdown() -> None:
     """Operator recovery: clear realized-loss tally so the kill switch disarms."""
     with STATE_LOCK:
