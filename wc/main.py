@@ -31,16 +31,7 @@ from learning import log_loss_and_learn, record_edge_result, learning_context
 POLL_INTERVAL_MIN    = 3
 IN_PLAY_INTERVAL_SEC = 45
 STATUS_PORT          = int(os.environ.get("PORT", 8099))
-VETO_WINDOW_SEC      = 30   # 30s gives operator time to cancel while halving latency
-
 _tg_offset = 0
-
-# In-memory live-trade veto queue. Pending trades are NEVER persisted: a restart
-# must force a fresh scan rather than firing a stale approval. Each entry:
-#   {"id", "signal", "size_usd", "valid_slugs", "queued_at", "vetoed"}
-_pending_lock   = threading.Lock()
-_pending_trades = []
-_pending_seq    = 0
 
 # In-memory alert throttle: looping 4 sports every few minutes can flood Telegram
 # with repeat gate-fail / checker-kill / monitor notices. Approved TRADE signals
@@ -337,39 +328,6 @@ def handle_command(text: str):
         )
         send_status(f"SPORT COVERAGE\n{lines}")
 
-    # VETO — cancel a pending live trade inside its 60s window
-    elif cmd == "VETO" or cmd.startswith("VETO "):
-        arg = text.split(None, 1)[1].strip().upper() if " " in text else ""
-        with _pending_lock:
-            pending = [t for t in _pending_trades if not t["vetoed"]]
-            if arg == "ALL":
-                for t in pending:
-                    t["vetoed"] = True
-                send_status(f"🛑 Vetoed {len(pending)} pending trade(s).")
-            elif arg == "":
-                if not pending:
-                    send_status("No pending trades.")
-                else:
-                    lines = "\n".join(
-                        f"  #{t['id']} {t['signal'].get('sport','')} "
-                        f"{t['signal'].get('outcome','?')} ${t['size_usd']:.2f} "
-                        f"({max(0, VETO_WINDOW_SEC - int(time.time() - t['queued_at']))}s left)"
-                        for t in pending
-                    )
-                    send_status(f"PENDING TRADES:\n{lines}\nReply VETO <id> or VETO ALL.")
-            else:
-                try:
-                    pid = int(arg)
-                except ValueError:
-                    send_error("Usage: VETO <id> | VETO ALL")
-                    return
-                hit = next((t for t in pending if t["id"] == pid), None)
-                if hit:
-                    hit["vetoed"] = True
-                    send_status(f"🛑 Vetoed pending trade #{pid}.")
-                else:
-                    send_error(f"No active pending trade #{pid}.")
-
     # HELP
     elif cmd in ("HELP", "/HELP", "/START"):
         send_status(
@@ -380,8 +338,6 @@ def handle_command(text: str):
             "SCAN — force analysis now (all sports)\n"
             "PHASE: R32|R16|QF|SF|FINAL — World Cup phase\n"
             "DRY: ON|OFF — toggle live trading (OFF = LIVE)\n"
-            "VETO — list pending trades\n"
-            "VETO <id> | VETO ALL — cancel a pending live trade\n"
             "CLOSE: <market> <outcome> [pnl_pct] — mark position closed\n"
             "TEST — verify full pipeline (gates · PM auth · executor)\n"
             "RECONCILE — diff state vs real Polymarket holdings, drop ghost positions\n"
@@ -396,7 +352,7 @@ def handle_command(text: str):
         print(f"[TG] Unrecognised command: {text!r}")
         send_status(
             f"🤖 Unknown command: '{text[:40]}'\n"
-            "Try: STATUS · SCAN · SPORTS · LOG · VETO · HELP\n"
+            "Try: STATUS · SCAN · SPORTS · LOG · HELP\n"
             "(Old-bot commands like CYCLE/AUTOPILOT no longer exist.)"
         )
 
@@ -462,69 +418,32 @@ def _passes_gates_and_checker(signal: dict) -> bool:
     return True
 
 
-# ── LIVE-TRADE VETO QUEUE ───────────────────────────────────────────────────
+# ── LIVE TRADE EXECUTOR ──────────────────────────────────────────────────────
 
-def _queue_live_trade(signal: dict, size_usd: float, catalog: dict):
-    """Queue an approved live trade with a VETO_WINDOW_SEC operator veto window.
-    The veto_worker fires it automatically once the window elapses, unless vetoed.
-
-    FAILS CLOSED: the trade is only armed if the Telegram veto countdown is
-    CONFIRMED delivered. If Telegram is down / misconfigured, the operator never
-    saw the veto window, so we must NOT auto-fire — the trade is dropped."""
-    global _pending_seq
-    slug        = (signal.get("market_slug") or "").strip()
-    cat_outcome = catalog.get(slug, {}).get("outcome") or signal.get("outcome", "?")
-
-    with _pending_lock:
-        _pending_seq += 1
-        pid = _pending_seq
-
-    resp = send_status(
-        f"⏳ PENDING LIVE TRADE #{pid} — {VETO_WINDOW_SEC}s to veto\n"
-        f"{signal.get('sport','')} | {signal.get('market','?')}\n"
-        f"BUY {cat_outcome} @ ~{signal.get('entry_price_pct','?')}¢ "
-        f"| ${size_usd:.2f} (cap ${get_trade_cap(pm_us.get_buying_power()):.0f})\n"
-        f"slug: {slug}\n"
-        f"Reply  VETO {pid}  or  VETO ALL  to cancel.\n"
-        f"Otherwise fires automatically in {VETO_WINDOW_SEC}s."
-    )
-    if not (isinstance(resp, dict) and resp.get("ok")):
-        # Operator never got a veto chance — do not arm an auto-trade.
-        print(f"[VETO] queue #{pid} ABORTED — Telegram countdown not delivered: {resp}")
-        log_signal(signal, executed=False, error="veto countdown undeliverable — trade dropped")
-        return
-
-    with _pending_lock:
-        _pending_trades.append({
-            "id":        pid,
-            "signal":    signal,
-            "size_usd":  size_usd,
-            "catalog":   dict(catalog),
-            "queued_at": time.time(),
-            "vetoed":    False,
-        })
-
-
-def _fire_trade(t: dict):
-    """Execute a pending trade after its veto window, re-validating everything."""
-    signal, size_usd, catalog = t["signal"], t["size_usd"], t["catalog"]
-    pid = t["id"]
-
+def _fire_trade(signal: dict, size_usd: float, catalog: dict):
+    """Execute a live trade immediately after gates + checker pass.
+    Gates are re-checked here as a final safety net (market state can shift
+    between signal generation and order placement)."""
     if load_state().get("dry_run", True):
-        send_status(f"⚪ Pending trade #{pid} skipped — DRY RUN is now ON.")
-        return
+        return  # Should never reach here — dry mode is checked upstream
 
     passed, violations = check_gates(signal)
     if not passed:
-        send_error(f"Pending trade #{pid} blocked at fire time:\n{'; '.join(violations)}")
+        send_error(f"Signal blocked by gates:\n{'; '.join(violations)}\n"
+                   f"Market: {signal.get('market','?')} | Edge: {signal.get('edge','?')}")
         log_signal(signal, executed=False, error="gate fail at fire time")
         return
 
-    send_status(f"🚀 FIRING #{pid} — veto window expired, executing on Polymarket US…")
+    slug        = (signal.get("market_slug") or "").strip()
+    cat_outcome = catalog.get(slug, {}).get("outcome") or signal.get("outcome", "?")
+    send_status(
+        f"🚀 FIRING — executing on Polymarket US…\n"
+        f"{signal.get('sport','')} | {signal.get('market','?')}\n"
+        f"BUY {cat_outcome} @ ~{signal.get('entry_price_pct','?')}¢ · ${size_usd:.2f}"
+    )
     result = place_order(signal, size_usd, catalog)
     if "error" in result:
         err = result["error"]
-        # Surface the specific rejection reason so the operator knows what to fix.
         if "price moved" in err:
             hint = "Price drifted >3pp from signal — edge may have closed. No loss."
         elif "no live ask" in err:
@@ -538,7 +457,7 @@ def _fire_trade(t: dict):
         else:
             hint = "Check Railway logs for full traceback."
         send_error(
-            f"❌ Order #{pid} FAILED\n"
+            f"❌ Order FAILED\n"
             f"{signal.get('sport','')} | {signal.get('outcome','?')} @ "
             f"{signal.get('entry_price_pct','?')}¢\n"
             f"Reason: {err}\n"
@@ -553,32 +472,12 @@ def _fire_trade(t: dict):
         signal["order_id"] = order_id
         record_trade_opened(signal)
         send_status(
-            f"✅ ORDER PLACED #{pid}\n"
+            f"✅ ORDER PLACED\n"
             f"{signal.get('sport','')} | {signal.get('market','?')}\n"
             f"BUY {signal.get('outcome','?')} @ {price} ({signal.get('entry_price_pct','?')}¢ signal)\n"
             f"{shares} shares · ${notional} notional\n"
             f"Order ID: {order_id}"
         )
-
-
-def veto_worker():
-    """Background loop that fires due (un-vetoed) pending trades and purges vetoed ones."""
-    print("[VETO] worker started")
-    while True:
-        try:
-            now = time.time()
-            with _pending_lock:
-                due = [t for t in _pending_trades
-                       if not t["vetoed"] and now - t["queued_at"] >= VETO_WINDOW_SEC]
-                _pending_trades[:] = [
-                    t for t in _pending_trades
-                    if not t["vetoed"] and t not in due
-                ]
-            for t in due:
-                _fire_trade(t)
-        except Exception as e:
-            print(f"[VETO] worker error: {e}")
-        time.sleep(2)
 
 
 # ── MAIN ANALYSIS LOOP (per sport) ──────────────────────────────────────────
@@ -711,7 +610,7 @@ def analyze_sport(sport_cfg: dict, dry: bool):
                         bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
                         cap,
                     )
-                    _queue_live_trade(signal, size_usd, idx)
+                    _fire_trade(signal, size_usd, idx)
 
         elif stype == "MONITOR":
             if _should_send(f"monitor:{signal.get('sport')}:{signal.get('watch')}"):
@@ -770,7 +669,7 @@ def run_discovery_scan(dry: bool):
                         bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
                         cap,
                     )
-                    _queue_live_trade(signal, size_usd, idx)
+                    _fire_trade(signal, size_usd, idx)
         elif stype == "ERROR":
             print(f"  [🔭 Discovery] ERROR: {signal.get('reason', '')[:180]}")
     except Exception as e:
@@ -844,7 +743,7 @@ def run_in_play_check():
                             bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
                             cap,
                         )
-                        _queue_live_trade(signal, size_usd, {slug: {
+                        _fire_trade(signal, size_usd, {slug: {
                             "tick": "0.001", "outcome": signal.get("outcome"),
                             "market": signal.get("market"), "implied_pct": signal.get("entry_price_pct"),
                         }})
@@ -1002,7 +901,6 @@ def main():
 
     threading.Thread(target=start_status_server, daemon=True).start()
     threading.Thread(target=telegram_listener,   daemon=True).start()
-    threading.Thread(target=veto_worker,         daemon=True).start()
 
     # Telegram health: if this send_status succeeds, Telegram is confirmed working.
     tg_resp = send_status(
@@ -1012,7 +910,7 @@ def main():
         f"──────────────────────\n"
         f"Telegram: ✅ (message delivered)\n"
         f"Polymarket: {pm_note}\n"
-        f"Per-trade cap: ${get_trade_cap(buying_power):.0f} | Veto window: {VETO_WINDOW_SEC}s\n"
+        f"Per-trade cap: ${get_trade_cap(buying_power):.0f} | Instant execution\n"
         f"Poll: every {POLL_INTERVAL_MIN} min\n"
         f"Phase: {load_state().get('current_phase', 'SEASON')}\n"
         f"──────────────────────\n"
