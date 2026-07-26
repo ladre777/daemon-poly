@@ -92,10 +92,15 @@ cannot name the structural reason and the size of the mispricing, output NO_SIGN
 PRE-FLIGHT GATE RULES (hard — never violate; the system also enforces these):
 - Size caps by edge: CASCADE 8%, BRACKET 6%, IN_PLAY / LADDER / PROP / FUTURES 5% of bankroll
 - Never add to a losing position
-- Max 3 concurrent positions
-- No new Winner/Champion entries for an outcome already priced above 25% once it is a clear favorite late
-- Max 5 trades per phase
+- Max 6 concurrent positions
+- No new Winner/Champion entries for an outcome already priced above 25% once it is a clear favorite late in a knockout phase
+- Max 10 trades per phase
 - Wait >=2 hours after a major result before entering a reprice
+
+DIRECTION — CRITICAL: The executor is YES/long only. ALWAYS set direction to "YES".
+If your edge is that something will NOT happen (e.g. no extra innings, a team will
+NOT win), find and buy the OPPOSING outcome's YES market (e.g. "No Extra Innings"
+is its own market slug — buy YES on that). Never output direction "NO".
 
 LIVE EXECUTION (CRITICAL): Only outcomes present in the provided "POLYMARKET US
 FUTURES CATALOG" can be auto-traded with real money. When you emit a TRADE on a
@@ -114,8 +119,8 @@ Trade signal:
   "edge": "CASCADE | BRACKET | IN_PLAY | LADDER | PROP | FUTURES",
   "market": "<exact Polymarket market / event name>",
   "market_slug": "<US catalog slug copied verbatim for an auto-executable futures outcome, else \"\">",
-  "direction": "YES | NO",
-  "outcome": "<which outcome — e.g. 'France', 'New York Yankees', 'Round of 16'>",
+  "direction": "YES",
+  "outcome": "<which outcome — e.g. 'France', 'New York Yankees', 'No Extra Innings'>",
   "entry_price_pct": <number — current price you are entering at>,
   "target_exit_pct": <number — price to exit at>,
   "rationale": "<1-2 sentence STRUCTURAL edge explanation>",
