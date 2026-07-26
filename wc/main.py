@@ -23,6 +23,7 @@ from gates import (
     get_state_summary, load_state, save_state, STATE_FILE,
     KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, reset_positions,
     MAX_TRADE_USD, get_trade_cap, auto_close_resolved_positions,
+    reconcile_positions,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
@@ -180,7 +181,31 @@ def handle_command(text: str):
         except Exception as ex:
             send_error(f"Pipeline test error: {ex}")
 
-    # RESET_POSITIONS — clear stale/orphaned positions so the concurrency gate resets
+    # RECONCILE — diff state vs real Polymarket holdings, drop ghost positions
+    elif cmd in ("RECONCILE", "/RECONCILE"):
+        send_status("🔄 Reconciling state against live Polymarket portfolio…")
+        try:
+            removed, kept = reconcile_positions()
+            if removed:
+                lines = "\n".join(
+                    f"  • {p.get('sport','?')} | {p.get('outcome','?')} "
+                    f"({p.get('market_slug','?')})"
+                    for p in removed
+                )
+                send_status(
+                    f"🧹 RECONCILE: removed {len(removed)} ghost position(s) not backed by real PM holdings:\n"
+                    f"{lines}\n\n"
+                    f"{len(kept)} position(s) confirmed real and kept."
+                )
+            else:
+                send_status(
+                    f"✅ RECONCILE: all {len(kept)} tracked position(s) confirmed against Polymarket. "
+                    f"No ghosts found."
+                )
+        except Exception as ex:
+            send_error(f"RECONCILE error: {ex}")
+
+    # RESET_POSITIONS — nuclear option: wipe all positions from state
     elif cmd in ("RESET_POSITIONS", "/RESET_POSITIONS", "CLEAR_POSITIONS", "/CLEAR_POSITIONS"):
         n = reset_positions()
         send_status(
@@ -359,7 +384,8 @@ def handle_command(text: str):
             "VETO <id> | VETO ALL — cancel a pending live trade\n"
             "CLOSE: <market> <outcome> [pnl_pct] — mark position closed\n"
             "TEST — verify full pipeline (gates · PM auth · executor)\n"
-            "RESET_POSITIONS — clear stale/orphaned positions (frees up concurrency slots)\n"
+            "RECONCILE — diff state vs real Polymarket holdings, drop ghost positions\n"
+            "RESET_POSITIONS — nuclear wipe of all positions from state\n"
             "RESET_DRAWDOWN — disarm the 5% kill switch\n"
             "LOG — last 5 logged signals\n"
             "MARKETS: <query> — search Polymarket markets\n"
@@ -893,6 +919,30 @@ def main():
             )
         except Exception:
             pass
+
+    # Reconcile state against real Polymarket holdings on every startup.
+    # Removes ghost positions (recorded in state but not backed by a real PM
+    # holding) so PF-03 never blocks trades due to phantom concurrency count.
+    try:
+        rec_removed, rec_kept = reconcile_positions()
+        if rec_removed:
+            lines = ", ".join(
+                f"{p.get('sport','?')}/{p.get('outcome','?')}"
+                for p in rec_removed
+            )
+            print(f"Startup reconcile: removed {len(rec_removed)} ghost position(s): {lines}")
+            try:
+                send_status(
+                    f"🧹 Startup reconcile: removed {len(rec_removed)} ghost position(s) "
+                    f"not backed by real Polymarket holdings ({lines}). "
+                    f"{len(rec_kept)} real position(s) kept."
+                )
+            except Exception:
+                pass
+        else:
+            print(f"Startup reconcile: {len(rec_kept)} position(s) confirmed real.")
+    except Exception as e:
+        print(f"Startup reconcile error (non-fatal): {e}")
 
     # Auto-reset phase and orphaned positions when WC is no longer active.
     # Any positions remaining in state from a concluded WC are stale — the markets
