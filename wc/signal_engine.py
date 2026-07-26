@@ -1,9 +1,9 @@
-"""SIGNAL (maker) + CHECKER (Haiku verifier), generalized to multi-sport.
+"""SIGNAL (maker) + CHECKER (Sonnet verifier), generalized to multi-sport.
 
 SIGNAL calls use a Kimi K2 client (OpenAI-compatible, OPENAI_API_KEY) via
 Moonshot's API — free-tier / very cheap, handles the high-frequency polling.
-CHECKER stays on Claude Haiku (ANTHROPIC_API_KEY) — cheapest Claude, only
-fires on rare TRADE signals, still fails CLOSED on any error.
+CHECKER uses Claude Sonnet (ANTHROPIC_API_KEY) — strong verification, only
+fires on executable TRADE signals (never on alert-only), fails CLOSED on error.
 """
 
 import anthropic
@@ -263,8 +263,18 @@ Output ONLY valid JSON, no other text:
 
 
 def run_checker(signal: dict) -> dict:
-    """Claude Haiku verification of a TRADE signal. Fails CLOSED to REJECTED
-    on any error so a broken checker never lets a trade through unverified."""
+    """Claude Sonnet verification of a TRADE signal. Fails CLOSED to REJECTED
+    on any error so a broken checker never lets a trade through unverified.
+
+    Only the essential decision fields are sent — not the full signal dict,
+    which can contain large ESPN/catalog blobs from Kimi's response."""
+    _CHECKER_FIELDS = {
+        "signal_type", "sport", "edge", "market", "market_slug",
+        "direction", "outcome", "entry_price_pct", "target_exit_pct",
+        "rationale", "size_pct_bankroll", "expires", "confidence",
+        "gate_check", "gate_notes",
+    }
+    slim = {k: v for k, v in signal.items() if k in _CHECKER_FIELDS}
     try:
         message = checker_client.messages.create(
             model=CHECKER_MODEL,
@@ -272,7 +282,7 @@ def run_checker(signal: dict) -> dict:
             system=CHECKER_PROMPT,
             messages=[{
                 "role":    "user",
-                "content": f"Verify this signal:\n{json.dumps(signal, indent=2)}",
+                "content": f"Verify this signal:\n{json.dumps(slim, indent=2)}",
             }],
         )
         result = _parse_json_response(message.content[0].text.strip())
