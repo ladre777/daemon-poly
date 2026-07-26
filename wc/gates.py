@@ -113,6 +113,15 @@ def check_gates(signal: dict) -> tuple:
     entry_price  = float(signal.get("entry_price_pct", 0))
     phase        = state.get("current_phase", "GROUP_STAGE")
 
+    # PF-00: Direction must be YES — executor is long-only (buying NO is not
+    # supported; the AI should buy the opposing outcome's YES market instead).
+    direction = (signal.get("direction") or "YES").upper()
+    if direction not in ("YES", "BUY", "LONG"):
+        violations.append(
+            f"PF-00: direction '{direction}' is not executable — "
+            f"buy the opposing outcome's YES market instead of going NO/short"
+        )
+
     # PF-01: Size cap by edge type
     cap = CAPS.get(edge, 5)
     if size > cap:
