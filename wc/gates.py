@@ -193,6 +193,7 @@ def record_trade_opened(signal: dict):
             "target_exit":  signal.get("target_exit_pct"),
             "size_pct":     signal.get("size_pct_bankroll"),
             "edge":         signal.get("edge"),
+            "sport":        signal.get("sport", ""),
             "opened_at":    datetime.now(timezone.utc).isoformat(),
             "order_id":     signal.get("order_id", ""),
         }
@@ -269,6 +270,72 @@ def record_trade_closed(market: str, outcome: str, pnl_pct: float = 0.0) -> floa
         return state.get("total_realized_loss_pct", 0.0)
 
 
+def auto_close_resolved_positions(
+    sport_key: str,
+    valid_slugs: set,
+    consecutive_empty: int,
+    consecutive_empty_threshold: int = 3,
+) -> list:
+    """Remove active positions for a sport whose market has resolved on Polymarket.
+
+    A position is considered resolved when its market_slug is absent from the live
+    catalog.  Two modes:
+
+    1. Non-empty catalog (valid_slugs is non-empty):
+       Any position for this sport whose market_slug is not in valid_slugs is
+       resolved — the outcome-level market is gone from the live exchange.
+
+    2. Empty catalog, consecutive threshold reached:
+       When the catalog fetch returns nothing for N consecutive cycles the market
+       is very likely settled/delisted.  Only then do we act, to avoid wiping
+       positions on a single transient API failure.
+
+    Removed positions are appended to closed_positions with closed_reason so the
+    operator has a full audit trail.  total_bankroll_deployed_pct is decremented.
+    Returns the list of position dicts that were removed."""
+    resolved = []
+    with STATE_LOCK:
+        state = load_state()
+        remaining = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for pos in state.get("active_positions", []):
+            slug = (pos.get("market_slug") or "").strip()
+            pos_sport = (pos.get("sport") or "").strip()
+
+            # Only inspect positions that belong to this sport and have a slug.
+            if pos_sport != sport_key or not slug:
+                remaining.append(pos)
+                continue
+
+            stale = False
+            if valid_slugs:
+                # Catalog healthy — slug is absent → market resolved.
+                stale = slug not in valid_slugs
+            elif consecutive_empty >= consecutive_empty_threshold:
+                # Catalog persistently empty → treat as season/tournament over.
+                stale = True
+
+            if stale:
+                resolved.append(pos)
+                closed = dict(pos)
+                closed["closed_at"]     = now_iso
+                closed["pnl_pct"]       = 0.0
+                closed["closed_reason"] = "auto_resolved/slug_missing"
+                state["closed_positions"].append(closed)
+                state["total_bankroll_deployed_pct"] = max(
+                    0,
+                    state.get("total_bankroll_deployed_pct", 0)
+                    - float(pos.get("size_pct", 0) or 0),
+                )
+            else:
+                remaining.append(pos)
+
+        if resolved:
+            state["active_positions"] = remaining
+            save_state(state)
+    return resolved
+
+
 def reset_positions() -> int:
     """Operator recovery: wipe all active positions and reset deployed-% counter.
     Use when Railway state contains stale/orphaned positions (e.g. after a
@@ -281,6 +348,50 @@ def reset_positions() -> int:
         state["total_bankroll_deployed_pct"] = 0.0
         save_state(state)
         return n
+
+
+def reconcile_positions() -> tuple:
+    """Cross-check active_positions in state against real Polymarket US holdings.
+
+    Removes any position whose market_slug is NOT in the live portfolio (ghost
+    entries caused by orders that were recorded but never actually filled, or by
+    resolved markets whose per-outcome slug never appeared in the futures catalog
+    so auto_close_resolved_positions never cleaned them).
+
+    Positions with no market_slug are kept — they can't be verified and must be
+    closed manually.
+
+    Returns (removed: list[dict], kept: list[dict]).
+    Fails SAFE: if the portfolio API call returns an empty dict (error), the state
+    is left untouched so real positions are never wiped on a transient failure.
+    """
+    from pm_us import get_real_positions   # local import to avoid circular dep
+    real = get_real_positions()
+    # Empty dict = API error; do nothing.
+    if not isinstance(real, dict):
+        return [], []
+
+    removed, kept = [], []
+    with STATE_LOCK:
+        state = load_state()
+        for pos in state.get("active_positions", []):
+            slug = (pos.get("market_slug") or "").strip()
+            if not slug:
+                # Can't verify — leave in place.
+                kept.append(pos)
+            elif slug in real:
+                kept.append(pos)
+            else:
+                removed.append(pos)
+                state["total_bankroll_deployed_pct"] = max(
+                    0,
+                    state.get("total_bankroll_deployed_pct", 0)
+                    - float(pos.get("size_pct", 0) or 0),
+                )
+        if removed:
+            state["active_positions"] = kept
+            save_state(state)
+    return removed, kept
 
 
 def reset_drawdown() -> None:
