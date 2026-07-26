@@ -22,7 +22,7 @@ from gates import (
     record_trade_closed, update_phase, set_dry_run, dedupe_active_positions,
     get_state_summary, load_state, save_state, STATE_FILE,
     KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, reset_positions,
-    MAX_TRADE_USD, get_trade_cap, auto_close_resolved_positions,
+    get_trade_cap, auto_close_resolved_positions,
     reconcile_positions,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
@@ -33,11 +33,15 @@ IN_PLAY_INTERVAL_SEC = 45
 STATUS_PORT          = int(os.environ.get("PORT", 8099))
 _tg_offset = 0
 
-# In-memory alert throttle: looping 4 sports every few minutes can flood Telegram
-# with repeat gate-fail / checker-kill / monitor notices. Approved TRADE signals
-# and the kill-switch alert are NEVER throttled — only routine repeats are deduped.
+# In-memory alert throttle for MONITOR signals only — gate/checker rejections and
+# confirmed trades are never throttled (see _passes_gates_and_checker).
 _alert_history     = {}
 ALERT_COOLDOWN_SEC = 1800
+
+# Discovery scan is expensive (Kimi scans 900+ outcomes). Run every 15 min, not
+# every 3 min — it's broad cross-sport scanning, not time-critical per-game analysis.
+_last_discovery_ts:   float = 0.0
+DISCOVERY_INTERVAL_SEC: int = 900  # 15 min
 
 # Track how many consecutive main-loop cycles each sport's catalog came back empty.
 # Used by auto_close_resolved_positions to distinguish transient API failures from a
@@ -532,7 +536,9 @@ def analyze_sport(sport_cfg: dict, dry: bool):
 
         # Standings give the AI win%, run/point differential, and playoff odds —
         # the context it needs to spot futures mispricings for MLB and WNBA.
-        standings_ctx = get_standings(sport_cfg)
+        # Only fetch standings when there are actual games to analyse —
+        # saves an ESPN API call when the schedule is empty.
+        standings_ctx = get_standings(sport_cfg) if matches else ""
         if standings_ctx:
             context += f"\n\n{standings_ctx}"
 
@@ -591,29 +597,42 @@ def analyze_sport(sport_cfg: dict, dry: bool):
                         print(f"  [{label}] slug auto-filled (sole config futures entry): {slug}")
 
             if executable:
+                # Full pipeline: gates + Sonnet checker — cost is justified, real money on the line.
                 signal["_tick"] = idx[slug].get("tick", "0.001")
-            if _passes_gates_and_checker(signal):
-                send_trade_signal(signal)
-                record_signal_sent(signal)
-                if dry:
-                    tag = "" if executable else " (alert-only: no US slug)"
-                    print(f"  {dry_run_signal(signal)}{tag}")
-                elif not executable:
-                    send_status(
-                        f"ℹ️ {signal.get('sport')} TRADE signal — no auto-executable US slug found.\n"
-                        f"Market: {signal.get('market')} | Outcome: {signal.get('outcome')}\n"
-                        f"Signal slug: '{signal.get('market_slug','')}' | Catalog has {len(valid_slugs)} slug(s)\n"
-                        f"No order placed. Check futures slugs in sports_config.py."
-                    )
-                    log_signal(signal, executed=False, error="no US slug (alert-only)")
+                if _passes_gates_and_checker(signal):
+                    send_trade_signal(signal)
+                    record_signal_sent(signal)
+                    if dry:
+                        print(f"  {dry_run_signal(signal)}")
+                    else:
+                        bankroll = pm_us.get_buying_power()
+                        cap      = get_trade_cap(bankroll)
+                        size_usd = min(
+                            bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
+                            cap,
+                        )
+                        _fire_trade(signal, size_usd, idx)
+            else:
+                # Alert-only (no US slug) — gates only, skip the Sonnet checker entirely.
+                passed, violations = check_gates(signal)
+                signal["gate_check"] = "PASS" if passed else "FAIL"
+                signal["gate_notes"] = "; ".join(violations) if violations else "All gates passed"
+                if not passed:
+                    print(f"  [{label}] GATE FAIL (alert-only): {signal['gate_notes']}")
+                    log_signal(signal, executed=False)
                 else:
-                    bankroll = pm_us.get_buying_power()
-                    cap      = get_trade_cap(bankroll)
-                    size_usd = min(
-                        bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
-                        cap,
-                    )
-                    _fire_trade(signal, size_usd, idx)
+                    send_trade_signal(signal)
+                    record_signal_sent(signal)
+                    if dry:
+                        print(f"  {dry_run_signal(signal)} (alert-only: no US slug)")
+                    else:
+                        send_status(
+                            f"ℹ️ {signal.get('sport')} TRADE signal — no auto-executable US slug.\n"
+                            f"Market: {signal.get('market')} | Outcome: {signal.get('outcome')}\n"
+                            f"Slug '{signal.get('market_slug','')}' not in {len(valid_slugs)}-slug catalog.\n"
+                            f"No order placed."
+                        )
+                        log_signal(signal, executed=False, error="no US slug (alert-only)")
 
         elif stype == "MONITOR":
             if _should_send(f"monitor:{signal.get('sport')}:{signal.get('watch')}"):
@@ -634,7 +653,13 @@ def analyze_sport(sport_cfg: dict, dry: bool):
 
 def run_discovery_scan(dry: bool):
     """Broad Polymarket US market discovery — finds edges across all sports,
-    not just the 5 pre-configured ones. Runs after the per-sport loop."""
+    not just the 5 pre-configured ones. Throttled to DISCOVERY_INTERVAL_SEC
+    (15 min) because scanning 900+ outcomes is the most expensive Kimi call."""
+    global _last_discovery_ts
+    now = time.time()
+    if now - _last_discovery_ts < DISCOVERY_INTERVAL_SEC:
+        return
+    _last_discovery_ts = now
     try:
         catalog = pm_us.discover_us_markets()
         if not catalog:
@@ -648,31 +673,43 @@ def run_discovery_scan(dry: bool):
         if stype == "NO_SIGNAL":
             print(f"  [🔭 Discovery] {signal.get('reason', '')[:180]}")
         elif stype == "TRADE":
-            idx = pm_us.catalog_index(catalog)
+            idx  = pm_us.catalog_index(catalog)
             slug = (signal.get("market_slug") or "").strip()
             executable = bool(slug) and slug in idx
             if executable:
                 signal["_tick"] = idx[slug].get("tick", "0.001")
-            if _passes_gates_and_checker(signal):
-                send_trade_signal(signal)
-                record_signal_sent(signal)
-                if dry:
-                    tag = "" if executable else " (alert-only: no US slug)"
-                    print(f"  {dry_run_signal(signal)}{tag}")
-                elif not executable:
-                    send_status(
-                        f"ℹ️ Discovery signal is ALERT-ONLY — no auto-executable slug.\n"
-                        f"{signal.get('market','?')} / {signal.get('outcome','?')}"
-                    )
-                    log_signal(signal, executed=False, error="discovery: no US slug")
+                if _passes_gates_and_checker(signal):
+                    send_trade_signal(signal)
+                    record_signal_sent(signal)
+                    if dry:
+                        print(f"  {dry_run_signal(signal)}")
+                    else:
+                        bankroll = pm_us.get_buying_power()
+                        cap      = get_trade_cap(bankroll)
+                        size_usd = min(
+                            bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
+                            cap,
+                        )
+                        _fire_trade(signal, size_usd, idx)
+            else:
+                # Alert-only — skip Sonnet checker
+                passed, violations = check_gates(signal)
+                signal["gate_check"] = "PASS" if passed else "FAIL"
+                signal["gate_notes"] = "; ".join(violations) if violations else "All gates passed"
+                if passed:
+                    send_trade_signal(signal)
+                    record_signal_sent(signal)
+                    if dry:
+                        print(f"  {dry_run_signal(signal)} (alert-only: no slug)")
+                    else:
+                        send_status(
+                            f"ℹ️ Discovery signal is ALERT-ONLY — no auto-executable slug.\n"
+                            f"{signal.get('market','?')} / {signal.get('outcome','?')}"
+                        )
+                        log_signal(signal, executed=False, error="discovery: no US slug")
                 else:
-                    bankroll = pm_us.get_buying_power()
-                    cap      = get_trade_cap(bankroll)
-                    size_usd = min(
-                        bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
-                        cap,
-                    )
-                    _fire_trade(signal, size_usd, idx)
+                    print(f"  [🔭 Discovery] GATE FAIL (alert-only): {signal['gate_notes']}")
+                    log_signal(signal, executed=False)
         elif stype == "ERROR":
             print(f"  [🔭 Discovery] ERROR: {signal.get('reason', '')[:180]}")
     except Exception as e:
@@ -727,29 +764,43 @@ def run_in_play_check():
                     signal["entry_price_pct"] = us_game.get("implied_pct",
                                                              signal.get("entry_price_pct", 0))
                     signal["_tick"] = "0.001"
-                if _passes_gates_and_checker(signal):
-                    send_trade_signal(signal)
-                    record_signal_sent(signal)
-                    if dry:
-                        tag = "" if executable else " (alert-only: no US per-game slug)"
-                        print(f"  ⚡ {dry_run_signal(signal)}{tag}")
-                    elif not executable:
-                        send_status(
-                            f"ℹ️ In-play signal is ALERT-ONLY — no US per-game market.\n"
-                            f"{signal.get('market','?')} / {signal.get('outcome','?')}"
-                        )
-                        log_signal(signal, executed=False, error="in-play: no US slug")
+                    # Full pipeline — real execution possible
+                    if _passes_gates_and_checker(signal):
+                        send_trade_signal(signal)
+                        record_signal_sent(signal)
+                        if dry:
+                            print(f"  ⚡ {dry_run_signal(signal)}")
+                        else:
+                            bankroll = pm_us.get_buying_power()
+                            cap      = get_trade_cap(bankroll)
+                            size_usd = min(
+                                bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
+                                cap,
+                            )
+                            _fire_trade(signal, size_usd, {slug: {
+                                "tick": "0.001", "outcome": signal.get("outcome"),
+                                "market": signal.get("market"),
+                                "implied_pct": signal.get("entry_price_pct"),
+                            }})
+                else:
+                    # Alert-only — gates only, skip Sonnet checker
+                    passed, violations = check_gates(signal)
+                    signal["gate_check"] = "PASS" if passed else "FAIL"
+                    signal["gate_notes"] = "; ".join(violations) if violations else "All gates passed"
+                    if passed:
+                        send_trade_signal(signal)
+                        record_signal_sent(signal)
+                        if dry:
+                            print(f"  ⚡ {dry_run_signal(signal)} (alert-only: no US per-game slug)")
+                        else:
+                            send_status(
+                                f"ℹ️ In-play signal is ALERT-ONLY — no US per-game market.\n"
+                                f"{signal.get('market','?')} / {signal.get('outcome','?')}"
+                            )
+                            log_signal(signal, executed=False, error="in-play: no US slug")
                     else:
-                        bankroll = pm_us.get_buying_power()
-                        cap      = get_trade_cap(bankroll)
-                        size_usd = min(
-                            bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
-                            cap,
-                        )
-                        _fire_trade(signal, size_usd, {slug: {
-                            "tick": "0.001", "outcome": signal.get("outcome"),
-                            "market": signal.get("market"), "implied_pct": signal.get("entry_price_pct"),
-                        }})
+                        print(f"  ⚡ IN-PLAY GATE FAIL (alert-only): {signal['gate_notes']}")
+                        log_signal(signal, executed=False)
 
 
 # ── HEARTBEAT ───────────────────────────────────────────────────────────────
