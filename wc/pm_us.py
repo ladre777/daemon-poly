@@ -69,18 +69,21 @@ def get_pm_client():
         return None
 
 
-def get_real_positions() -> dict:
-    """Return a dict of {market_slug: position_info} for every position currently
-    held on Polymarket US.  Used by reconcile_positions() in gates.py to detect
-    ghost entries in state that are not backed by a real holding.
+def get_real_positions() -> dict | None:
+    """Return {market_slug: position_info} for every live Polymarket US holding.
+    Used by reconcile_positions() in gates.py to detect ghost state entries.
 
-    Returns an empty dict on any API failure so callers can fail-safe (keep state
-    unchanged rather than wiping real positions on a transient error).
+    Return semantics — IMPORTANT for the fail-safe:
+      None  → API call failed (client unavailable, network error, etc.)
+              reconcile must not act; leave state untouched.
+      {}    → API call succeeded; portfolio is genuinely empty.
+              reconcile may act (every tracked slug is a ghost).
+      {...} → API call succeeded with live positions.
     """
     try:
         client = get_pm_client()
         if not client:
-            return {}
+            return None   # client init failure — treat as API error
         resp = client.portfolio.positions()
         raw = resp.get("positions", {})
         out = {}
@@ -93,10 +96,10 @@ def get_real_positions() -> dict:
                     "outcome": (info.get("marketMetadata") or {}).get("outcome", ""),
                     "title":   (info.get("marketMetadata") or {}).get("title", ""),
                 }
-        return out
+        return out   # {} is a valid "no positions" result — NOT an error
     except Exception as e:
         print(f"[PM-US] get_real_positions error: {e}")
-        return {}
+        return None  # any exception → treat as API error, not empty portfolio
 
 
 def get_buying_power() -> float:
