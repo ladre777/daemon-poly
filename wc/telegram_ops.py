@@ -65,7 +65,7 @@ def send_trade_signal(signal: dict) -> dict:
         f"<b>CONFIDENCE:</b> {conf}\n"
         f"<b>EXPIRES:</b> {signal.get('expires', 'N/A')}\n"
         f"──────────────────────\n"
-        f"⚡ <i>ACTION REQUIRED: APPROVE / SKIP</i>\n"
+        f"⚡ <i>Auto-executing via Polymarket US…</i>\n"
         f"<code>{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</code>"
     )
     return send_message(text)
