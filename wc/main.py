@@ -26,7 +26,7 @@ from gates import (
     reconcile_positions,
     is_phase_cap_exhausted, reset_phase_counts,
     add_near_miss, pop_near_misses,
-    MAX_TRADES_PER_PHASE,
+    MAX_TRADES_PER_PHASE, STATE_LOCK,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
