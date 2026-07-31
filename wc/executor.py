@@ -3,7 +3,7 @@ import csv
 from datetime import datetime
 
 import pm_us
-from gates import MAX_TRADE_USD, get_trade_cap
+from gates import MAX_TRADE_USD, get_trade_cap, STATE_LOCK, load_state, save_state
 
 TRADE_LOG = "wc_trade_log.csv"
 
@@ -137,6 +137,19 @@ def place_order(signal: dict, size_usdc: float, catalog=None) -> dict:
             shares -= 1
         if shares < 1:
             raise ValueError(f"cannot fit a whole share under ${cap:.2f} cap at {price}")
+
+        # ── K1 safety: write pending marker before money moves ──────────────
+        # If the container dies between here and record_trade_opened() in main.py,
+        # the startup reconcile will detect this marker and recover the position.
+        with STATE_LOCK:
+            _ps = load_state()
+            _ps["pending_order"] = {
+                "market_slug": market_slug,
+                "outcome":     signal.get("outcome", ""),
+                "size_usd":    round(shares * price, 2),
+                "ts":          datetime.utcnow().isoformat(),
+            }
+            save_state(_ps)
 
         result = client.orders.create({
             "marketSlug": market_slug,
