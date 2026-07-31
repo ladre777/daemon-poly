@@ -20,7 +20,7 @@ import requests
 from datetime import datetime, timezone
 from typing import Optional
 
-from gates import load_state, save_state, STATE_LOCK
+from gates import load_state, save_state, STATE_LOCK, reset_phase_for_event_change
 from telegram_ops import send_status
 
 ESPN_HOST = "https://site.api.espn.com/apis/site/v2/sports"
@@ -226,6 +226,12 @@ def check_and_update_golf(sport_cfg: dict) -> bool:
     old_label = sport_cfg.get("label", old_name)
     _apply_to_cfg(sport_cfg, override)
     _save_override("golf", override)
+
+    # Auto-reset phase count for the new tournament — the old count
+    # belongs to the previous event and must not carry forward to block
+    # signal generation in the new one.  Keyed off the new label so
+    # restarts never re-trigger the reset (epoch is persisted in state).
+    reset_phase_for_event_change("golf", override["label"])
 
     pm_note = (
         f"Polymarket: {next(iter(futures.values()))} ✅"
