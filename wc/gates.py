@@ -23,6 +23,7 @@ DEFAULT_STATE = {
     "total_realized_loss_pct":     0.0,
     "last_signal_time":        None,
     "phase_epoch":             {},   # {sport_key: event_label} — identity for auto-reset
+    "pending_order":           None, # written just before client.orders.create(); cleared atomically in record_trade_opened
 }
 
 CAPS = {
@@ -304,6 +305,9 @@ def record_trade_opened(signal: dict):
         state["total_bankroll_deployed_pct"] = (
             state.get("total_bankroll_deployed_pct", 0) + float(signal.get("size_pct_bankroll", 0))
         )
+        # K1 safety: clear the pending_order marker in the same write that records
+        # the full position — atomically removes the crash-recovery breadcrumb.
+        state["pending_order"] = None
         save_state(state)
 
 
