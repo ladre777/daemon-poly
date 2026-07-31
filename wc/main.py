@@ -24,12 +24,20 @@ from gates import (
     KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, reset_positions,
     get_trade_cap, auto_close_resolved_positions,
     reconcile_positions,
+    is_phase_cap_exhausted, reset_phase_counts,
+    add_near_miss, pop_near_misses,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
 
-POLL_INTERVAL_MIN    = 3
-IN_PLAY_INTERVAL_SEC = 45
+POLL_INTERVAL_MIN      = 3    # normal cadence (any live or unknown game state)
+POLL_INTERVAL_IDLE_MIN = 12   # idle cadence (all tracked games FINAL)
+IN_PLAY_INTERVAL_SEC   = 45
+
+# Variable-cadence state — main analysis uses a manual timer instead of
+# schedule so the interval can widen when all games are done.
+_last_main_ts: float = 0.0
+_current_poll_sec: int = POLL_INTERVAL_MIN * 60
 STATUS_PORT          = int(os.environ.get("PORT", 8099))
 _tg_offset = 0
 
@@ -50,6 +58,19 @@ DISCOVERY_INTERVAL_SEC: int = 900  # 15 min
 # re-verify before acting).
 _empty_catalog_streak: dict = {}
 EMPTY_CATALOG_THRESHOLD = 3   # consecutive empty fetches required before force-close
+
+
+def _all_games_final() -> bool:
+    """Return True when every active sport has no live or scheduled upcoming games.
+    Used to widen the poll interval when there is nothing actionable to monitor."""
+    for sport_cfg in active_sports():
+        try:
+            live = get_live_matches(sport_cfg)
+            if live:
+                return False
+        except Exception:
+            return False  # on error assume live — fail towards more frequent polling
+    return True
 
 
 def _should_send(key: str) -> bool:
@@ -295,6 +316,17 @@ def handle_command(text: str):
         else:
             send_error("Usage: CLOSE <market> <outcome> [pnl_pct]")
 
+    # RESET_PHASE_COUNT — zero out phase trade counters without touching positions
+    elif cmd in ("RESET_PHASE_COUNT", "/RESET_PHASE_COUNT", "RESET_TRADES", "/RESET_TRADES"):
+        old = reset_phase_counts()
+        total = sum(old.values())
+        phase = load_state().get("current_phase", "?")
+        send_status(
+            f"♻️ Phase trade counts reset to zero.\n"
+            f"Cleared {total} trade(s) across all phases (was {old.get(phase, 0)} in current phase {phase}).\n"
+            f"New trades are unblocked — phase cap starts fresh."
+        )
+
     # RESET DRAWDOWN — disarm the kill switch after a reviewed drawdown
     elif cmd in ("RESET_DRAWDOWN", "RESET DRAWDOWN", "RESETDRAWDOWN"):
         reset_drawdown()
@@ -347,7 +379,9 @@ def handle_command(text: str):
             "RECONCILE — diff state vs real Polymarket holdings, drop ghost positions\n"
             "RESET_POSITIONS — nuclear wipe of all positions from state\n"
             "RESET_DRAWDOWN — disarm the 5% kill switch\n"
+            "RESET_PHASE_COUNT — zero phase trade counters (unblock cap without wiping positions)\n"
             "LOG — last 5 logged signals\n"
+            "DEDUP — show currently suppressed signals (15-min dedup cache)\n"
             "MARKETS: <query> — search Polymarket markets\n"
             "HELP — this menu"
         )
@@ -534,6 +568,54 @@ def analyze_sport(sport_cfg: dict, dry: bool):
 
         context = f"Games listed: {len(matches)} | {get_state_summary()}"
 
+        # ── NEAR-MISS RE-VALIDATION ───────────────────────────────────────────
+        # Before generating a fresh signal, replay any cap-blocked near-misses
+        # stored for this sport.  Each one is re-checked against the live catalog:
+        # if the slug is still present and the price hasn't moved >5pp, it goes
+        # through the full gates+checker pipeline and fires if approved.
+        for nm in pop_near_misses(sport_key=sport_cfg["key"]):
+            nm_sig  = nm["signal"]
+            nm_slug = (nm_sig.get("market_slug") or "").strip()
+            if not nm_slug or nm_slug not in valid_slugs:
+                print(f"  [{label}] ♻️ Near-miss expired (slug gone): {nm_sig.get('market')}")
+                continue
+            current_pct = idx[nm_slug].get("implied_pct") or 0
+            stored_pct  = float(nm_sig.get("entry_price_pct") or 0)
+            if abs(current_pct - stored_pct) > 5.0:
+                print(f"  [{label}] ♻️ Near-miss stale — price moved "
+                      f"{stored_pct}→{current_pct}¢: {nm_sig.get('market')}")
+                send_status(
+                    f"⚠️ Near-miss expired — price drifted too far.\n"
+                    f"{nm_sig.get('market')} / {nm_sig.get('outcome')}\n"
+                    f"Stored {stored_pct}¢ → now {current_pct}¢ (>5pp drift)"
+                )
+                continue
+            print(f"  [{label}] ♻️ Re-validating near-miss: "
+                  f"{nm_sig.get('market')} / {nm_sig.get('outcome')}")
+            nm_sig["entry_price_pct"] = current_pct
+            nm_sig["_tick"]           = idx[nm_slug].get("tick", "0.001")
+            if _passes_gates_and_checker(nm_sig):
+                send_trade_signal(nm_sig)
+                record_signal_sent(nm_sig)
+                if dry:
+                    print(f"  {dry_run_signal(nm_sig)} [near-miss re-exec]")
+                else:
+                    bankroll = pm_us.get_buying_power()
+                    cap      = get_trade_cap(bankroll)
+                    size_usd = min(
+                        bankroll * float(nm_sig.get("size_pct_bankroll", 5)) / 100, cap
+                    )
+                    _fire_trade(nm_sig, size_usd, idx)
+
+        # ── PHASE-CAP GUARD — skip LLM when no trade slot is available ────────
+        # All gates (including PF-10) run AFTER signal generation normally, but
+        # calling Kimi at 10/10 burns a token with zero chance of execution.
+        # We check here, before the expensive model call, and bail early.
+        if is_phase_cap_exhausted():
+            print(f"  [{label}] Phase cap exhausted — skipping signal generation "
+                  f"(no trade slot available)")
+            return
+
         # Standings give the AI win%, run/point differential, and playoff odds —
         # the context it needs to spot futures mispricings for MLB and WNBA.
         # Only fetch standings when there are actual games to analyse —
@@ -599,7 +681,19 @@ def analyze_sport(sport_cfg: dict, dry: bool):
             if executable:
                 # Full pipeline: gates + Sonnet checker — cost is justified, real money on the line.
                 signal["_tick"] = idx[slug].get("tick", "0.001")
-                if _passes_gates_and_checker(signal):
+                # Pre-screen: if phase cap is the SOLE gate failure, store as near-miss
+                # rather than running the Sonnet checker (which would be wasted cost).
+                _pre_passed, _pre_viols = check_gates(signal)
+                if not _pre_passed and len(_pre_viols) == 1 and "PF-10" in _pre_viols[0]:
+                    add_near_miss(signal)
+                    print(f"  [{label}] 📋 Near-miss stored (cap-blocked): "
+                          f"{signal.get('market')} / {signal.get('outcome')}")
+                    send_status(
+                        f"📋 Near-miss stored — phase cap full.\n"
+                        f"{signal.get('sport','')} | {signal.get('market')} / {signal.get('outcome')}\n"
+                        f"Will re-evaluate when a trade slot opens up."
+                    )
+                elif _passes_gates_and_checker(signal):
                     send_trade_signal(signal)
                     record_signal_sent(signal)
                     if dry:
@@ -658,6 +752,10 @@ def run_discovery_scan(dry: bool):
     global _last_discovery_ts
     now = time.time()
     if now - _last_discovery_ts < DISCOVERY_INTERVAL_SEC:
+        return
+    # Skip LLM scan when phase cap is exhausted — discovery can't execute anyway.
+    if is_phase_cap_exhausted():
+        print("  [🔭 Discovery] Phase cap exhausted — skipping discovery scan")
         return
     _last_discovery_ts = now
     try:
@@ -740,6 +838,10 @@ def run_in_play_check():
         for match in live:
             if not is_in_play_window(sport_cfg, match):
                 continue
+            # Skip in-play LLM call when phase cap is exhausted.
+            if is_phase_cap_exhausted():
+                print(f"  ⚡ IN-PLAY [{sport_cfg['label']}]: phase cap exhausted — skipping")
+                break
             game         = find_game_market_odds(
                 match.get("home_team", ""), match.get("away_team", ""), sport_cfg["label"]
             )
@@ -977,14 +1079,32 @@ def main():
         # but log loudly so the problem is visible in Railway logs.
         print("WARNING: Polymarket buying power is $0. Check POLYMARKET_KEY_ID / POLYMARKET_SECRET_KEY.")
 
-    schedule.every(POLL_INTERVAL_MIN).minutes.do(run_main_analysis)
+    # run_main_analysis uses a manual timer (not schedule) so the interval can
+    # widen automatically when all tracked games are FINAL.
     schedule.every(IN_PLAY_INTERVAL_SEC).seconds.do(run_in_play_check)
     schedule.every().day.at("12:00").do(send_heartbeat)
 
+    global _last_main_ts, _current_poll_sec
     run_main_analysis(triggered_by="STARTUP")
+    _last_main_ts = time.time()
 
     while True:
         schedule.run_pending()
+        now = time.time()
+        if now - _last_main_ts >= _current_poll_sec:
+            run_main_analysis()
+            _last_main_ts = time.time()
+            # Adjust poll cadence based on game state.
+            if _all_games_final():
+                new_sec = POLL_INTERVAL_IDLE_MIN * 60
+                if _current_poll_sec != new_sec:
+                    print(f"[CADENCE] All games final — widening poll to {POLL_INTERVAL_IDLE_MIN} min")
+                    _current_poll_sec = new_sec
+            else:
+                new_sec = POLL_INTERVAL_MIN * 60
+                if _current_poll_sec != new_sec:
+                    print(f"[CADENCE] Live games detected — tightening poll to {POLL_INTERVAL_MIN} min")
+                    _current_poll_sec = new_sec
         time.sleep(5)
 
 
