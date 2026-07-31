@@ -293,6 +293,10 @@ def record_trade_opened(signal: dict):
             "sport":        signal.get("sport", ""),
             "opened_at":    datetime.now(timezone.utc).isoformat(),
             "order_id":     signal.get("order_id", ""),
+            # Execution fill — stored so the P&L monitor can compute
+            # unrealized profit without re-fetching position size.
+            "shares":       int(signal.get("shares", 0) or 0),
+            "notional_usd": float(signal.get("notional_usd", 0.0) or 0.0),
         }
 
         state["active_positions"].append(position)
