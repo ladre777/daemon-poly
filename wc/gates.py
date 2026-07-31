@@ -22,6 +22,7 @@ DEFAULT_STATE = {
     "total_bankroll_deployed_pct": 0.0,
     "total_realized_loss_pct":     0.0,
     "last_signal_time":        None,
+    "phase_epoch":             {},   # {sport_key: event_label} — identity for auto-reset
 }
 
 CAPS = {
@@ -66,6 +67,32 @@ def is_phase_cap_exhausted() -> bool:
     state = load_state()
     phase = state.get("current_phase", "GROUP_STAGE")
     return state.get("phase_trade_counts", {}).get(phase, 0) >= MAX_TRADES_PER_PHASE
+
+
+def reset_phase_for_event_change(sport_key: str, new_event_label: str) -> bool:
+    """Zero the current phase's trade count when a real event/tournament change is
+    detected for sport_key.  Only resets when the stored epoch differs from
+    new_event_label — so mid-phase restarts never trigger a spurious reset (the
+    epoch is persisted in state alongside the count).
+
+    Returns True when the count was actually zeroed (caller should log/notify).
+    Called by event_tracker after every confirmed tournament switch."""
+    with STATE_LOCK:
+        state     = load_state()
+        epoch     = state.setdefault("phase_epoch", {})
+        old_label = epoch.get(sport_key, "")
+        if old_label == new_event_label:
+            return False   # same event — cap holds, no reset
+        phase     = state.get("current_phase", "GROUP_STAGE")
+        old_count = state.get("phase_trade_counts", {}).get(phase, 0)
+        state.setdefault("phase_trade_counts", {})[phase] = 0
+        epoch[sport_key] = new_event_label
+        save_state(state)
+        print(f"[gates] Phase count auto-reset: {sport_key} event "
+              f"'{old_label}' → '{new_event_label}' | cleared {old_count} trade(s) "
+              f"in phase {phase}")
+        return True
+
 
 
 # Single process-wide lock guarding every load->mutate->save cycle. The
