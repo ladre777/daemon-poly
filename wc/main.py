@@ -47,6 +47,7 @@ _tg_offset = 0
 # confirmed trades are never throttled (see _passes_gates_and_checker).
 _alert_history     = {}
 ALERT_COOLDOWN_SEC = 1800
+PROFIT_ALERT_THRESHOLD_USD = 10.0   # alert when unrealized profit crosses this
 
 # Discovery scan is expensive (Kimi scans 900+ outcomes). Run every 15 min, not
 # every 3 min — it's broad cross-sport scanning, not time-critical per-game analysis.
@@ -517,7 +518,11 @@ def _fire_trade(signal: dict, size_usd: float, catalog: dict):
         shares   = result.get("shares", "?")
         price    = result.get("price", "?")
         notional = result.get("notional", "?")
-        signal["order_id"] = order_id
+        signal["order_id"]     = order_id
+        # Stamp fill data onto signal so record_trade_opened can persist
+        # shares/notional — required for the unrealized P&L monitor.
+        signal["shares"]       = result.get("shares", 0)
+        signal["notional_usd"] = result.get("notional", 0.0)
         record_trade_opened(signal)
         send_status(
             f"✅ ORDER PLACED\n"
@@ -828,6 +833,82 @@ def run_discovery_scan(dry: bool):
         print(f"  [🔭 Discovery] scan error: {e}")
 
 
+
+# ── UNREALIZED PROFIT MONITOR ────────────────────────────────────────────────
+
+def check_unrealized_profit():
+    """Fetch live mark price for each open position and alert when unrealized
+    profit first crosses PROFIT_ALERT_THRESHOLD_USD.
+
+    Alert behaviour:
+      * Fires ONCE per crossing — a "profit_alerted" flag is written to the
+        position in state after the first alert.
+      * If price drops back below the threshold, the flag resets automatically
+        so the next crossing fires a fresh alert (requirement: "counts as a new
+        crossing").
+      * Runs on every analysis cycle regardless of phase-cap status — a
+        position can be profitable even when signal generation is blocked.
+
+    Safe to call with zero positions — returns immediately.
+    Any bbo error for a single slug is logged and skipped (never raises)."""
+    with STATE_LOCK:
+        state     = load_state()
+        positions = state.get("active_positions", [])
+        if not positions:
+            return
+
+        changed = False
+        for pos in positions:
+            slug = (pos.get("market_slug") or "").strip()
+            if not slug:
+                continue
+
+            shares     = float(pos.get("shares") or 0)
+            entry_pct  = float(pos.get("entry_price") or 0)   # stored in ¢
+            if shares <= 0 or entry_pct <= 0:
+                # Position predates share-storage (opened before this feature)
+                # or is a dry-run placeholder — skip silently.
+                continue
+
+            current_fraction = pm_us.live_ask(slug)   # 0-1, None if no book
+            if current_fraction is None:
+                continue
+            current_pct = current_fraction * 100       # convert to ¢
+
+            # Unrealized P&L: each share pays $1 at resolution; current value
+            # of one share = current_fraction dollars.
+            # PnL = (current_price - entry_price) * shares, both as USD fractions.
+            pnl_usd = (current_fraction - entry_pct / 100.0) * shares
+
+            was_alerted = pos.get("profit_alerted", False)
+
+            if pnl_usd >= PROFIT_ALERT_THRESHOLD_USD and not was_alerted:
+                pos["profit_alerted"] = True
+                changed = True
+                market  = pos.get("market") or slug
+                outcome = pos.get("outcome", "?")
+                sport   = pos.get("sport", "")
+                print(f"  [💰 profit alert] {outcome}: +${pnl_usd:.2f} "
+                      f"({entry_pct:.1f}¢ → {current_pct:.1f}¢ × {shares:.0f} shares)")
+                send_status(
+                    f"💰 Position up ${pnl_usd:.2f}\n"
+                    f"──────────────────────\n"
+                    f"{sport} | {market}\n"
+                    f"Outcome: {outcome}\n"
+                    f"Entry {entry_pct:.1f}¢ → Current {current_pct:.1f}¢\n"
+                    f"{shares:.0f} shares · Unrealized +${pnl_usd:.2f}"
+                )
+            elif pnl_usd < PROFIT_ALERT_THRESHOLD_USD and was_alerted:
+                # Dropped back below threshold — reset so next crossing fires again.
+                pos["profit_alerted"] = False
+                changed = True
+                print(f"  [profit monitor] {pos.get('outcome','?')} dropped below "
+                      f"${PROFIT_ALERT_THRESHOLD_USD:.0f} threshold — alert flag reset")
+
+        if changed:
+            save_state(state)
+
+
 def run_main_analysis(triggered_by: str = "SCHEDULED"):
     global _cap_blocked_cycles
     now = datetime.now(timezone.utc)
@@ -861,6 +942,9 @@ def run_main_analysis(triggered_by: str = "SCHEDULED"):
     for sport_cfg in active_sports():
         analyze_sport(sport_cfg, dry)
     run_discovery_scan(dry)
+    # Monitor unrealized profit on open positions every cycle, regardless
+    # of phase cap — a position can be profitable even when new signals are blocked.
+    check_unrealized_profit()
 
 
 # ── IN-PLAY EDGE CHECK (per sport) ──────────────────────────────────────────
