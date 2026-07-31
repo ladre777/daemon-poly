@@ -850,36 +850,53 @@ def check_unrealized_profit():
         position can be profitable even when signal generation is blocked.
 
     Safe to call with zero positions — returns immediately.
-    Any bbo error for a single slug is logged and skipped (never raises)."""
-    with STATE_LOCK:
-        state     = load_state()
-        positions = state.get("active_positions", [])
-        if not positions:
-            return
+    Any bbo error for a single slug is logged and skipped (never raises).
 
-        changed = False
+    LOCKING: State is read under STATE_LOCK, then released before HTTP calls
+    (pm_us.live_ask can block up to 12s per slug — holding the lock would
+    freeze the Telegram listener and learning thread for the entire duration).
+    State is re-read under lock again for the write so no update is clobbered."""
+    # ── Phase 1: read positions snapshot (brief lock) ─────────────────────────
+    with STATE_LOCK:
+        positions = load_state().get("active_positions", [])
+    if not positions:
+        return
+
+    # ── Phase 2: fetch live prices outside the lock ───────────────────────────
+    # Build slug → (shares, entry_pct) for positions worth checking, then
+    # fetch live ask for each without holding STATE_LOCK.
+    candidates = {}
+    for pos in positions:
+        slug      = (pos.get("market_slug") or "").strip()
+        shares    = float(pos.get("shares") or 0)
+        entry_pct = float(pos.get("entry_price") or 0)
+        if slug and shares > 0 and entry_pct > 0:
+            candidates[slug] = (shares, entry_pct)
+
+    if not candidates:
+        return
+
+    live_prices = {}   # slug → current_fraction (0-1) or None
+    for slug in candidates:
+        live_prices[slug] = pm_us.live_ask(slug)   # HTTP — lock NOT held here
+
+    # ── Phase 3: compute P&L and mutate state (brief lock) ───────────────────
+    with STATE_LOCK:
+        state     = load_state()   # fresh read — may differ from Phase 1 snapshot
+        positions = state.get("active_positions", [])
+        changed   = False
+
         for pos in positions:
             slug = (pos.get("market_slug") or "").strip()
-            if not slug:
+            if slug not in candidates:
                 continue
-
-            shares     = float(pos.get("shares") or 0)
-            entry_pct  = float(pos.get("entry_price") or 0)   # stored in ¢
-            if shares <= 0 or entry_pct <= 0:
-                # Position predates share-storage (opened before this feature)
-                # or is a dry-run placeholder — skip silently.
-                continue
-
-            current_fraction = pm_us.live_ask(slug)   # 0-1, None if no book
+            current_fraction = live_prices.get(slug)
             if current_fraction is None:
                 continue
-            current_pct = current_fraction * 100       # convert to ¢
 
-            # Unrealized P&L: each share pays $1 at resolution; current value
-            # of one share = current_fraction dollars.
-            # PnL = (current_price - entry_price) * shares, both as USD fractions.
-            pnl_usd = (current_fraction - entry_pct / 100.0) * shares
-
+            shares, entry_pct = candidates[slug]
+            current_pct = current_fraction * 100
+            pnl_usd     = (current_fraction - entry_pct / 100.0) * shares
             was_alerted = pos.get("profit_alerted", False)
 
             if pnl_usd >= PROFIT_ALERT_THRESHOLD_USD and not was_alerted:
@@ -899,7 +916,6 @@ def check_unrealized_profit():
                     f"{shares:.0f} shares · Unrealized +${pnl_usd:.2f}"
                 )
             elif pnl_usd < PROFIT_ALERT_THRESHOLD_USD and was_alerted:
-                # Dropped back below threshold — reset so next crossing fires again.
                 pos["profit_alerted"] = False
                 changed = True
                 print(f"  [profit monitor] {pos.get('outcome','?')} dropped below "
