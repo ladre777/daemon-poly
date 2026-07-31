@@ -26,6 +26,7 @@ from gates import (
     reconcile_positions,
     is_phase_cap_exhausted, reset_phase_counts,
     add_near_miss, pop_near_misses,
+    MAX_TRADES_PER_PHASE,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
@@ -59,6 +60,11 @@ DISCOVERY_INTERVAL_SEC: int = 900  # 15 min
 # re-verify before acting).
 _empty_catalog_streak: dict = {}
 EMPTY_CATALOG_THRESHOLD = 3   # consecutive empty fetches required before force-close
+
+# Consecutive full analysis cycles where the phase cap blocked every sport.
+# Reset to 0 the moment any sport runs normally.  Triggers a Telegram alert
+# after the second consecutive blocked cycle so silence is never invisible.
+_cap_blocked_cycles: int = 0
 
 
 def _all_games_final() -> bool:
@@ -823,10 +829,35 @@ def run_discovery_scan(dry: bool):
 
 
 def run_main_analysis(triggered_by: str = "SCHEDULED"):
+    global _cap_blocked_cycles
     now = datetime.now(timezone.utc)
     print(f"\n[{now.strftime('%H:%M:%S UTC')}] Analysis [{triggered_by}]")
     state = load_state()
     dry   = state.get("dry_run", True)
+
+    # ── PHASE-CAP SILENCE DETECTION ──────────────────────────────────────
+    # If the cap is exhausted, every sport and discovery will be skipped
+    # this cycle. Count consecutive blocked cycles and alert after the
+    # second one — the first is expected right at the cap boundary, but
+    # silence beyond that means the operator doesn't know the bot has stopped.
+    # Trading resumes automatically when event_tracker triggers an event
+    # switch (which calls reset_phase_for_event_change).
+    if is_phase_cap_exhausted() and active_sports():
+        _cap_blocked_cycles += 1
+        if _cap_blocked_cycles > 1 and _should_send("phase_cap_silent_block"):
+            phase = state.get("current_phase", "?")
+            count = state.get("phase_trade_counts", {}).get(phase, 0)
+            send_status(
+                f"📋 Phase cap reached — {count}/{MAX_TRADES_PER_PHASE} trades "
+                f"in {phase} phase.\n"
+                f"All signal generation blocked for {_cap_blocked_cycles} consecutive "
+                f"cycles (~{_cap_blocked_cycles * POLL_INTERVAL_MIN} min).\n"
+                f"Resumes automatically when the event/tournament changes.\n"
+                f"To force-resume now: RESET_PHASE_COUNT"
+            )
+    else:
+        _cap_blocked_cycles = 0
+
     for sport_cfg in active_sports():
         analyze_sport(sport_cfg, dry)
     run_discovery_scan(dry)
