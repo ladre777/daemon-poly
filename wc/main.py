@@ -29,6 +29,7 @@ from gates import (
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
 from learning import log_loss_and_learn, record_edge_result, learning_context
+from event_tracker import apply_event_overrides, check_and_update_golf
 
 POLL_INTERVAL_MIN      = 3    # normal cadence (any live or unknown game state)
 POLL_INTERVAL_IDLE_MIN = 12   # idle cadence (all tracked games FINAL)
@@ -526,6 +527,13 @@ def _fire_trade(signal: dict, size_usd: float, catalog: dict):
 def analyze_sport(sport_cfg: dict, dry: bool):
     label = f"{sport_cfg['emoji']} {sport_cfg['label']}"
     try:
+        # ── AUTO TOURNAMENT SWITCH (golf) ────────────────────────────────
+        # Detect if the tracked event is done and switch to the next one.
+        # Mutates sport_cfg in-place; re-read label after a switch.
+        if sport_cfg.get("key") == "golf":
+            if check_and_update_golf(sport_cfg):
+                label = f"{sport_cfg['emoji']} {sport_cfg['label']}"
+
         matches      = get_all_matches(sport_cfg)
         # Polymarket US futures catalog — the SOLE auto-execution whitelist.
         futures_odds = pm_us.get_sport_futures_us(sport_cfg)
@@ -998,6 +1006,11 @@ def main():
             print(f"Startup reconcile: {len(rec_kept)} position(s) confirmed real.")
     except Exception as e:
         print(f"Startup reconcile error (non-fatal): {e}")
+
+    # Restore any persisted event overrides (e.g. the last tracked golf
+    # tournament) so the bot resumes correctly after a restart without
+    # waiting for the first discovery cycle.
+    apply_event_overrides(SPORT_CONFIGS)
 
     # Auto-reset phase and orphaned positions when WC is no longer active.
     # Any positions remaining in state from a concluded WC are stale — the markets
