@@ -57,12 +57,30 @@ MAX_TRADE_USD = MAX_TRADE_CAP_FLOOR
 
 # Halt ALL new trading once realized losses reach this % of bankroll.
 KILL_SWITCH_DRAWDOWN_PCT = 5.0
+NEAR_MISS_TTL_SEC = 1800  # 30 min — cap-blocked signals expire after this
+
+
+def is_phase_cap_exhausted() -> bool:
+    """Return True when the current phase has reached MAX_TRADES_PER_PHASE.
+    Used to skip LLM calls entirely when no new trade slot is available."""
+    state = load_state()
+    phase = state.get("current_phase", "GROUP_STAGE")
+    return state.get("phase_trade_counts", {}).get(phase, 0) >= MAX_TRADES_PER_PHASE
 
 
 # Single process-wide lock guarding every load->mutate->save cycle. The
 # Telegram bot, veto worker, and learning background threads all write state;
 # unlocked read-modify-write loses updates (real-money positions/drawdown).
 STATE_LOCK = threading.RLock()
+
+
+def _iso_to_ts(iso: str) -> float:
+    """Convert ISO-8601 string to Unix timestamp (0.0 on parse failure)."""
+    try:
+        return datetime.fromisoformat(iso).timestamp()
+    except Exception:
+        return 0.0
+
 
 
 def load_state() -> dict:
@@ -376,8 +394,8 @@ def reconcile_positions() -> tuple:
     """
     from pm_us import get_real_positions   # local import to avoid circular dep
     real = get_real_positions()
-    # Empty dict = API error; do nothing.
-    if not isinstance(real, dict):
+    # None = API call failed; {} = genuine empty portfolio. Only act on successful calls.
+    if real is None:
         return [], []
 
     removed, kept = [], []
@@ -409,6 +427,71 @@ def reset_drawdown() -> None:
         state = load_state()
         state["total_realized_loss_pct"] = 0.0
         save_state(state)
+
+
+def reset_phase_counts() -> dict:
+    """Operator recovery: reset all phase trade counters to zero.
+    Returns the old counts so the operator can confirm what was cleared.
+    Use RESET_PHASE_COUNT command — separate from RESET_POSITIONS which
+    clears positions but leaves phase counts untouched."""
+    with STATE_LOCK:
+        state = load_state()
+        old = dict(state.get("phase_trade_counts", {}))
+        zeroed = {k: 0 for k in old} if old else {k: 0 for k in DEFAULT_STATE["phase_trade_counts"]}
+        state["phase_trade_counts"] = zeroed
+        save_state(state)
+        return old
+
+
+def add_near_miss(signal: dict) -> None:
+    """Store a cap-blocked (PF-10 only) signal in the persisted near-miss
+    watchlist so it can be re-evaluated when a trade slot opens up.
+    Duplicate market+outcome entries are replaced; entries expire after
+    NEAR_MISS_TTL_SEC seconds and are pruned on every write."""
+    with STATE_LOCK:
+        state = load_state()
+        now_ts = datetime.now(timezone.utc).timestamp()
+        cutoff = now_ts - NEAR_MISS_TTL_SEC
+        key = (
+            (signal.get("market") or "").strip().lower(),
+            (signal.get("outcome") or "").strip().lower(),
+        )
+        # Prune expired + remove any existing entry for the same market+outcome.
+        watchlist = [
+            e for e in state.get("near_miss_watchlist", [])
+            if _iso_to_ts(e.get("stored_at", "")) > cutoff
+            and (
+                (e["signal"].get("market") or "").strip().lower(),
+                (e["signal"].get("outcome") or "").strip().lower(),
+            ) != key
+        ]
+        watchlist.append({
+            "signal":    signal,
+            "stored_at": datetime.now(timezone.utc).isoformat(),
+        })
+        state["near_miss_watchlist"] = watchlist
+        save_state(state)
+
+
+def pop_near_misses(sport_key: str = "") -> list:
+    """Return and remove all non-expired near-miss entries for sport_key
+    (or all sports when sport_key is ""). Expired entries are also pruned.
+    Entries for other sports are left in state untouched."""
+    with STATE_LOCK:
+        state = load_state()
+        cutoff = datetime.now(timezone.utc).timestamp() - NEAR_MISS_TTL_SEC
+        watchlist = state.get("near_miss_watchlist", [])
+        valid, kept = [], []
+        for e in watchlist:
+            if _iso_to_ts(e.get("stored_at", "")) <= cutoff:
+                continue  # expired — discard silently
+            if sport_key and e["signal"].get("sport", "") != sport_key:
+                kept.append(e)  # different sport — leave for its own scan cycle
+            else:
+                valid.append(e)
+        state["near_miss_watchlist"] = kept
+        save_state(state)
+        return valid
 
 
 def update_phase(new_phase: str):
