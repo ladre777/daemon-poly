@@ -165,6 +165,31 @@ def check_gates(signal: dict) -> tuple:
             )
             break
 
+
+    # PF-09: No adding to a losing position.
+    # A YES contract's price falling below the entry price means the position is
+    # underwater (probability moved against us). Block any new trade on the same
+    # market (matched by market_slug, or market name when no slug is present)
+    # when the current signal price is below the stored entry price of an
+    # existing open position — regardless of which outcome is being traded.
+    sig_slug = (signal.get("market_slug") or "").strip()
+    for p in state.get("active_positions", []):
+        p_slug   = (p.get("market_slug") or "").strip()
+        p_market = (p.get("market") or "").strip().lower()
+        same_market = (
+            (sig_slug and p_slug and sig_slug == p_slug) or
+            (not sig_slug and sig_market and p_market and sig_market == p_market)
+        )
+        if not same_market:
+            continue
+        p_entry = float(p.get("entry_price", 0) or 0)
+        if p_entry > 0 and entry_price < p_entry:
+            violations.append(
+                f"PF-09: existing '{p.get('outcome')}' position entered at {p_entry}¢; "
+                f"current signal price {entry_price:.1f}¢ — adding to a losing position"
+            )
+            break
+
     # PF-08: Winner market price ceiling — World Cup knockout rounds only.
     # Golf/MLB/WNBA leaders routinely price above 25¢ in final rounds; this gate
     # must NOT fire for non-WC sports or it blocks every legitimate golf trade.
@@ -180,6 +205,24 @@ def check_gates(signal: dict) -> tuple:
     phase_count = state.get("phase_trade_counts", {}).get(phase, 0)
     if phase_count >= MAX_TRADES_PER_PHASE:
         violations.append(f"PF-10: {phase_count} trades in {phase} phase (max {MAX_TRADES_PER_PHASE})")
+
+
+    # PF-10-SAT: Saturday hard cap — maximum 2 trades placed on any Saturday (UTC).
+    # Counts all positions opened today from both active and closed lists so the
+    # cap cannot be bypassed by closing between trades. The existing 10-per-phase
+    # cap (above) remains in force independently — both gates must pass.
+    now_utc_sat = datetime.now(timezone.utc)
+    if now_utc_sat.weekday() == 5:   # 0=Mon … 5=Sat … 6=Sun
+        today_str = now_utc_sat.strftime("%Y-%m-%d")
+        SAT_TRADE_CAP = 2
+        sat_count = sum(
+            1 for p in state.get("active_positions", []) + state.get("closed_positions", [])
+            if (p.get("opened_at") or "").startswith(today_str)
+        )
+        if sat_count >= SAT_TRADE_CAP:
+            violations.append(
+                f"PF-10-SAT: {sat_count} trade(s) already placed today (Saturday cap is {SAT_TRADE_CAP})"
+            )
 
     # Bankroll deployment ceiling
     deployed = state.get("total_bankroll_deployed_pct", 0)
