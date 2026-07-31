@@ -1138,6 +1138,91 @@ def main():
     except Exception as e:
         print(f"Startup reconcile error (non-fatal): {e}")
 
+    # ── K1 pending-order recovery ─────────────────────────────────────────────
+    # If the container was killed between the pending_order marker write (in
+    # executor.place_order) and record_trade_opened(), state has no position
+    # record but a real order may have landed on Polymarket.  Query PM, reconcile,
+    # and alert so the operator always knows what happened.
+    try:
+        with STATE_LOCK:
+            _po = load_state().get("pending_order")
+        if _po:
+            _slug    = (_po.get("market_slug") or "").strip()
+            _outcome = _po.get("outcome", "?")
+            _size    = _po.get("size_usd", 0)
+            _ts      = _po.get("ts", "?")
+            print(f"Startup: pending_order detected — {_slug} / {_outcome} @ ${_size} (ts={_ts})")
+            # Query live PM holdings to see whether the order filled.
+            _real = pm_us.get_real_positions()
+            _real_slugs = {(p.get("market_slug") or "").strip() for p in _real}
+            _filled = _slug in _real_slugs
+
+            with STATE_LOCK:
+                _state = load_state()
+                _already = any(
+                    (p.get("market_slug") or "").strip() == _slug
+                    for p in _state.get("active_positions", [])
+                )
+                if _filled and not _already:
+                    # Order filled but crash prevented record_trade_opened().
+                    # Re-create a minimal position record so the bot tracks it.
+                    _matching = next(
+                        (p for p in _real if (p.get("market_slug") or "").strip() == _slug),
+                        {}
+                    )
+                    _recovery_pos = {
+                        "market":       _outcome,
+                        "market_slug":  _slug,
+                        "direction":    "YES",
+                        "outcome":      _outcome,
+                        "entry_price":  None,   # fill price unknown post-crash
+                        "target_exit":  None,
+                        "size_pct":     None,
+                        "edge":         "CRASH_RECOVERY",
+                        "sport":        "",
+                        "opened_at":    _ts,
+                        "order_id":     "",
+                        "shares":       int(_matching.get("size", 0) or 0),
+                        "notional_usd": float(_size or 0),
+                        "profit_alerted": False,
+                    }
+                    _state["active_positions"].append(_recovery_pos)
+                    _state["pending_order"] = None
+                    save_state(_state)
+                    _msg = (
+                        f"⚠️ Crash recovery: order for {_slug} ({_outcome}) "
+                        f"filled on Polymarket but was missing from state — "
+                        f"re-recorded as active position. Review manually."
+                    )
+                elif not _filled and not _already:
+                    # Order did not land on Polymarket — clear the stale marker.
+                    _state["pending_order"] = None
+                    save_state(_state)
+                    _msg = (
+                        f"ℹ️ Crash recovery: pending order for {_slug} ({_outcome}) "
+                        f"did not fill on Polymarket — marker cleared, no position recorded."
+                    )
+                else:
+                    # Position already in state (record_trade_opened ran before crash)
+                    # or no fill and already absent — marker is stale, just clear it.
+                    _state["pending_order"] = None
+                    save_state(_state)
+                    _msg = (
+                        f"ℹ️ Crash recovery: pending marker for {_slug} cleared "
+                        f"(position {'already in state' if _already else 'not filled'})."
+                    )
+            print(f"Pending-order recovery: {_msg}")
+            try:
+                send_status(_msg)
+            except Exception:
+                pass
+    except Exception as _pe:
+        print(f"Pending-order recovery error (non-fatal): {_pe}")
+        try:
+            send_error(f"⚠️ Pending-order recovery check failed: {_pe} — manual check needed")
+        except Exception:
+            pass
+
     # Restore any persisted event overrides (e.g. the last tracked golf
     # tournament) so the bot resumes correctly after a restart without
     # waiting for the first discovery cycle.
