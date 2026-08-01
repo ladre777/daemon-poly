@@ -993,6 +993,17 @@ def run_in_play_check():
             live = get_live_matches(sport_cfg)
         except Exception as e:
             print(f"  in-play fetch error [{sport_cfg['key']}]: {e}")
+            # S2 fix: alert per-sport, throttled so a persistent ESPN outage
+            # doesn't spam every 3 min (same _should_send pattern as M3).
+            if _should_send(f"inplay_fetch_error_{sport_cfg['key']}"):
+                try:
+                    send_error(
+                        f"⚡ In-play fetch failed for "
+                        f"{sport_cfg.get('label', sport_cfg['key'])}: "
+                        f"{e} — live edges dark this cycle"
+                    )
+                except Exception:
+                    pass
             continue
 
         for match in live:
