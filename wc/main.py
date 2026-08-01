@@ -447,6 +447,20 @@ def _passes_gates_and_checker(signal: dict) -> bool:
     signal["gate_notes"] = "; ".join(violations) if violations else "All gates passed"
 
     if not passed:
+        # Task #38: if PF-10 is the SOLE gate failure the Checker call is
+        # wasted — PF-10 would block execution regardless of the verdict.
+        # Re-queue as near-miss so the signal retries next cycle and skip the
+        # Sonnet API call entirely.  This also fixes the near-miss replay path:
+        # previously a still-blocked replay fired a misleading 'Signal blocked'
+        # error alert and the signal was silently dropped from the cache.
+        if len(violations) == 1 and "PF-10" in violations[0]:
+            add_near_miss(signal)
+            print(
+                f"  [near-miss bypass] PF-10 only — re-queued, Checker skipped: "
+                f"{signal.get('market','?')} / {signal.get('outcome','?')}"
+            )
+            return False
+
         print(f"  GATE FAIL: {signal['gate_notes']}")
         log_signal(signal, executed=False)
         # Always notify on a real TRADE rejection — never throttle.
@@ -1099,6 +1113,9 @@ def send_heartbeat():
 def main():
     print("=" * 55)
     print("DÆMON-POLY // Multi-Sport Agent v3.0")
+    # #37/#32: capture whether state file exists BEFORE load_state() so we
+    # can alert if the bot is starting from a blank slate.
+    _state_was_fresh = not os.path.exists(STATE_FILE)
     state = load_state()
     dry   = state.get("dry_run", True)
     print(f"Mode: {'DRY RUN ⚪' if dry else 'LIVE 🔴'} | Poll: {POLL_INTERVAL_MIN} min")
@@ -1138,7 +1155,26 @@ def main():
         except Exception:
             pass
         raise SystemExit(1)
-    print(f"Persistence OK -> {STATE_FILE}")
+    if _state_was_fresh:
+        print(f"Persistence OK -> {STATE_FILE} [fresh \u2014 no prior history]")
+    else:
+        print(f"Persistence OK -> {STATE_FILE} [existing]")
+    # #37: Telegram alert when state was missing so the operator knows positions
+    # are being rebuilt from the exchange rather than loaded from a known-good file.
+    # #32: STATE_FILE path is now always visible in Railway logs; fresh vs existing
+    # makes a STATE_FILE env-var change immediately observable.
+    if _state_was_fresh:
+        _fresh_warn = (
+            f"\u26a0\ufe0f State file was missing at startup ({STATE_FILE}) \u2014 "
+            f"active_positions start empty. The startup reconcile will attempt "
+            f"to re-discover real Polymarket holdings. "
+            f"Verify open positions manually before automated trading continues."
+        )
+        print(_fresh_warn)
+        try:
+            send_error(_fresh_warn)
+        except Exception:
+            pass
 
     # Clean up any duplicate positions left from before the PF-04 gate existed.
     removed = dedupe_active_positions()
