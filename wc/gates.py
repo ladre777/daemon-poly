@@ -585,6 +585,37 @@ def release_inflight(slug: str) -> None:
             save_state(state)
 
 
+def set_pending_exit(slug: str) -> None:
+    """Persist a mid-exit marker BEFORE a live sell is submitted (same K1
+    pattern as pending_order, but for exits). If the container dies between
+    the sell submission and record_trade_closed(), the boot-time recovery
+    block sees this marker and reconciles against real exchange holdings."""
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return
+    with STATE_LOCK:
+        state = load_state()
+        pend  = state.get("pending_exits", {}) or {}
+        pend[slug] = datetime.now(timezone.utc).isoformat()
+        state["pending_exits"] = pend
+        save_state(state)
+
+
+def clear_pending_exit(slug: str) -> None:
+    """Clear a mid-exit marker (sell confirmed+recorded, or sell rejected —
+    either way no exit is in flight anymore). Idempotent."""
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return
+    with STATE_LOCK:
+        state = load_state()
+        pend  = state.get("pending_exits", {}) or {}
+        if slug in pend:
+            del pend[slug]
+            state["pending_exits"] = pend
+            save_state(state)
+
+
 def reset_drawdown() -> None:
     """Operator recovery: clear realized-loss tally so the kill switch disarms."""
     with STATE_LOCK:
