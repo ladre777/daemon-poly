@@ -624,6 +624,37 @@ def reset_drawdown() -> None:
         save_state(state)
 
 
+def _today_et() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+
+def cap_bypass_slot_available() -> bool:
+    """True when today's (US Eastern) single cap-bypass slot is unclaimed.
+    Cheap read used to skip the Checker call entirely when a bypass could
+    never be granted anyway."""
+    return load_state().get("cap_bypass_slot", {}).get("date") != _today_et()
+
+
+def claim_cap_bypass_slot(slug: str) -> bool:
+    """Atomically claim today's single cap-bypass slot (one per Eastern day,
+    persisted). Returns True only for the first claimant; concurrent scanner
+    threads racing for the slot lose here and stay blocked. Never released
+    within the day — a granted bypass consumes the slot even if the order
+    later fails (safety margin over generosity)."""
+    with STATE_LOCK:
+        state = load_state()
+        slot  = state.get("cap_bypass_slot", {})
+        if slot.get("date") == _today_et():
+            return False
+        state["cap_bypass_slot"] = {
+            "date": _today_et(),
+            "slug": slug,
+            "ts":   datetime.now(timezone.utc).isoformat(),
+        }
+        save_state(state)
+        return True
+
+
 def note_cap_bypass(signal: dict, profit_usd: float):
     """Separately log a granted PF-10/PF-10-SAT high-value cap bypass so
     operators can audit how often the exception fires. Additive-only: does
