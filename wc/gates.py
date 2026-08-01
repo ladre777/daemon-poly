@@ -338,7 +338,14 @@ def dedupe_active_positions() -> int:
         kept    = []
         removed = 0
         for p in state.get("active_positions", []):
-            key = (
+            # Key on market_slug when present — per-outcome slugs are unique
+            # per bet, so different golfers in one tournament never collide.
+            # (Text-triple keying collapsed STATE_RECOVERY positions, which all
+            # share title "Rocket Classic Winner" + outcome "Yes", wrongly
+            # deleting real positions on 2026-08-01.) Slugless positions fall
+            # back to the text triple.
+            _dslug = (p.get("market_slug") or "").strip().lower()
+            key = ("slug", _dslug) if _dslug else (
                 (p.get("market") or "").strip().lower(),
                 (p.get("outcome") or "").strip().lower(),
                 (p.get("direction") or "").strip().upper(),
