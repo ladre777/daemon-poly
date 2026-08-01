@@ -184,14 +184,28 @@ def check_gates(signal: dict) -> tuple:
     # Different outcomes in one market are allowed (e.g. multiple golfers in a
     # tournament-winner market is a valid hedge) — only stacking the identical
     # bet is blocked.
+    # Duplicate detection matches on EITHER of two independent keys:
+    #   (a) LLM-text market+outcome equality — catches repeats within a normal
+    #       session where positions were recorded from the same signal pipeline;
+    #   (b) market_slug equality — catches positions rebuilt from the exchange
+    #       after a state wipe (STATE_RECOVERY entries carry only slug/exchange
+    #       metadata, never the LLM phrasing, so text match alone misses them;
+    #       a real duplicate order fired on 2026-08-01 because of exactly that).
+    # Per-outcome slugs (one slug per golfer/team) make slug equality safe: the
+    # same slug IS the same bet, so hedging other outcomes stays allowed.
     sig_market  = (signal.get("market") or "").strip().lower()
     sig_outcome = (signal.get("outcome") or "").strip().lower()
+    sig_slug04  = (signal.get("market_slug") or "").strip().lower()
     for p in state.get("active_positions", []):
-        if ((p.get("market") or "").strip().lower() == sig_market
-                and (p.get("outcome") or "").strip().lower() == sig_outcome):
+        _text_match = ((p.get("market") or "").strip().lower() == sig_market
+                       and (p.get("outcome") or "").strip().lower() == sig_outcome)
+        _slug_match = bool(sig_slug04) and (
+            (p.get("market_slug") or "").strip().lower() == sig_slug04)
+        if _text_match or _slug_match:
             violations.append(
                 f"PF-04: Already holding {p.get('outcome')} {p.get('direction')} "
                 f"in '{signal.get('market')}' — no doubling up on the same outcome"
+                + (" [slug match]" if _slug_match and not _text_match else "")
             )
             break
 
