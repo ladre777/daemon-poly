@@ -1,6 +1,7 @@
 import schedule
 import time
 import os
+import json
 import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -785,6 +786,11 @@ def analyze_sport(sport_cfg: dict, dry: bool):
                     add_near_miss(signal)
                     print(f"  [{label}] 📋 Near-miss stored (cap-blocked): "
                           f"{signal.get('market')} / {signal.get('outcome')}")
+                    # Full signal dump so the captured edge/profit reasoning is
+                    # auditable from Railway logs (state file isn't remotely
+                    # readable; without this the reasoning is invisible).
+                    print(f"  [{label}] 📋 Near-miss signal detail: "
+                          f"{json.dumps(signal, default=str)[:1500]}")
                     send_status(
                         f"📋 Near-miss stored — phase cap full.\n"
                         f"{signal.get('sport','')} | {signal.get('market')} / {signal.get('outcome')}\n"
@@ -1298,6 +1304,20 @@ def main():
             )
         except Exception:
             pass
+
+    # Surface any persisted near-miss watchlist entries at boot — the stored
+    # signal (incl. its edge/profit reasoning) lives only in the state file on
+    # the volume, so this is the operator's only way to audit what a
+    # cap-blocked signal actually claimed.
+    try:
+        _wl = load_state().get("near_miss_watchlist", [])
+        if _wl:
+            print(f"[near-miss watchlist] {len(_wl)} entry(ies) persisted at boot:")
+            for _e in _wl:
+                print(f"[near-miss watchlist] stored_at={_e.get('stored_at')} "
+                      f"signal={json.dumps(_e.get('signal', {}), default=str)[:1500]}")
+    except Exception as _wlerr:
+        print(f"[near-miss watchlist] boot dump failed (non-fatal): {_wlerr}")
 
     # Clean up any duplicate positions left from before the PF-04 gate existed.
     removed = dedupe_active_positions()
