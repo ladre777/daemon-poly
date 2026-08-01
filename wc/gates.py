@@ -242,7 +242,7 @@ def check_gates(signal: dict) -> tuple:
     now_utc_sat = datetime.now(timezone.utc)
     if now_utc_sat.weekday() == 5:   # 0=Mon … 5=Sat … 6=Sun
         today_str = now_utc_sat.strftime("%Y-%m-%d")
-        SAT_TRADE_CAP = 2
+        SAT_TRADE_CAP = 3
         sat_count = sum(
             1 for p in state.get("active_positions", []) + state.get("closed_positions", [])
             if (p.get("opened_at") or "").startswith(today_str)
