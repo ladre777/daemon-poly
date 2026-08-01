@@ -102,6 +102,30 @@ def get_real_positions() -> dict | None:
         return None  # any exception → treat as API error, not empty portfolio
 
 
+def get_position_avg_prices() -> dict:
+    """Return {market_slug: avg_fill_price_fraction} for all currently held
+    positions, from the exchange's own cost-basis field (avgPx). Used to
+    backfill entry_price on crash-recovered positions so the profit monitor
+    can compute P&L. Returns {} on any error (caller treats as unavailable)."""
+    try:
+        client = get_pm_client()
+        if not client:
+            return {}
+        resp = client.portfolio.positions()
+        out  = {}
+        for slug, p in (resp or {}).get("positions", {}).items():
+            try:
+                px = float(((p.get("avgPx") or {}).get("value")) or 0)
+            except (TypeError, ValueError):
+                px = 0.0
+            if px > 0:
+                out[(slug or "").strip()] = px
+        return out
+    except Exception as e:
+        print(f"[PM-US] get_position_avg_prices failed: {e}")
+        return {}
+
+
 def get_buying_power() -> float:
     """Current Polymarket US USD buying power (0.0 on failure)."""
     try:

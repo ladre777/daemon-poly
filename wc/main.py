@@ -28,6 +28,7 @@ from gates import (
     is_phase_cap_exhausted, reset_phase_counts,
     add_near_miss, pop_near_misses,
     reserve_inflight, release_inflight,
+    set_pending_exit, clear_pending_exit,
     MAX_TRADES_PER_PHASE, STATE_LOCK,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
@@ -312,6 +313,7 @@ def handle_command(text: str):
             # exposure is never hidden — operator must retry or sell manually.
             sell_note  = ""
             sell_error = False
+            ok_slugs   = []   # slugs whose live sell was accepted (pending_exit held)
             if not load_state().get("dry_run", True):
                 slugs = {
                     p.get("market_slug") for p in load_state().get("active_positions", [])
@@ -319,12 +321,19 @@ def handle_command(text: str):
                     and p.get("market_slug")
                 }
                 if slugs:
-                    results = []
+                    results  = []
                     for slug in slugs:
+                        # Mid-exit marker (K1 pattern, exit-side): written
+                        # BEFORE the sell so a crash between submission and
+                        # record_trade_closed() is detected on next boot.
+                        set_pending_exit(slug)
                         r = close_position(slug)
                         if r.get("ok"):
+                            ok_slugs.append(slug)
                             results.append(f"{slug}: sold ✅")
                         else:
+                            # Sell rejected — nothing in flight; clear marker.
+                            clear_pending_exit(slug)
                             sell_error = True
                             results.append(f"{slug}: SELL FAILED — {r.get('error')}")
                     sell_note = "\n" + "\n".join(results)
@@ -339,6 +348,9 @@ def handle_command(text: str):
                 )
                 return
             total_loss = record_trade_closed(market, outcome, pnl_pct)
+            # Exit fully recorded in state — clear the mid-exit markers.
+            for slug in ok_slugs:
+                clear_pending_exit(slug)
             extra = f" | PnL {pnl_pct:+.1f}%" if pnl_pct else ""
             send_status(f"✅ Position closed: {market} / {outcome}{extra}{sell_note}")
 
@@ -1273,6 +1285,48 @@ def main():
             send_error(_fresh_warn)
         except Exception:
             pass
+    # ── Mid-exit (pending_exit) recovery — K1 pattern, exit-side ─────────────
+    # If the container died after a live sell was submitted but before
+    # record_trade_closed(), a pending_exits marker survives on the volume.
+    # Reconcile each against real exchange holdings BEFORE the recovery merge
+    # below, so a completed exit is never re-added as an active position.
+    try:
+        with STATE_LOCK:
+            _pend_exits = dict(load_state().get("pending_exits", {}) or {})
+        if _pend_exits:
+            _pe_real = pm_us.get_real_positions() or {}
+            for _pe_slug, _pe_ts in _pend_exits.items():
+                _still_held = _pe_slug in _pe_real
+                if not _still_held:
+                    # Sell completed while we were down — remove any matching
+                    # state position so it isn't tracked as open exposure.
+                    with STATE_LOCK:
+                        _pe_state = load_state()
+                        _pe_match = [p for p in _pe_state.get("active_positions", [])
+                                     if (p.get("market_slug") or "").strip() == _pe_slug]
+                    for _pe_pos in _pe_match:
+                        record_trade_closed(_pe_pos.get("market", "?"),
+                                            _pe_pos.get("outcome", "?"), 0.0)
+                    _pe_msg = (f"ℹ️ Mid-exit recovery: sell for {_pe_slug} (submitted "
+                               f"{_pe_ts}) completed during restart — position "
+                               f"recorded as closed (PnL% unknown, logged as 0).")
+                else:
+                    # Sell submitted but shares still held — exit did NOT
+                    # complete. Position stays in state (exposure visible);
+                    # operator should re-run CLOSE or sell manually.
+                    _pe_msg = (f"⚠️ Mid-exit recovery: sell for {_pe_slug} (submitted "
+                               f"{_pe_ts}) did NOT complete — shares still held on "
+                               f"Polymarket. Position kept in state; re-run CLOSE "
+                               f"or sell manually.")
+                clear_pending_exit(_pe_slug)
+                print(f"[pending-exit recovery] {_pe_msg}")
+                try:
+                    send_error(_pe_msg)
+                except Exception:
+                    pass
+    except Exception as _pe_err:
+        print(f"[pending-exit recovery] non-fatal error: {_pe_err}")
+
     # #37 (generalized): merge real Polymarket holdings missing from state on
     # EVERY startup — not only when the state file is fresh. The stale-WC
     # cleaner bug had deleted real positions from an EXISTING state file on
@@ -1341,6 +1395,51 @@ def main():
             )
         except Exception:
             pass
+
+    # ── Entry-price backfill for crash-recovered positions ──────────────────
+    # Recovered positions carry entry_price=None, so the profit monitor skips
+    # them (S3). The exchange's portfolio API exposes the true average fill
+    # price (avgPx) per held slug — backfill it (converted to cents, matching
+    # entry_price units) so the profit-alert feature covers them too. Runs on
+    # every boot; no-ops instantly when nothing needs backfilling. Exact
+    # exchange cost basis — never an estimate; slugs the API can't price are
+    # left as-is (still skipped by the monitor, alerted below).
+    try:
+        with STATE_LOCK:
+            _bf_missing = [
+                (p.get("market_slug") or "").strip()
+                for p in load_state().get("active_positions", [])
+                if p.get("entry_price") is None and (p.get("market_slug") or "").strip()
+            ]
+        if _bf_missing:
+            _bf_prices = pm_us.get_position_avg_prices()   # HTTP outside the lock
+            _bf_done, _bf_fail = [], []
+            with STATE_LOCK:
+                _bf_state = load_state()
+                for _bf_pos in _bf_state.get("active_positions", []):
+                    _bf_slug = (_bf_pos.get("market_slug") or "").strip()
+                    if _bf_pos.get("entry_price") is None and _bf_slug in _bf_prices:
+                        _bf_pos["entry_price"] = round(_bf_prices[_bf_slug] * 100, 2)  # ¢
+                        _bf_pos["entry_price_source"] = "exchange avgPx backfill"
+                        _bf_done.append(f"{_bf_pos.get('outcome', _bf_slug)} @ "
+                                        f"{_bf_pos['entry_price']}¢")
+                    elif _bf_pos.get("entry_price") is None and _bf_slug in _bf_missing:
+                        _bf_fail.append(_bf_slug)
+                if _bf_done:
+                    save_state(_bf_state)
+            if _bf_done:
+                _bf_msg = ("✅ Entry-price backfill (exchange avgPx, exact): "
+                           + "; ".join(_bf_done)
+                           + ". Profit alerts now active on these positions.")
+                print(f"[entry backfill] {_bf_msg}")
+                try:
+                    send_status(_bf_msg)
+                except Exception:
+                    pass
+            if _bf_fail:
+                print(f"[entry backfill] no exchange avgPx for: {_bf_fail} — left unset")
+    except Exception as _bf_err:
+        print(f"[entry backfill] non-fatal error: {_bf_err}")
 
     # Surface any persisted near-miss watchlist entries at boot — the stored
     # signal (incl. its edge/profit reasoning) lives only in the state file on
