@@ -28,6 +28,7 @@ from gates import (
     is_phase_cap_exhausted, reset_phase_counts,
     add_near_miss, pop_near_misses,
     reserve_inflight, release_inflight, note_cap_bypass,
+    cap_bypass_slot_available, claim_cap_bypass_slot,
     set_pending_exit, clear_pending_exit,
     MAX_TRADES_PER_PHASE, STATE_LOCK,
 )
@@ -596,7 +597,9 @@ def _passes_gates_and_checker(signal: dict) -> bool:
         # HIGH-VALUE CAP BYPASS: only when EVERY violation is PF-10/PF-10-SAT
         # (any PF-04/PF-09/other violation → no bypass consideration at all).
         _pf10_viols = [v for v in violations if v.startswith("PF-10")]
-        if _pf10_viols and len(_pf10_viols) == len(violations):
+        if (_pf10_viols and len(_pf10_viols) == len(violations)
+                and not signal.get("_bypass_denied")      # denied once today — never re-burn Checker on replays
+                and cap_bypass_slot_available()):         # slot already used today — skip Checker entirely
             _profit, _bp_size, _bp_shares = _compute_profit_potential(signal)
             if _profit > CAP_BYPASS_MIN_PROFIT_USD:
                 # Worth a Checker call — bypass requires APPROVED + HIGH.
@@ -606,7 +609,9 @@ def _passes_gates_and_checker(signal: dict) -> bool:
                 print(f"  [cap-bypass] profit ${_profit:.2f} > "
                       f"${CAP_BYPASS_MIN_PROFIT_USD:.0f} — Checker: "
                       f"{_bp_verdict} / confidence {_bp_conf}")
-                if _bp_verdict == "APPROVED" and _bp_conf == "HIGH":
+                if (_bp_verdict == "APPROVED" and _bp_conf == "HIGH"
+                        and claim_cap_bypass_slot(
+                            (signal.get("market_slug") or "").strip())):
                     signal["cap_bypass"] = "; ".join(_pf10_viols)
                     signal["gate_check"] = "PASS"
                     signal["gate_notes"] = (f"CAP BYPASS (profit "
@@ -629,8 +634,11 @@ def _passes_gates_and_checker(signal: dict) -> bool:
                         f"Trade still counts toward all caps."
                     )
                     return True
-                # Checker said no / not HIGH — fall through to the normal
-                # PF-10 handling below (near-miss re-queue when sole viol).
+                # Checker said no / not HIGH / slot lost to a concurrent
+                # claimant — mark the signal so near-miss replays never
+                # re-burn a Checker call on the same denied signal, then
+                # fall through to normal PF-10 handling (re-queue when sole).
+                signal["_bypass_denied"] = True
         # Task #38: if PF-10 is the SOLE gate failure the Checker call is
         # wasted — PF-10 would block execution regardless of the verdict.
         # Re-queue as near-miss so the signal retries next cycle and skip the
