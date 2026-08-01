@@ -1244,11 +1244,18 @@ def main():
                     }
                     _n_added  = 0
                     _now_iso  = datetime.now(timezone.utc).isoformat()
-                    for _rp in _recovered_pos:
-                        _rslug = (_rp.get("market_slug") or "").strip()
+                    # get_real_positions() returns {slug: info} — iterate the
+                    # VALUES. (A previous version iterated the dict directly,
+                    # got string keys, and crashed with AttributeError into the
+                    # non-fatal catch-all — leaving active_positions empty and
+                    # letting a duplicate order through PF-04 on 2026-08-01.)
+                    for _rp in _recovered_pos.values():
+                        _rslug = (_rp.get("slug") or "").strip()
                         if _rslug and _rslug not in _ex_slugs:
                             _fs_state["active_positions"].append({
-                                "market":         _rslug,
+                                # market = exchange title so operators recognise
+                                # it; PF-04 catches duplicates via market_slug.
+                                "market":         _rp.get("title") or _rslug,
                                 "market_slug":    _rslug,
                                 "direction":      "YES",
                                 "outcome":        _rp.get("outcome", _rslug),
@@ -1259,7 +1266,7 @@ def main():
                                 "sport":          "",
                                 "opened_at":      _now_iso,
                                 "order_id":       "",
-                                "shares":         int(_rp.get("size", 0) or 0),
+                                "shares":         float(_rp.get("shares", 0) or 0),
                                 "notional_usd":   0.0,
                                 "profit_alerted": False,
                             })
@@ -1434,14 +1441,16 @@ def main():
         if state.get("current_phase") in ("GROUP_STAGE", "R32", "R16", "QF", "SF", "FINAL"):
             update_phase("SEASON")
             print("WC inactive — phase reset to SEASON")
-        # Clear any positions that don't belong to a currently-active sport.
-        active_keys = {c["key"] for c in active_sports()}
+        # Clear ONLY positions whose market_slug explicitly matches a known
+        # resolved World Cup market. The previous version also removed any
+        # position whose 'sport' wasn't in the active config KEYS — but
+        # positions store display labels ("Golf — Rocket"), never config keys
+        # ("golf"), so EVERY real position was deleted as "stale WC" on every
+        # boot. That wiped the Hojgaard position at the 2026-08-01 16:46 UTC
+        # restart and let a duplicate order through PF-04 one minute later.
         stale = [p for p in state.get("active_positions", [])
-                 if p.get("sport", p.get("edge", "")) not in active_keys
-                 and p.get("sport", None) not in (None, "") or
-                 # also clear if market_slug matches a known resolved WC slug
-                 any(kw in (p.get("market_slug") or "").lower()
-                     for kw in ("world-cup", "golden-boot", "wc-winner"))]
+                 if any(kw in (p.get("market_slug") or "").lower()
+                        for kw in ("world-cup", "golden-boot", "wc-winner"))]
         if stale:
             n_stale = len(stale)
             for p in stale:
