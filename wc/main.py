@@ -570,8 +570,9 @@ def _fire_trade(signal: dict, size_usd: float, catalog: dict):
         try:
             send_error(
                 f"⚠️ Cleared stale in-flight reservation(s) (>90s old, executor "
-                f"likely crashed mid-order): {', '.join(_stale_cleared)}. "
-                f"Verify no orphan order exists for these markets."
+                f"likely crashed or hung mid-order): {', '.join(_stale_cleared)}. "
+                f"This attempt stays blocked as a safety margin; the slot frees "
+                f"for the next scan cycle. Verify no orphan order exists."
             )
         except Exception:
             pass
