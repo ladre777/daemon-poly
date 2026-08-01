@@ -24,6 +24,7 @@ DEFAULT_STATE = {
     "last_signal_time":        None,
     "phase_epoch":             {},   # {sport_key: event_label} — identity for auto-reset
     "pending_order":           None, # written just before client.orders.create(); cleared atomically in record_trade_opened
+    "dry_run_locked":          False, # True when operator pauses via Telegram; prevents env-var override on restart (M1)
 }
 
 CAPS = {
@@ -580,10 +581,14 @@ def update_phase(new_phase: str):
         return state
 
 
-def set_dry_run(enabled: bool):
+def set_dry_run(enabled: bool, locked: bool = None):
+    """Update dry_run in state.  Pass locked=True/False when called from a
+    Telegram command so a Railway restart cannot silently override the pause."""
     with STATE_LOCK:
         state = load_state()
         state["dry_run"] = enabled
+        if locked is not None:
+            state["dry_run_locked"] = locked
         save_state(state)
 
 
