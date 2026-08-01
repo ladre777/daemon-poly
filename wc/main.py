@@ -496,6 +496,55 @@ def telegram_listener():
         time.sleep(2)
 
 
+# ── SIGNAL PRICE SANITY CHECK (deterministic, no LLM) ───────────────────────
+# The signal model can hallucinate or lag prices (2026-08-01 Si Woo Kim: stated
+# 3.0¢ entry while its own reasoning cited 6.3%). Before a signal is trusted
+# for ANYTHING (trade or near-miss storage), compare its stated entry price
+# against the live catalog price captured in the same scan. Tolerance is sized
+# for illiquid markets: 2pp absolute floor, 25% of live price relative — the
+# looser of the two. Failures block execution, alert with both numbers, and
+# are logged as INTERNALLY_INCONSISTENT. Pure arithmetic — zero LLM cost.
+SANITY_ABS_PP   = 2.0    # absolute tolerance floor, percentage points
+SANITY_REL_FRAC = 0.25   # relative tolerance, fraction of live price
+
+
+def signal_price_sane(signal: dict, live_pct, origin: str = "") -> bool:
+    """Return True when the signal's stated entry price matches the live
+    catalog price within tolerance (or when either side is unavailable —
+    absence of data is handled by later gates, not treated as inconsistency).
+    On failure: marks the signal INTERNALLY_INCONSISTENT, logs it, alerts
+    Telegram with both numbers, and returns False."""
+    try:
+        live   = float(live_pct or 0)
+        stated = float(signal.get("entry_price_pct") or 0)
+    except (TypeError, ValueError):
+        return True
+    if live <= 0 or stated <= 0:
+        return True   # nothing to compare — not evidence of inconsistency
+    tol = max(SANITY_ABS_PP, SANITY_REL_FRAC * live)
+    if abs(stated - live) <= tol:
+        return True
+    signal["gate_check"] = "FAIL"
+    signal["gate_notes"] = (f"INTERNALLY_INCONSISTENT: stated entry "
+                            f"{stated}¢ vs live catalog {live}¢ "
+                            f"(tolerance ±{tol:.1f}pp)")
+    print(f"  [{origin or 'sanity'}] 🚧 {signal['gate_notes']} — "
+          f"{signal.get('market','?')} / {signal.get('outcome','?')}")
+    log_signal(signal, executed=False, error="INTERNALLY_INCONSISTENT price")
+    try:
+        send_error(
+            f"🚧 Signal INTERNALLY_INCONSISTENT — blocked (not traded, not stored).\n"
+            f"{signal.get('sport','')} | {signal.get('market','?')} / "
+            f"{signal.get('outcome','?')}\n"
+            f"Model stated entry: {stated}¢\n"
+            f"Live catalog price: {live}¢ (tolerance ±{tol:.1f}pp)\n"
+            f"Model's price claim doesn't match reality — reasoning untrusted."
+        )
+    except Exception:
+        pass
+    return False
+
+
 # ── SHARED GATE + CHECKER PIPELINE ──────────────────────────────────────────
 
 def _passes_gates_and_checker(signal: dict) -> bool:
@@ -828,10 +877,15 @@ def analyze_sport(sport_cfg: dict, dry: bool):
             if executable:
                 # Full pipeline: gates + Sonnet checker — cost is justified, real money on the line.
                 signal["_tick"] = idx[slug].get("tick", "0.001")
+                # Sanity check FIRST — an internally-inconsistent signal must
+                # not be trusted for anything: no trade, no near-miss storage.
+                _sane = signal_price_sane(signal, idx[slug].get("implied_pct"), label)
                 # Pre-screen: if phase cap is the SOLE gate failure, store as near-miss
                 # rather than running the Sonnet checker (which would be wasted cost).
                 _pre_passed, _pre_viols = check_gates(signal)
-                if not _pre_passed and len(_pre_viols) == 1 and "PF-10" in _pre_viols[0]:
+                if not _sane:
+                    pass   # blocked + alerted + logged inside signal_price_sane
+                elif not _pre_passed and len(_pre_viols) == 1 and "PF-10" in _pre_viols[0]:
                     add_near_miss(signal)
                     print(f"  [{label}] 📋 Near-miss stored (cap-blocked): "
                           f"{signal.get('market')} / {signal.get('outcome')}")
@@ -928,7 +982,8 @@ def run_discovery_scan(dry: bool):
             executable = bool(slug) and slug in idx
             if executable:
                 signal["_tick"] = idx[slug].get("tick", "0.001")
-                if _passes_gates_and_checker(signal):
+                if signal_price_sane(signal, idx[slug].get("implied_pct"),
+                                     "🔭 Discovery") and _passes_gates_and_checker(signal):
                     send_trade_signal(signal)
                     record_signal_sent(signal)
                     if dry:
@@ -1158,11 +1213,16 @@ def run_in_play_check():
                 executable = bool(slug)
                 if executable:
                     signal["market_slug"] = slug
+                    # Sanity check against the live per-game price BEFORE the
+                    # stated entry is overwritten below — an inconsistent
+                    # price claim means the reasoning itself is untrusted.
+                    _sane_ip = signal_price_sane(
+                        signal, us_game.get("implied_pct"), "⚡ in-play")
                     signal["entry_price_pct"] = us_game.get("implied_pct",
                                                              signal.get("entry_price_pct", 0))
                     signal["_tick"] = "0.001"
                     # Full pipeline — real execution possible
-                    if _passes_gates_and_checker(signal):
+                    if _sane_ip and _passes_gates_and_checker(signal):
                         send_trade_signal(signal)
                         record_signal_sent(signal)
                         if dry:
