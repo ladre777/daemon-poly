@@ -258,8 +258,13 @@ Approve only if the edge is specific, structural, and the entry price represents
 Output ONLY valid JSON, no other text:
 {
   "verdict": "APPROVED" | "REJECTED",
+  "confidence": "HIGH" | "MEDIUM" | "LOW",
   "reason": "<one sentence>"
-}"""
+}
+
+confidence is YOUR OWN independent conviction in the edge (not SIGNAL's claim):
+HIGH only when the mispricing is objectively verifiable from the data shown;
+MEDIUM when plausible but not fully verifiable; LOW otherwise."""
 
 
 def run_checker(signal: dict) -> dict:
@@ -288,9 +293,13 @@ def run_checker(signal: dict) -> dict:
         result = _parse_json_response(message.content[0].text.strip())
         signal["checker_verdict"] = result.get("verdict", "REJECTED")
         signal["checker_reason"]  = result.get("reason", "No reason given")
+        # Checker's OWN confidence — missing/garbled defaults to LOW so the
+        # cap-bypass path fails closed (bypass requires explicit HIGH).
+        signal["checker_confidence"] = str(result.get("confidence", "LOW")).strip().upper()
     except Exception as e:
         signal["checker_verdict"] = "REJECTED"
         signal["checker_reason"]  = f"Checker error: {str(e)}"
+        signal["checker_confidence"] = "LOW"
     return signal
 
 
