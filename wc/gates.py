@@ -523,6 +523,58 @@ def reconcile_positions() -> tuple:
     return removed, kept
 
 
+INFLIGHT_TTL_SEC = 90   # stale reservation auto-clear window (crash safety)
+
+
+def reserve_inflight(slug: str) -> tuple:
+    """Atomically reserve market_slug for order execution (per-slug in-flight
+    lock, persisted in the state file on the volume so it survives restarts).
+
+    Closes the scanner race: two concurrent signals for the same slug can both
+    pass PF-04 before either records a position; whichever calls this first
+    wins, the other is blocked exactly like an already-held position.
+
+    Stale reservations older than INFLIGHT_TTL_SEC (crashed/stuck executor)
+    are force-cleared here so a dead reservation can never permanently block
+    a slug. Returns (acquired: bool, stale_cleared: list[str]) — the caller
+    should alert on any stale_cleared entries so force-clears are visible.
+    """
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return True, []   # nothing to key on — behave exactly as before
+    now = datetime.now(timezone.utc).timestamp()
+    with STATE_LOCK:
+        state = load_state()
+        res   = state.get("inflight_reservations", {}) or {}
+        stale = [s for s, ts in res.items()
+                 if now - float(ts or 0) > INFLIGHT_TTL_SEC]
+        for s in stale:
+            del res[s]
+        if slug in res:
+            acquired = False
+        else:
+            res[slug] = now
+            acquired  = True
+        state["inflight_reservations"] = res
+        save_state(state)
+    return acquired, stale
+
+
+def release_inflight(slug: str) -> None:
+    """Release a per-slug in-flight reservation (order done, failed, or
+    aborted). Idempotent — releasing an absent slug is a no-op."""
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return
+    with STATE_LOCK:
+        state = load_state()
+        res   = state.get("inflight_reservations", {}) or {}
+        if slug in res:
+            del res[slug]
+            state["inflight_reservations"] = res
+            save_state(state)
+
+
 def reset_drawdown() -> None:
     """Operator recovery: clear realized-loss tally so the kill switch disarms."""
     with STATE_LOCK:

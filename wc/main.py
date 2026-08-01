@@ -27,6 +27,7 @@ from gates import (
     reconcile_positions,
     is_phase_cap_exhausted, reset_phase_counts,
     add_near_miss, pop_near_misses,
+    reserve_inflight, release_inflight,
     MAX_TRADES_PER_PHASE, STATE_LOCK,
 )
 from executor import log_signal, dry_run_signal, place_order, read_trade_log, close_position
@@ -555,6 +556,41 @@ def _fire_trade(signal: dict, size_usd: float, catalog: dict):
     if load_state().get("dry_run", True):
         return  # Should never reach here — dry mode is checked upstream
 
+    # Per-slug in-flight reservation — closes the scanner race where two
+    # concurrent signals (scheduled / in-play / discovery / near-miss replay)
+    # both pass PF-04 before either records its position. Only the first
+    # reservation holder proceeds; the loser is blocked exactly like an
+    # already-held position. Persisted in the state file; stale reservations
+    # (crashed executor) auto-clear after INFLIGHT_TTL_SEC inside
+    # reserve_inflight(), and any force-clear is alerted so it's never silent.
+    _res_slug = (signal.get("market_slug") or "").strip()
+    _acquired, _stale_cleared = reserve_inflight(_res_slug)
+    if _stale_cleared:
+        print(f"  [in-flight] force-cleared stale reservation(s): {_stale_cleared}")
+        try:
+            send_error(
+                f"⚠️ Cleared stale in-flight reservation(s) (>90s old, executor "
+                f"likely crashed mid-order): {', '.join(_stale_cleared)}. "
+                f"Verify no orphan order exists for these markets."
+            )
+        except Exception:
+            pass
+    if not _acquired:
+        print(f"  [in-flight] BLOCKED — {_res_slug} is already mid-execution "
+              f"by another scanner thread (duplicate prevented)")
+        log_signal(signal, executed=False, error="in-flight reservation held")
+        return
+    try:
+        _fire_trade_locked(signal, size_usd, catalog)
+    finally:
+        # Release in every outcome: success (position now recorded in state,
+        # PF-04 takes over), order failure, or exception. Never leaks.
+        release_inflight(_res_slug)
+
+
+def _fire_trade_locked(signal: dict, size_usd: float, catalog: dict):
+    """Body of _fire_trade, executed while holding the per-slug in-flight
+    reservation. Do not call directly — always enter via _fire_trade()."""
     passed, violations = check_gates(signal)
     if not passed:
         send_error(f"Signal blocked by gates:\n{'; '.join(violations)}\n"
