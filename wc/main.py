@@ -422,7 +422,16 @@ def telegram_listener():
                     print(f"[TG] ignored command from unauthorized chat {chat_id!r}: {text!r}")
                     continue
                 print(f"[TG CMD] {text!r}")
-                handle_command(text)
+                try:
+                    handle_command(text)
+                except Exception as cmd_err:
+                    # S1 fix: report command failures back to Telegram so the
+                    # operator is never left wondering whether a command worked.
+                    print(f"[TG] Command error for {text!r}: {cmd_err}")
+                    try:
+                        send_error(f"⚠️ Command failed: {text[:40]!r} → {cmd_err}")
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[TG] Listener error: {e}")
         time.sleep(2)
@@ -872,8 +881,15 @@ def check_unrealized_profit():
     # fetch live ask for each without holding STATE_LOCK.
     candidates = {}
     for pos in positions:
-        slug      = (pos.get("market_slug") or "").strip()
-        shares    = float(pos.get("shares") or 0)
+        slug   = (pos.get("market_slug") or "").strip()
+        shares = float(pos.get("shares") or 0)
+        if pos.get("entry_price") is None:
+            # K1 crash-recovery positions have no recorded fill price — P&L
+            # cannot be computed.  Skip gracefully so one bad position never
+            # stops profit alerts for the rest of the portfolio.  (S3 fix)
+            print(f"  [profit monitor] {pos.get('outcome', slug or '?')}: "
+                  f"entry_price is None (crash-recovered) — skipping P&L check")
+            continue
         entry_pct = float(pos.get("entry_price") or 0)
         if slug and shares > 0 and entry_pct > 0:
             candidates[slug] = (shares, entry_pct)

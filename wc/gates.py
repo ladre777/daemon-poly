@@ -2,6 +2,7 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 STATE_FILE = os.environ.get("STATE_FILE", "wc_state.json")
@@ -236,13 +237,14 @@ def check_gates(signal: dict) -> tuple:
         violations.append(f"PF-10: {phase_count} trades in {phase} phase (max {MAX_TRADES_PER_PHASE})")
 
 
-    # PF-10-SAT: Saturday hard cap — maximum 2 trades placed on any Saturday (UTC).
+    # PF-10-SAT: Saturday hard cap — maximum 3 trades placed on any Saturday
+    # (US Eastern time — Polymarket is US-centric; Saturday = New York Saturday).
     # Counts all positions opened today from both active and closed lists so the
     # cap cannot be bypassed by closing between trades. The existing 10-per-phase
     # cap (above) remains in force independently — both gates must pass.
-    now_utc_sat = datetime.now(timezone.utc)
-    if now_utc_sat.weekday() == 5:   # 0=Mon … 5=Sat … 6=Sun
-        today_str = now_utc_sat.strftime("%Y-%m-%d")
+    now_et_sat = datetime.now(ZoneInfo("America/New_York"))
+    if now_et_sat.weekday() == 5:   # 0=Mon … 5=Sat … 6=Sun (Eastern)
+        today_str = now_et_sat.strftime("%Y-%m-%d")
         SAT_TRADE_CAP = 3
         sat_count = sum(
             1 for p in state.get("active_positions", []) + state.get("closed_positions", [])
