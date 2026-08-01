@@ -552,6 +552,16 @@ def reserve_inflight(slug: str) -> tuple:
             del res[s]
         if slug in res:
             acquired = False
+        elif slug in stale:
+            # A stale reservation for THIS slug was just force-cleared. Do NOT
+            # hand the slot to this caller in the same breath — the previous
+            # holder's order may still be legitimately hung mid-exchange
+            # (>90s) without having recorded its position yet, and granting
+            # now would re-open the duplicate-order race. Block this attempt;
+            # the slug is now free, so the NEXT scan cycle (~3 min later,
+            # after any hung order has resolved and PF-04 re-checks state)
+            # can acquire it normally. Fully autonomous — no operator action.
+            acquired = False
         else:
             res[slug] = now
             acquired  = True
