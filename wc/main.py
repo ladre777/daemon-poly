@@ -242,10 +242,10 @@ def handle_command(text: str):
     elif cmd.startswith("DRY:") or cmd.startswith("DRY "):
         mode = text.split(":", 1)[-1].strip().upper() if ":" in text else text.split(" ", 1)[-1].strip().upper()
         if mode == "OFF":
-            set_dry_run(False)
+            set_dry_run(False, locked=False)   # M1: clear lock — next restart reads env var
             send_status("🔴 DRY RUN disabled — LIVE mode active. Real orders will be placed.")
         else:
-            set_dry_run(True)
+            set_dry_run(True, locked=True)     # M1: lock — restart cannot silently re-enable
             send_status("⚪ DRY RUN enabled. No real orders will be placed.")
 
     # CLOSE: <market> <outcome> [pnl_pct]
@@ -831,6 +831,11 @@ def run_discovery_scan(dry: bool):
             print(f"  [🔭 Discovery] ERROR: {signal.get('reason', '')[:180]}")
     except Exception as e:
         print(f"  [🔭 Discovery] scan error: {e}")
+        if _should_send("discovery_scan_error"):
+            try:
+                send_error(f"🔭 Discovery scan failed: {e} — cross-sport edges missed this cycle")
+            except Exception:
+                pass
 
 
 
@@ -1047,12 +1052,19 @@ def run_in_play_check():
 # ── HEARTBEAT ───────────────────────────────────────────────────────────────
 
 def send_heartbeat():
-    send_status(
-        f"⚙️ HEARTBEAT\n"
-        f"Sports: {_active_label()}\n"
-        f"{get_state_summary()}\n"
-        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
-    )
+    try:
+        send_status(
+            f"⚙️ HEARTBEAT\n"
+            f"Sports: {_active_label()}\n"
+            f"{get_state_summary()}\n"
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+    except Exception as e:
+        print(f"[HEARTBEAT] send failed: {e}")
+        try:
+            send_error(f"⚙️ Heartbeat failed to send: {e}")
+        except Exception:
+            pass
 
 
 # ── ENTRY POINT ─────────────────────────────────────────────────────────────
@@ -1137,6 +1149,13 @@ def main():
             print(f"Startup reconcile: {len(rec_kept)} position(s) confirmed real.")
     except Exception as e:
         print(f"Startup reconcile error (non-fatal): {e}")
+        try:
+            send_error(
+                f"⚠️ Startup position reconcile failed: {e} — "
+                f"state may be stale, verify open positions manually"
+            )
+        except Exception:
+            pass
 
     # ── K1 pending-order recovery ─────────────────────────────────────────────
     # If the container was killed between the pending_order marker write (in
@@ -1263,11 +1282,22 @@ def main():
             except Exception:
                 pass
 
-    # Honour DRY_RUN env var set on Railway — overrides whatever is in state so
-    # the operator can flip live/dry without needing a Telegram command.
-    # Default is LIVE unless DRY_RUN is explicitly set to a truthy value.
-    env_dry = os.environ.get("DRY_RUN", "false").strip().lower()
-    if env_dry in ("true", "1", "yes", "on"):
+    # Honour DRY_RUN env var — but only when the operator has NOT manually paused
+    # via Telegram.  dry_run_locked=True means they set "DRY: ON" intentionally
+    # and expect that to survive a Railway restart.  (M1 fix)
+    env_dry      = os.environ.get("DRY_RUN", "false").strip().lower()
+    _saved_locked = load_state().get("dry_run_locked", False)
+    if _saved_locked:
+        # Operator explicitly paused — stay paused, alert so silence is not invisible.
+        print("Manual pause active (dry_run_locked=True) — staying paused, env var ignored")
+        try:
+            send_status(
+                "⚪ Bot restarted — staying in DRY RUN (manual Telegram pause saved).\n"
+                "Send 'DRY: OFF' to resume LIVE trading."
+            )
+        except Exception:
+            pass
+    elif env_dry in ("true", "1", "yes", "on"):
         set_dry_run(True)
         print("DRY_RUN env=true → DRY RUN mode")
     else:
