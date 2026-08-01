@@ -624,6 +624,27 @@ def reset_drawdown() -> None:
         save_state(state)
 
 
+def note_cap_bypass(signal: dict, profit_usd: float):
+    """Separately log a granted PF-10/PF-10-SAT high-value cap bypass so
+    operators can audit how often the exception fires. Additive-only: does
+    NOT touch phase/Saturday counters — the trade still counts toward those
+    normally via record_trade_opened when it fills."""
+    with STATE_LOCK:
+        state = load_state()
+        state.setdefault("cap_bypass_log", []).append({
+            "ts":              datetime.now(timezone.utc).isoformat(),
+            "market":          signal.get("market"),
+            "market_slug":     signal.get("market_slug"),
+            "outcome":         signal.get("outcome"),
+            "entry_price_pct": signal.get("entry_price_pct"),
+            "target_exit_pct": signal.get("target_exit_pct"),
+            "profit_potential_usd": round(float(profit_usd), 2),
+            "bypassed":        signal.get("cap_bypass"),
+            "checker_confidence": signal.get("checker_confidence"),
+        })
+        save_state(state)
+
+
 def reset_phase_counts() -> dict:
     """Operator recovery: reset all phase trade counters to zero.
     Returns the old counts so the operator can confirm what was cleared.

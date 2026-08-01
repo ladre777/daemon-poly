@@ -27,7 +27,7 @@ from gates import (
     reconcile_positions,
     is_phase_cap_exhausted, reset_phase_counts,
     add_near_miss, pop_near_misses,
-    reserve_inflight, release_inflight,
+    reserve_inflight, release_inflight, note_cap_bypass,
     set_pending_exit, clear_pending_exit,
     MAX_TRADES_PER_PHASE, STATE_LOCK,
 )
@@ -545,6 +545,44 @@ def signal_price_sane(signal: dict, live_pct, origin: str = "") -> bool:
     return False
 
 
+# ── PF-10/PF-10-SAT HIGH-VALUE CAP BYPASS ────────────────────────────────────
+# One-slot exception: a signal may bypass PF-10 and/or PF-10-SAT ONLY when
+#   (a) the sanity gate passed (callers run signal_price_sane before this
+#       pipeline; the near-miss replay path re-prices to live before entry),
+#   (b) PF-10/PF-10-SAT are the ONLY gate violations (PF-04/PF-09 or any
+#       other violation → no bypass consideration, blocked as normal),
+#   (c) the Sonnet Checker APPROVES with its OWN confidence == HIGH,
+#   (d) calculated profit potential exceeds $70, computed from real trade
+#       parameters: (target − entry)/100 × planned shares at normal sizing.
+# The exception applies to that single trade only. Bypassed trades still
+# count toward the phase and Saturday caps via record_trade_opened (no
+# loophole) and are additionally logged separately as cap_bypass entries.
+# PF-04 and PF-09 are ABSOLUTE — never bypassable, here or at fire time.
+CAP_BYPASS_MIN_PROFIT_USD = 70.0
+
+
+def _compute_profit_potential(signal: dict) -> tuple:
+    """Dollar profit potential from ACTUAL trade parameters at normal sizing
+    (same formula as the call sites: min(bankroll × size_pct, per-trade cap)).
+    Returns (profit_usd, size_usd, shares). Never raises; (0, 0, 0) when any
+    input is missing/invalid — which fails the bypass closed."""
+    try:
+        entry  = float(signal.get("entry_price_pct") or 0)
+        target = float(signal.get("target_exit_pct") or 0)
+        if entry <= 0 or target <= entry:
+            return 0.0, 0.0, 0.0
+        bankroll = pm_us.get_buying_power()
+        size_usd = min(bankroll * float(signal.get("size_pct_bankroll", 5)) / 100,
+                       get_trade_cap(bankroll))
+        if size_usd <= 0:
+            return 0.0, 0.0, 0.0
+        shares = size_usd / (entry / 100.0)
+        profit = (target - entry) / 100.0 * shares
+        return profit, size_usd, shares
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
 # ── SHARED GATE + CHECKER PIPELINE ──────────────────────────────────────────
 
 def _passes_gates_and_checker(signal: dict) -> bool:
@@ -555,6 +593,44 @@ def _passes_gates_and_checker(signal: dict) -> bool:
     signal["gate_notes"] = "; ".join(violations) if violations else "All gates passed"
 
     if not passed:
+        # HIGH-VALUE CAP BYPASS: only when EVERY violation is PF-10/PF-10-SAT
+        # (any PF-04/PF-09/other violation → no bypass consideration at all).
+        _pf10_viols = [v for v in violations if v.startswith("PF-10")]
+        if _pf10_viols and len(_pf10_viols) == len(violations):
+            _profit, _bp_size, _bp_shares = _compute_profit_potential(signal)
+            if _profit > CAP_BYPASS_MIN_PROFIT_USD:
+                # Worth a Checker call — bypass requires APPROVED + HIGH.
+                signal = run_checker(signal)
+                _bp_verdict = signal.get("checker_verdict", "?")
+                _bp_conf    = signal.get("checker_confidence", "LOW")
+                print(f"  [cap-bypass] profit ${_profit:.2f} > "
+                      f"${CAP_BYPASS_MIN_PROFIT_USD:.0f} — Checker: "
+                      f"{_bp_verdict} / confidence {_bp_conf}")
+                if _bp_verdict == "APPROVED" and _bp_conf == "HIGH":
+                    signal["cap_bypass"] = "; ".join(_pf10_viols)
+                    signal["gate_check"] = "PASS"
+                    signal["gate_notes"] = (f"CAP BYPASS (profit "
+                                            f"${_profit:.2f}): {signal['cap_bypass']}")
+                    note_cap_bypass(signal, _profit)
+                    log_signal(signal, executed=False)
+                    send_status(
+                        f"💎 CAP BYPASS GRANTED — high-value exception "
+                        f"(this trade only)\n"
+                        f"Profit potential: ${_profit:.2f} "
+                        f"(threshold ${CAP_BYPASS_MIN_PROFIT_USD:.0f})\n"
+                        f"Checker: APPROVED, confidence HIGH\n"
+                        f"Bypassed: {signal['cap_bypass']}\n"
+                        f"{signal.get('sport','')} | {signal.get('market','?')}\n"
+                        f"{signal.get('direction','BUY')} "
+                        f"{signal.get('outcome','?')} @ "
+                        f"{signal.get('entry_price_pct','?')}¢ → target "
+                        f"{signal.get('target_exit_pct','?')}¢ · "
+                        f"~${_bp_size:.2f} ({_bp_shares:.0f} sh)\n"
+                        f"Trade still counts toward all caps."
+                    )
+                    return True
+                # Checker said no / not HIGH — fall through to the normal
+                # PF-10 handling below (near-miss re-queue when sole viol).
         # Task #38: if PF-10 is the SOLE gate failure the Checker call is
         # wasted — PF-10 would block execution regardless of the verdict.
         # Re-queue as near-miss so the signal retries next cycle and skip the
@@ -655,10 +731,19 @@ def _fire_trade_locked(signal: dict, size_usd: float, catalog: dict):
     reservation. Do not call directly — always enter via _fire_trade()."""
     passed, violations = check_gates(signal)
     if not passed:
-        send_error(f"Signal blocked by gates:\n{'; '.join(violations)}\n"
-                   f"Market: {signal.get('market','?')} | Edge: {signal.get('edge','?')}")
-        log_signal(signal, executed=False, error="gate fail at fire time")
-        return
+        # Honor a granted cap bypass at fire time — but ONLY when every
+        # remaining violation is still PF-10/PF-10-SAT. If PF-04, PF-09, or
+        # anything else appears between grant and fire, block full stop:
+        # those gates are absolute and never bypassable.
+        _fb_pf10 = [v for v in violations if v.startswith("PF-10")]
+        if signal.get("cap_bypass") and _fb_pf10 and len(_fb_pf10) == len(violations):
+            print(f"  [cap-bypass] fire-time gate re-check: PF-10-only "
+                  f"violations honored under granted bypass: {'; '.join(violations)}")
+        else:
+            send_error(f"Signal blocked by gates:\n{'; '.join(violations)}\n"
+                       f"Market: {signal.get('market','?')} | Edge: {signal.get('edge','?')}")
+            log_signal(signal, executed=False, error="gate fail at fire time")
+            return
 
     slug        = (signal.get("market_slug") or "").strip()
     cat_outcome = catalog.get(slug, {}).get("outcome") or signal.get("outcome", "?")
