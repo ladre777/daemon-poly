@@ -1175,6 +1175,65 @@ def main():
             send_error(_fresh_warn)
         except Exception:
             pass
+        # #37: query Polymarket for real holdings and rebuild active_positions
+        # so PF-04 has accurate data from the very first analysis cycle onward.
+        # Same pattern as the K1 startup pending-order recovery.
+        try:
+            _recovered_pos = pm_us.get_real_positions()
+            if _recovered_pos:
+                with STATE_LOCK:
+                    _fs_state = load_state()
+                    _ex_slugs = {
+                        (p.get("market_slug") or "").strip()
+                        for p in _fs_state.get("active_positions", [])
+                    }
+                    _n_added  = 0
+                    _now_iso  = datetime.now(timezone.utc).isoformat()
+                    for _rp in _recovered_pos:
+                        _rslug = (_rp.get("market_slug") or "").strip()
+                        if _rslug and _rslug not in _ex_slugs:
+                            _fs_state["active_positions"].append({
+                                "market":         _rslug,
+                                "market_slug":    _rslug,
+                                "direction":      "YES",
+                                "outcome":        _rp.get("outcome", _rslug),
+                                "entry_price":    None,
+                                "target_exit":    None,
+                                "size_pct":       None,
+                                "edge":           "STATE_RECOVERY",
+                                "sport":          "",
+                                "opened_at":      _now_iso,
+                                "order_id":       "",
+                                "shares":         int(_rp.get("size", 0) or 0),
+                                "notional_usd":   0.0,
+                                "profit_alerted": False,
+                            })
+                            _ex_slugs.add(_rslug)
+                            _n_added += 1
+                    if _n_added:
+                        save_state(_fs_state)
+                if _n_added:
+                    print(f"State recovery: added {_n_added} position(s) from Polymarket into fresh state")
+                    try:
+                        send_status(
+                            f"\U0001f504 State recovery: found {_n_added} real Polymarket "
+                            f"position(s) missing from fresh state \u2014 added with "
+                            f"STATE_RECOVERY edge. entry_price unknown; profit "
+                            f"monitoring skipped until corrected manually."
+                        )
+                    except Exception:
+                        pass
+            else:
+                print("State recovery: no open Polymarket positions \u2014 starting clean")
+        except Exception as _fserr:
+            print(f"State recovery query failed (non-fatal): {_fserr}")
+            try:
+                send_error(
+                    f"\u26a0\ufe0f Fresh-state PM recovery failed: {_fserr} \u2014 "
+                    f"verify open positions manually before trading resumes."
+                )
+            except Exception:
+                pass
 
     # Clean up any duplicate positions left from before the PF-04 gate existed.
     removed = dedupe_active_positions()
