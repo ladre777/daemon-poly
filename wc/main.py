@@ -20,7 +20,7 @@ from telegram_ops import (
 from gates import (
     check_gates, record_signal_sent, record_trade_opened,
     record_trade_closed, update_phase, set_dry_run, dedupe_active_positions,
-    get_state_summary, load_state, save_state, STATE_FILE,
+    get_state_summary, load_state, save_state, update_state, STATE_FILE,
     KILL_SWITCH_DRAWDOWN_PCT, reset_drawdown, reset_positions,
     get_trade_cap, auto_close_resolved_positions,
     reconcile_positions,
@@ -86,6 +86,42 @@ def _should_send(key: str) -> bool:
     last = _alert_history.get(key, 0)
     if now - last >= ALERT_COOLDOWN_SEC:
         _alert_history[key] = now
+        return True
+    return False
+
+
+_PF04_COOLDOWN_PFX = "pf04_cooldown:"   # state-file key prefix for persistent PF-04 throttle
+
+
+def _pf04_should_send(slug: str) -> bool:
+    """Persistent PF-04 duplicate-position alert cooldown, keyed on market slug.
+
+    Uses market_slug (catalog-sourced, immutable) instead of LLM-generated
+    market/outcome strings so the 30-min window is shared across ALL scanners
+    (scheduled every 3 min, in-play every 45 s, discovery every 15 min) that
+    block the same position — even when each scanner's LLM call produces a
+    slightly different 'market' label.
+
+    Reads/writes through the state file so the window survives bot restarts,
+    rolling deploys, and OOM kills.  Non-fatal on I/O error — fails open so a
+    broken state file never silences a real duplicate-position block forever."""
+    now = time.time()
+    skey = f"{_PF04_COOLDOWN_PFX}{slug}"
+    try:
+        last = float(load_state().get(skey, 0) or 0)
+    except Exception:
+        last = 0.0
+    delta = now - last
+    verdict = "FIRE" if delta >= ALERT_COOLDOWN_SEC else "SUPPRESS"
+    print(
+        f"[PF-04-DBG] key={skey!r} last={last:.3f} now={now:.3f} "
+        f"delta={delta:.1f}s threshold={ALERT_COOLDOWN_SEC}s → {verdict}"
+    )
+    if delta >= ALERT_COOLDOWN_SEC:
+        try:
+            update_state(lambda s: s.update({skey: now}))
+        except Exception as exc:
+            print(f"[PF-04] persist cooldown error (non-fatal): {exc}")
         return True
     return False
 
@@ -232,6 +268,15 @@ def handle_command(text: str):
     # RESET_POSITIONS — nuclear option: wipe all positions from state
     elif cmd in ("RESET_POSITIONS", "/RESET_POSITIONS", "CLEAR_POSITIONS", "/CLEAR_POSITIONS"):
         n = reset_positions()
+        # Clear persisted PF-04 cooldowns — positions are gone, so the next
+        # genuine duplicate block must alert immediately, not stay muted.
+        def _clear_pf04(s):
+            for k in [k for k in s if k.startswith(_PF04_COOLDOWN_PFX)]:
+                del s[k]
+        try:
+            update_state(_clear_pf04)
+        except Exception as exc:
+            print(f"[PF-04] cooldown clear error (non-fatal): {exc}")
         send_status(
             f"🧹 Cleared {n} active position(s) from state.\n"
             f"Bankroll-deployed counter reset to 0%.\n"
@@ -463,12 +508,22 @@ def _passes_gates_and_checker(signal: dict) -> bool:
 
         print(f"  GATE FAIL: {signal['gate_notes']}")
         log_signal(signal, executed=False)
-        # Always notify on a real TRADE rejection — never throttle.
-        # Task #10's 15-min signal dedup prevents the same edge flooding Telegram.
-        send_error(
-            f"🚫 Signal blocked by gates:\n{signal['gate_notes']}\n"
-            f"Sport: {signal.get('sport','')} | Market: {signal.get('market','?')} | Edge: {signal.get('edge','?')}"
-        )
+        # Separate PF-04 (duplicate-position) from other violations.
+        # PF-04 re-fires every scan cycle while a position is held — throttle it
+        # to one alert per ALERT_COOLDOWN_SEC per market slug (persisted in the
+        # state file so it survives restarts). Non-PF-04 violations always
+        # alert immediately, even when they co-fire alongside PF-04 in the same
+        # signal — a concurrent risk-limit breach is never silenced.
+        _pf04_viols  = [v for v in violations if v.startswith("PF-04")]
+        _other_viols = [v for v in violations if not v.startswith("PF-04")]
+        _slug = (signal.get("market_slug") or "").strip().lower()
+        _pf04_ok    = bool(_pf04_viols) and _pf04_should_send(_slug)
+        _to_report  = _other_viols + (_pf04_viols if _pf04_ok else [])
+        if _to_report:
+            send_error(
+                f"🚫 Signal blocked by gates:\n{'; '.join(_to_report)}\n"
+                f"Sport: {signal.get('sport','')} | Market: {signal.get('market','?')} | Edge: {signal.get('edge','?')}"
+            )
         return False
 
     # CHECKER: independent Sonnet verification before any execution.
