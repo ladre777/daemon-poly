@@ -14,14 +14,13 @@ worker needs to read the same memory concurrently.
 """
 from __future__ import annotations
 
-import json
-import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Optional
 
 from config import CONFIG
+from memory.db import connect
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS edges (
@@ -37,9 +36,11 @@ CREATE TABLE IF NOT EXISTS edges (
     checker_verdict TEXT,          -- "approve" | "reject" | "abstain"
     checker_confidence REAL,
     checker_reasoning TEXT,
-    action_taken TEXT,              -- "executed" | "skipped_risk" | "skipped_checker" | "dry_run"
-    entry_price REAL,
-    size_contracts INTEGER,
+    action_taken TEXT,              -- "pending" | "executed" | "no_fill" | "rejected"
+                                    -- | "skipped_risk" | "skipped_checker" | "dry_run"
+    entry_price REAL,               -- average price actually FILLED, not requested
+    size_contracts INTEGER,         -- contracts actually filled, not requested
+    client_order_id TEXT,           -- links this decision to orders/fills/settlements
     settled INTEGER DEFAULT 0,      -- 0/1
     outcome TEXT,                    -- "yes" | "no" | NULL until settled
     pnl REAL,
@@ -83,16 +84,27 @@ class EdgeStore:
         self.db_path = db_path or CONFIG.ledger_db_path
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(conn):
+        """Additive migrations for databases created before a column existed.
+
+        CREATE TABLE IF NOT EXISTS silently does nothing on an existing table,
+        so a new column in SCHEMA never reaches a database that predates it —
+        the queries then fail at runtime on exactly the machine that has real
+        history in it.
+        """
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(edges)")}
+        if "client_order_id" not in have:
+            conn.execute("ALTER TABLE edges ADD COLUMN client_order_id TEXT")
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
+        # Shared with the order store so both get the busy timeout and WAL
+        # mode, and so a failed write rolls back instead of half-committing.
+        with connect(self.db_path) as conn:
             yield conn
-            conn.commit()
-        finally:
-            conn.close()
 
     def record_edge(self, edge: EdgeRecord) -> int:
         with self._conn() as c:
@@ -113,11 +125,54 @@ class EdgeStore:
             return cur.lastrowid
 
     def settle(self, edge_id: int, outcome: str, pnl: float):
+        """Write back a settled outcome. Guarded on ``settled = 0`` so a
+        repeated settlement pass cannot overwrite an already-settled row with
+        a different number — reconciliation has to be idempotent, and a
+        calibration table that shifts under re-runs is worse than useless."""
         with self._conn() as c:
             c.execute(
-                "UPDATE edges SET settled=1, outcome=?, pnl=?, settled_at=? WHERE id=?",
+                "UPDATE edges SET settled=1, outcome=?, pnl=?, settled_at=? "
+                "WHERE id=? AND settled=0",
                 (outcome, pnl, time.time(), edge_id),
             )
+
+    def update_execution(
+        self,
+        edge_id: int,
+        action_taken: str,
+        entry_price: float = None,
+        size_contracts: int = 0,
+        client_order_id: str = None,
+    ):
+        """Attach the real execution outcome to a decision row.
+
+        Called after fills are reconciled, so ``entry_price`` is the average
+        price actually paid and ``size_contracts`` is the quantity actually
+        filled — not what was requested. A zero-fill IOC lands here as
+        ``no_fill`` with size 0, which keeps it out of the calibration
+        queries that only count ``executed`` rows.
+        """
+        with self._conn() as c:
+            c.execute(
+                "UPDATE edges SET action_taken=?, entry_price=?, size_contracts=?, "
+                "client_order_id=? WHERE id=?",
+                (action_taken, entry_price, size_contracts, client_order_id, edge_id),
+            )
+
+    def unsettled_executed_edges(self, ticker: str = None) -> list[dict]:
+        with self._conn() as c:
+            if ticker:
+                rows = c.execute(
+                    "SELECT * FROM edges WHERE settled=0 AND action_taken='executed' "
+                    "AND ticker=? ORDER BY created_at",
+                    (ticker,),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM edges WHERE settled=0 AND action_taken='executed' "
+                    "ORDER BY created_at"
+                ).fetchall()
+            return [dict(r) for r in rows]
 
     def calibration_by_category(self) -> list[dict]:
         """
