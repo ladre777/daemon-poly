@@ -152,16 +152,18 @@ class AppConfig:
     kalshi: KalshiConfig = field(default_factory=KalshiConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
-    # These are Kalshi's own category names (case-insensitive match in
-    # scout.py), not a guessed heuristic — call Scout.list_available_categories()
-    # once against your account to confirm current spelling before relying on it.
-    # NOTE: your own screenshots show Commodities as a category distinct
-    # from Crypto (with Oil & Gas / Metals / Tech sub-tabs) — an earlier
-    # version of this default conflated them. Verified taxonomy > my guess;
-    # run list_available_categories() and treat this as a starting point.
+    # Group names from core/kalshi_categories.py, ported from Jon Becker's
+    # 72.1M-trade Kalshi analysis. These replace a guessed list
+    # ("Sports,Crypto,Politics,Economics,Climate,Culture") in which three of
+    # six names did not exist — and a name that matches nothing silently drops
+    # that whole vertical rather than erroring. Scout logs an error at startup
+    # for any entry here that is not a real group.
+    #
+    # Valid: Sports, Politics, Crypto, Finance, Weather, Entertainment,
+    #        Science/Tech, Media, World Events, Esports, Other
     scout_categories: list = field(
         default_factory=lambda: os.getenv(
-            "SCOUT_CATEGORIES", "Sports,Crypto,Politics,Economics,Climate,Culture"
+            "SCOUT_CATEGORIES", "Sports,Crypto,Politics,Finance,Weather"
         ).split(",")
     )
     # Categories where the LLM Maker is allowed to reason with no live spot
@@ -175,10 +177,14 @@ class AppConfig:
     # into "reason about it anyway" if you added them here without a real
     # grounding source behind them. Add categories here deliberately, not
     # by default, as you wire up real data for each one.
+    # Renamed to the real taxonomy groups: "economics" -> Finance,
+    # "climate" -> Weather, "culture" -> Entertainment. The old names matched
+    # nothing, so every candidate outside the quant path was being skipped
+    # for want of a grounding source it actually had.
     llm_reasoning_categories: set = field(
         default_factory=lambda: {
             c.strip().lower() for c in os.getenv(
-                "LLM_REASONING_CATEGORIES", "sports,politics,economics,climate,culture"
+                "LLM_REASONING_CATEGORIES", "sports,politics,finance,weather"
             ).split(",") if c.strip()
         }
     )

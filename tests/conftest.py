@@ -25,17 +25,32 @@ from workers.scout import Candidate  # noqa: E402
 from tests.fakes import FakeKalshiClient  # noqa: E402
 
 
+#: App-level CONFIG attributes tests mutate. Restored alongside CONFIG.risk.
+_APP_FIELDS = (
+    "scout_categories",
+    "llm_reasoning_categories",
+    "priority_keywords",
+    "max_llm_calls_per_pass",
+    "scout_poll_seconds",
+)
+
+
 @pytest.fixture(autouse=True)
 def restore_config():
-    """Snapshot and restore CONFIG.risk around every test.
+    """Snapshot and restore mutable CONFIG state around every test.
 
-    DRY_RUN in particular is global mutable state; a test that flips it and
-    forgets to restore would make later tests silently paper-trade.
+    DRY_RUN in particular is global; a test that flips it and forgets to
+    restore would make later tests silently paper-trade. The app-level lists
+    matter for the same reason — a leaked SCOUT_CATEGORIES makes a later
+    test's Scout return nothing for reasons that have nothing to do with it.
     """
-    saved = copy.deepcopy(CONFIG.risk)
+    saved_risk = copy.deepcopy(CONFIG.risk)
+    saved_app = {name: copy.deepcopy(getattr(CONFIG, name)) for name in _APP_FIELDS}
     yield CONFIG
-    for field, value in vars(saved).items():
+    for field, value in vars(saved_risk).items():
         setattr(CONFIG.risk, field, value)
+    for name, value in saved_app.items():
+        setattr(CONFIG, name, value)
 
 
 @pytest.fixture
