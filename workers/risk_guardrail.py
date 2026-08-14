@@ -33,7 +33,6 @@ than its fees is rejected rather than discovered afterwards.
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -41,6 +40,11 @@ from typing import Optional
 
 from config import CONFIG
 from core.account_state import AccountSnapshot
+from core.pricing import (
+    executable_price_cents as _executable_price_cents,
+    fee_cents_per_contract as _fee_cents_per_contract,
+    net_edge,
+)
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore
 from workers.checker import Verdict
@@ -71,21 +75,10 @@ class KillSwitchTripped(Exception):
     pass
 
 
-def fee_cents_per_contract(price_cents: float) -> float:
-    """Conservative per-contract fee estimate, rounded up to the cent."""
-    p = min(max(price_cents / 100.0, 0.0), 1.0)
-    return math.ceil(CONFIG.risk.fee_rate * p * (1.0 - p) * 100.0 * 100.0) / 100.0
-
-
-def executable_price_cents(candidate, direction: str) -> float:
-    """The price we would actually pay, not the midpoint.
-
-    Buying YES lifts the ask; buying NO lifts the NO ask, which is
-    ``100 - yes_bid``. Sizing already used these; the edge check used the
-    midpoint, which is the mismatch P1 item 7 addresses in full. Exposing one
-    helper here means both sides of that fix read the same number.
-    """
-    return candidate.yes_ask if direction == "yes" else (100.0 - candidate.yes_bid)
+# Re-exported so existing callers and tests keep importing these from here,
+# while Maker and risk share one definition (see core/pricing.py).
+fee_cents_per_contract = _fee_cents_per_contract
+executable_price_cents = _executable_price_cents
 
 
 class RiskGuardrail:
@@ -322,17 +315,20 @@ class RiskGuardrail:
         c = verdict.proposal.candidate
         direction = verdict.proposal.direction
 
-        # Maker already filters below-threshold edges, but this is the last
-        # gate before capital moves and it should not depend on an upstream
-        # component having done its job — a stubbed or changed Maker must not
-        # be able to push a zero-edge trade through. Note this compares the
-        # Maker's own edge (measured against the midpoint); recomputing edge
-        # from the executable price, fees and slippage is P1 item 7.
-        if verdict.proposal.edge_size < CONFIG.risk.min_edge_threshold:
+        # The quote this decision was made against must still be current. A
+        # proposal can sit in the LLM queue for seconds; approving it against
+        # a price that has since moved is trading on a number that no longer
+        # exists. Checked here, immediately before submission, rather than
+        # only at scan time.
+        quote = c.quote
+        if quote is None:
+            return RiskDecision(False, "candidate carries no quote — cannot verify price")
+        if quote.is_stale():
             return RiskDecision(
                 False,
-                f"edge {verdict.proposal.edge_size:.2%} is below the "
-                f"{CONFIG.risk.min_edge_threshold:.2%} minimum",
+                f"quote is {quote.age_seconds:.0f}s old (limit "
+                f"{CONFIG.risk.max_quote_age_seconds:.0f}s) — refusing to trade on "
+                f"a price that may have moved",
             )
 
         price = executable_price_cents(c, direction)
@@ -341,6 +337,20 @@ class RiskGuardrail:
                 False, f"executable price {price:.1f}c is outside 0-100c — refusing"
             )
 
+        # Edge is measured against the price we would actually pay, net of
+        # fees and slippage — not the midpoint. The midpoint flatters every
+        # trade by half the spread, so a 4pp "edge" on a 48/52 market is
+        # roughly 2pp before costs and can be negative after them. Maker
+        # screens on the same number; this is the enforcing check.
+        net = net_edge(verdict.proposal.maker_probability, c, direction)
+        if net < CONFIG.risk.min_edge_threshold:
+            return RiskDecision(
+                False,
+                f"net edge {net:.2%} below the {CONFIG.risk.min_edge_threshold:.2%} "
+                f"minimum (executable {verdict.proposal.executable_edge:.2%}, "
+                f"midpoint would have shown {verdict.proposal.midpoint_edge:.2%})",
+                executable_price_cents=price,
+            )
         # 2. Budget the worst case per contract: what we pay, plus a slippage
         #    allowance, plus fees. Sizing against the raw price would let the
         #    real cost of a filled order exceed the cap it was approved under.
@@ -428,5 +438,16 @@ class RiskGuardrail:
                 "realized_pnl_today": realized_today,
                 "reconciled_age_seconds": account.age_seconds,
                 "evaluated_at": time.time(),
+                # The exact quote this decision was made against, so the
+                # audit trail says what price was used rather than leaving it
+                # to be re-derived from a later, different quote.
+                "quote_yes_bid": quote.yes_bid,
+                "quote_yes_ask": quote.yes_ask,
+                "quote_captured_at": quote.captured_at,
+                "quote_age_seconds": quote.age_seconds,
+                "quote_source": quote.source,
+                "executable_edge": verdict.proposal.executable_edge,
+                "midpoint_edge": verdict.proposal.midpoint_edge,
+                "net_edge": net,
             },
         )

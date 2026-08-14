@@ -22,12 +22,14 @@ against live data rather than becoming a third guess.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 from core.kalshi_client import KalshiClient
 from core.kalshi_categories import GROUPS, classify_ticker, ticker_prefix
+from core.validation import MarketDataInvalid, Quote, validate_market
 from config import CONFIG
 
 log = logging.getLogger("daemon_kalshi.scout")
@@ -60,10 +62,44 @@ class Candidate:
     strike_type: str = ""          # "greater" | "less" | "between"
     floor_strike: Optional[float] = None
     cap_strike: Optional[float] = None
+    #: The exact quote this candidate was built from, with its timestamp.
+    #: Carried all the way to submission so risk can reject a proposal whose
+    #: quote went stale while the LLM was thinking, instead of trading at a
+    #: price that no longer exists.
+    quote: Optional[Quote] = None
+
+    def __post_init__(self):
+        if self.quote is None:
+            # Candidates built by hand (tests, replays) still need a quote.
+            self.quote = Quote(
+                yes_bid=self.yes_bid, yes_ask=self.yes_ask,
+                captured_at=time.time(), source="scan",
+            )
 
     @property
     def implied_yes_probability(self) -> float:
+        """Midpoint-implied probability.
+
+        Kept for reporting and for the edge-memory record, but no longer the
+        basis for approval — see executable_probability below and P1 item 7.
+        The midpoint is not a price anyone can trade at.
+        """
         return (self.yes_bid + self.yes_ask) / 2 / 100.0
+
+    def executable_price_cents(self, direction: str) -> float:
+        """Price actually payable per contract for `direction`."""
+        return self.quote.executable_price_cents(direction)
+
+    def executable_probability(self, direction: str) -> float:
+        """Break-even probability implied by the price we would really pay.
+
+        Buying YES at the ask, the market is charging ``ask/100`` for a
+        contract worth 1 if YES. Buying NO at ``100 - bid``, the implied
+        probability of YES is ``bid/100``. Comparing the model's estimate
+        against *this* is what makes an edge tradeable rather than notional.
+        """
+        price = self.executable_price_cents(direction)
+        return price / 100.0 if direction == "yes" else 1.0 - (price / 100.0)
 
     @property
     def spread(self) -> float:
@@ -106,6 +142,7 @@ class Scout:
                 ", ".join(sorted(unknown)), ", ".join(GROUPS),
             )
         skipped_by_group: dict[str, int] = {}
+        rejected: dict[str, int] = {}
 
         while True:
             page = self.client.list_events(
@@ -118,6 +155,7 @@ class Scout:
                 for m in event.get("markets", []):
                     ticker = m.get("ticker")
                     if not ticker:
+                        rejected["missing ticker"] = rejected.get("missing ticker", 0) + 1
                         continue
                     market_event_ticker = m.get("event_ticker") or event_ticker
                     group, taxonomy_category, subcategory = classify_ticker(
@@ -127,26 +165,40 @@ class Scout:
                         skipped_by_group[group] = skipped_by_group.get(group, 0) + 1
                         continue
 
-                    volume = float(m.get("volume", 0))
-                    if volume < CONFIG.risk.min_liquidity_usd:
+                    # Everything past here is external data being turned into
+                    # numbers the trading logic will act on, so it is
+                    # validated first. One malformed market is skipped, not
+                    # allowed to abort the scan.
+                    try:
+                        valid = validate_market(m, event)
+                    except MarketDataInvalid as e:
+                        reason = str(e).split(":", 1)[-1].strip()
+                        rejected[reason] = rejected.get(reason, 0) + 1
+                        log.debug("Rejected market: %s", e)
+                        continue
+                    for warning in valid.warnings:
+                        log.debug("%s: %s", valid.ticker, warning)
+
+                    if valid.volume < CONFIG.risk.min_liquidity_usd:
                         continue
                     candidates.append(
                         Candidate(
-                            ticker=ticker,
-                            title=m.get("title", event.get("title", ticker)),
+                            ticker=valid.ticker,
+                            title=valid.title,
                             category=group,
-                            yes_bid=float(m.get("yes_bid", 0)),
-                            yes_ask=float(m.get("yes_ask", 100)),
-                            volume=volume,
-                            close_time=m.get("close_time", event.get("close_time", "")),
+                            yes_bid=valid.quote.yes_bid,
+                            yes_ask=valid.quote.yes_ask,
+                            volume=valid.volume,
+                            close_time=valid.close_time,
+                            quote=valid.quote,
                             series_ticker=event.get("series_ticker", ""),
                             event_ticker=market_event_ticker,
                             kalshi_category=kalshi_category,
                             taxonomy_category=taxonomy_category,
                             taxonomy_subcategory=subcategory,
-                            strike_type=m.get("strike_type", ""),
-                            floor_strike=m.get("floor_strike"),
-                            cap_strike=m.get("cap_strike"),
+                            strike_type=valid.strike_type,
+                            floor_strike=valid.floor_strike,
+                            cap_strike=valid.cap_strike,
                         )
                     )
 
@@ -155,10 +207,20 @@ class Scout:
                 break
 
         self._log_unclassified(candidates)
+        if rejected:
+            # Aggregated rather than per-market: a feed problem shows up as a
+            # count that jumps, and a silent drop to zero candidates now has
+            # a visible cause.
+            log.warning(
+                "Rejected %d market(s) as invalid: %s",
+                sum(rejected.values()),
+                ", ".join(f"{n}x {reason}" for reason, n in
+                          sorted(rejected.items(), key=lambda kv: -kv[1])[:8]),
+            )
         log.info(
-            "Scout found %d candidates across %s (skipped by group: %s)",
+            "Scout found %d candidates across %s (skipped by group: %s, invalid: %d)",
             len(candidates), wanted or "all groups",
-            skipped_by_group or "none",
+            skipped_by_group or "none", sum(rejected.values()),
         )
         return candidates
 

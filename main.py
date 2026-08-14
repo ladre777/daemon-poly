@@ -62,6 +62,12 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         log.error("Not safe to trade this pass: %s", snapshot.blocking_reason())
         return 0
 
+    # One spot fetch per symbol per pass: ten BTC markets must not make ten
+    # API calls, nor write ten duplicate observations into the volatility
+    # buffer (duplicates drive the vol estimate toward zero, and vol is in
+    # the denominator of the quant probability).
+    quant_maker.begin_pass()
+
     candidates = scout.scan()
     log.info("Scout returned %d candidates", len(candidates))
 

@@ -146,6 +146,41 @@ class RiskConfig:
     # production: drift normally means the fill record is wrong.
     allow_position_drift: bool = _bool("ALLOW_POSITION_DRIFT", False)
 
+    # -- data validation ---------------------------------------------------
+    # A quote older than this is not tradeable. Applies twice: Scout refuses
+    # to build a Candidate from a stale quote, and risk re-checks the quote
+    # captured at decision time immediately before submission, so a proposal
+    # that sat in the LLM queue too long is rejected rather than acted on at
+    # a price that no longer exists.
+    max_quote_age_seconds: float = _float("MAX_QUOTE_AGE_SECONDS", 60.0)
+    # Bounds on free text from models and feeds — it lands in the database,
+    # in the next prompt as playbook context, and in log lines.
+    max_reasoning_chars: int = _int("MAX_REASONING_CHARS", 2000)
+    max_playbook_chars: int = _int("MAX_PLAYBOOK_CHARS", 4000)
+    max_context_chars: int = _int("MAX_CONTEXT_CHARS", 4000)
+    max_title_chars: int = _int("MAX_TITLE_CHARS", 300)
+
+    # -- quant path / spot data quality ------------------------------------
+    # A spot quote older than this is not usable for pricing a contract.
+    max_spot_age_seconds: float = _float("MAX_SPOT_AGE_SECONDS", 120.0)
+    # A print this many times away from the recent median is treated as a
+    # feed glitch. Volatility sits in the denominator of the probability
+    # calculation, so one bad tick distorts every market on that symbol for
+    # as long as it stays in the window.
+    spot_outlier_ratio: float = _float("SPOT_OUTLIER_RATIO", 1.5)
+    # Minimum observations before a volatility estimate is trusted. Below
+    # this the quant path declines rather than pricing off noise.
+    min_vol_observations: int = _int("MIN_VOL_OBSERVATIONS", 10)
+    # Minimum wall-clock span the observation window must cover. Ten points
+    # gathered in ten seconds say nothing about hourly volatility.
+    min_vol_span_seconds: float = _float("MIN_VOL_SPAN_SECONDS", 600.0)
+    spot_backoff_base_seconds: float = _float("SPOT_BACKOFF_BASE_SECONDS", 30.0)
+    spot_backoff_max_seconds: float = _float("SPOT_BACKOFF_MAX_SECONDS", 900.0)
+    # Contract specs in core/contract_specs.py all ship verified=False,
+    # because none has been checked against Kalshi's own settlement rules.
+    # Setting this true prices them anyway — for demo experimentation only.
+    quant_allow_unverified: bool = _bool("QUANT_ALLOW_UNVERIFIED", False)
+
 
 @dataclass
 class AppConfig:

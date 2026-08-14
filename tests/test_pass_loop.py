@@ -30,6 +30,12 @@ class StubScout:
 
 
 class StubQuantMaker:
+    def __init__(self):
+        self.passes = 0
+
+    def begin_pass(self):
+        self.passes += 1
+
     def can_handle(self, candidate):
         return False
 

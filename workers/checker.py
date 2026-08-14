@@ -8,13 +8,13 @@ provides no actual risk reduction.
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 
 import anthropic
 
 from config import CONFIG
+from core.validation import validate_checker_output
 from workers.maker import Proposal
 
 log = logging.getLogger("daemon_kalshi.checker")
@@ -68,16 +68,17 @@ class Checker:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
         )
-        raw = resp.content[0].text
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            log.warning("Checker returned non-JSON for %s: %s", c.ticker, raw[:200])
-            parsed = {"verdict": "abstain", "confidence": 0.0, "reasoning": "parse_error"}
-
+        raw = resp.content[0].text if resp.content else ""
+        # Strictly validated: an unparseable response, an unknown verdict
+        # string, or a non-finite/out-of-range confidence all become an
+        # abstention rather than an exception mid-pass or a value that
+        # accidentally clears the confidence threshold. The previous version
+        # indexed straight into the parsed dict and called float() on whatever
+        # was there.
+        checked = validate_checker_output(raw, ticker=c.ticker)
         return Verdict(
             proposal=proposal,
-            verdict=parsed["verdict"],
-            confidence=float(parsed["confidence"]),
-            reasoning=parsed["reasoning"],
+            verdict=checked.verdict,
+            confidence=checked.confidence,
+            reasoning=checked.reasoning,
         )

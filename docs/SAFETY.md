@@ -277,3 +277,145 @@ Confirm against `demo-api.kalshi.co` before trusting any of it:
    same exposure.
 5. Confirm `LEDGER_DB_PATH` points at a mounted volume.
 6. Only then consider a production key, still starting at `DRY_RUN=true`.
+
+---
+
+# P1: validation and strategy correctness
+
+## Item 6 — strict schemas
+
+`core/validation.py` validates everything entering the system from outside.
+The rule: bad input becomes a **refusal**, never an exception that propagates
+toward execution and never a silently coerced value.
+
+Market data → skip the market. Model output → abstain. Neither raises.
+
+| Input | Checks |
+|---|---|
+| Scout market | ticker and title present; prices finite and in 0–100c; bid ≤ ask (a crossed book is rejected, not turned into a negative spread); volume finite and nonnegative; positive time to close; `between` strikes have both bounds in order; quote timestamp present and not in the future |
+| Maker JSON | `probability_yes` and `confidence` finite and in [0,1]; reasoning present and length-bounded; anything else → no proposal |
+| Checker JSON | verdict is **exactly** `approve`/`reject`/`abstain` (no prefix matching, no `approved`→`approve`); confidence finite and in [0,1]; anything else → abstain |
+
+NaN is the case worth naming. `float("nan")` survives `json.loads` and
+`float()`, and every comparison against it is False — so a NaN confidence
+fails a `>=` threshold silently, and a NaN probability makes every downstream
+edge NaN without anything raising. `finite()` rejects it explicitly, and
+booleans are rejected too since `True == 1` would otherwise become a valid
+probability of 1.0.
+
+## Item 7 — edge from executable prices
+
+```
+executable price   = yes_ask                 (buying YES)
+                   = 100 − yes_bid           (buying NO)
+executable edge    = p − ask/100             (YES)
+                   = bid/100 − p             (NO)
+net edge           = executable edge − (fee + slippage)/100
+```
+
+Approval now uses **net edge**. The midpoint flatters every trade by half the
+spread and omits the fee entirely: on a 48/52 market a "4pp edge" measured
+against the midpoint is 2pp before costs and can be negative after them.
+
+`Proposal.edge_size` is now the executable figure, so everything downstream
+(risk thresholds, the longshot guard, edge memory) reads the tradeable
+number. `midpoint_edge` is kept for reporting and appears in refusal messages
+so the difference is visible.
+
+Maker screens on the same number risk enforces — one definition in
+`core/pricing.py`, imported by both. If they diverged, Maker would spend LLM
+budget generating proposals risk always rejects.
+
+Each decision records the exact quote it used (`quote_yes_bid`,
+`quote_yes_ask`, `quote_captured_at`, `quote_source`) in `RiskDecision.detail`,
+and a quote older than `MAX_QUOTE_AGE_SECONDS` is refused immediately before
+submission — a proposal that sat in the LLM queue is not traded at a price
+that has since moved.
+
+Fee policy is symmetric across YES and NO. This needed a fix: `p*(1-p)` is
+mathematically symmetric, but 0.7 has no exact binary representation, so
+`ceil()` charged a 70c contract a full cent more than its 30c mirror.
+
+## Item 8 — contract-specific, data-quality-aware quant path
+
+`core/contract_specs.py` records, per ticker family, what the contract
+settles on: strike units, feed units, settlement definition, timezone,
+observation window — **and whether any of it has been verified**. None has,
+so every spec ships `verified=False` and the quant path declines by default.
+`QUANT_ALLOW_UNVERIFIED=true` overrides for demo work.
+
+The gold and silver specs carry an explicit unit mismatch (per-troy-ounce
+strike vs per-share ETF feed). That is a ~10x error which would price every
+contract at ~0 or ~1 without raising anything, so no override permits it.
+
+Price client fixes, each tied to a specific failure:
+
+| Problem | Fix |
+|---|---|
+| Ten markets on one symbol → ten API calls and ten duplicate history points, driving realized vol toward zero (vol is in the *denominator* of the probability, so understated vol = overconfident pricing) | One fetch per symbol per pass, via `begin_pass()` |
+| A 429 returned `None`, read as "no price" rather than "back off" | Bounded exponential backoff with jitter, per source |
+| Unknown sampling interval — vol scaled by an assumed poll count | `realized_vol` returns a **per-second** figure computed from real elapsed time between observations |
+| Feed glitch (0.0, a 10x tick) used like a good quote | Outlier filter against the recent median; non-finite and non-positive rejected before entering state |
+| A cached quote from an hour ago used like a fresh one | `MAX_SPOT_AGE_SECONDS` staleness check |
+| Thin history priced off anyway | `MIN_VOL_OBSERVATIONS` and `MIN_VOL_SPAN_SECONDS` — declines rather than pricing off noise |
+
+## Replay/backtest evidence
+
+`backtest/replay.py` reports calibration buckets, Brier score, net PnL after
+fees, gross PnL, total fees, hit rate and max drawdown.
+
+**This is a falsifier, not evidence of profitability.** The world is
+synthetic, so a profit in it is a statement about the arithmetic, not about
+Kalshi. Nothing here licenses a claim about live returns.
+
+Fill assumptions, which drive the PnL number and are all optimistic:
+
+- every approved order fills in full, immediately, at the executable price
+  plus the slippage allowance;
+- fees charged per contract on the limit price;
+- positions held to settlement, no exits or re-marking;
+- no market impact.
+
+Because they are optimistic, a strategy that loses money here would lose more
+in reality. The converse does not hold.
+
+The load-bearing test is the **null hypothesis**: against a fairly priced
+book, a model that knows the true probability must find *zero* trades once it
+crosses the spread and pays fees. If that ever starts printing profits, the
+edge or cost accounting is broken. Against a book biased 8c from fair, the
+same model trades ~330 of 400 markets, returns a profit, and scores a Brier
+of ~0.13 against the 0.25 a coin-flip model scores.
+
+Sensitivity is checked in both directions the brief asks for: stale quotes
+are skipped entirely at the configured threshold, and mis-estimating
+volatility measurably degrades tail calibration (predicted 94.5% vs actual
+80.6% in the confident buckets at 0.4x vol).
+
+## P1 additions to "Not verified"
+
+- [ ] Which field, if any, carries a quote timestamp on a Kalshi market
+      payload. `core/validation.py` tries `last_price_time`, `quote_time`,
+      `updated_time`, `last_updated_time`, `ts` and falls back to our own read
+      time, which bounds staleness by our clock only.
+- [ ] Every contract spec in `core/contract_specs.py`: which index settles
+      each family, at what observation instant, in what units, in what
+      timezone. **All ship unverified.**
+- [ ] Whether Kalshi gold/silver strikes are quoted per troy ounce or per ETF
+      share. Until resolved those families cannot trade.
+- [ ] `VALID_STRIKE_TYPES` — the accepted `strike_type` vocabulary is
+      inferred, not confirmed.
+
+## P1 known limitations
+
+- The backtest's synthetic world assumes GBM, which is the quant model's own
+  assumption. It cannot detect that the assumption is wrong about real
+  markets — only that the code is consistent with it.
+- Volatility is still estimated from a short in-process rolling buffer that
+  starts empty on every restart. It is not persisted, so a redeploy costs the
+  entire vol history and the quant path goes quiet until it rebuilds.
+- `SpotQuote.observed_at` is our read time. The free feeds do not reliably
+  report their own print time, so a quote can be older than we think.
+- Direction is still chosen against the midpoint (which side the model
+  disagrees with); only the tradeability test uses the executable price. On a
+  very wide book those can disagree, and the trade is then rejected by the
+  net-edge check rather than re-routed to the other side.

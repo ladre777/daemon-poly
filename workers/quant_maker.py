@@ -1,21 +1,35 @@
 """
 QuantMaker: the fast path. No LLM call per market — a digital/binary option
-probability model instead. This is what actually answers "how do I code it
-to exploit 15-minute commodities markets": Maker's job for these isn't
-reasoning, it's math, and math is milliseconds instead of seconds.
+probability model instead.
 
-Model: given current spot price S, strike K, time to expiry T (in the same
-units as your volatility estimate), and realized volatility sigma, this
-prices a "will spot be above/below K at expiry" contract the same way a
-digital option is priced — probability of finishing in the money under a
-lognormal assumption, via the normal CDF of the standardized log-distance
-to strike. This is a real, standard technique (the same shape of model
-public write-ups describe using against Kalshi's own KXHIGH weather
-contracts), not something novel or guaranteed — lognormal/constant-vol is a
-simplifying assumption real markets violate, especially around news events,
-and this only works for markets with a numeric strike and a live spot feed
-(crypto, GLD/SLV commodities) — not for the reasoning-based categories
-(politics, culture) where Maker (the LLM) is doing something the math can't.
+Model: given spot S, strike K, time to expiry T and volatility sigma, this
+prices "will spot be above/below K at expiry" the way a digital option is
+priced: the probability of finishing in the money under a lognormal
+assumption, via the normal CDF of the standardised log-distance to strike.
+Standard technique, not a novel one, and lognormal/constant-vol is a
+simplifying assumption real markets violate — especially around news.
+
+What P1 item 8 changed
+----------------------
+The model arithmetic is unchanged. What changed is everything around it,
+because the inputs were the weak part:
+
+- **Contract semantics are now explicit.** The old five-line SERIES_SPOT_MAP
+  asserted "CoinGecko BTC settles this contract" with nothing behind it. See
+  core/contract_specs.py: each family records its strike units, feed units,
+  settlement definition, timezone and observation window, plus whether any of
+  that has been verified. None has, so the quant path declines by default.
+  The gold/silver entries carry an explicit unit mismatch (per-ounce strike
+  vs per-share feed) that would have priced every contract at ~0 or ~1
+  without raising anything.
+- **Volatility units are honest.** ``realized_vol`` now returns a per-second
+  figure computed from the real elapsed time between observations. The old
+  version returned a per-observation-interval stdev and the caller scaled it
+  by ``seconds_to_expiry / SCOUT_POLL_SECONDS``, assuming observations were
+  evenly spaced at exactly the poll interval — which they never were, and
+  which duplicated observations made worse in the direction of understating
+  volatility. Understated vol means overconfident probabilities.
+- **Stale and thin data are refused**, rather than being priced off.
 """
 from __future__ import annotations
 
@@ -24,22 +38,13 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from config import CONFIG
+from core.contract_specs import ContractSpec, spec_for, usable
 from core.spot_price_client import SpotPriceClient
 from workers.scout import Candidate
 from workers.maker import Proposal
-from config import CONFIG
 
 log = logging.getLogger("daemon_kalshi.quant_maker")
-
-# series_ticker prefix (or keyword fallback) -> spot symbol + which price
-# source to use. Extend this as you confirm more of Kalshi's numeric series.
-SERIES_SPOT_MAP = {
-    "KXBTC": ("btc", "crypto"),
-    "KXETH": ("eth", "crypto"),
-    "KXSOL": ("sol", "crypto"),
-    "KXGOLD": ("gold", "etf"),
-    "KXSILVER": ("silver", "etf"),
-}
 
 
 def _norm_cdf(x: float) -> float:
@@ -51,100 +56,171 @@ class QuantProposal:
     candidate: Candidate
     probability_yes: float
     spot_price: float
-    volatility_used: float
+    #: Per-second volatility, scaled to the contract's horizon below.
+    volatility_per_second: float
+    volatility_to_expiry: float
     seconds_to_expiry: float
+    spot_age_seconds: float
+    observations_used: int
+    spec: Optional[ContractSpec] = None
 
     def to_maker_proposal(self, min_confidence: float = 0.6) -> Optional[Proposal]:
-        """Adapts this into the same Proposal shape the LLM Maker produces,
-        so Checker/RiskGuardrail/Execution don't need separate code paths."""
-        edge = abs(self.probability_yes - self.candidate.implied_yes_probability)
-        if edge < CONFIG.risk.min_edge_threshold:
-            return None
-        return Proposal(
+        """Adapt into the Proposal shape the LLM Maker produces, so Checker,
+        RiskGuardrail and Execution need no separate code path.
+
+        Screens on the same executable, cost-inclusive edge the LLM path uses
+        (P1 item 7) rather than the midpoint.
+        """
+        from core.pricing import net_edge
+
+        proposal = Proposal(
             candidate=self.candidate,
             maker_probability=self.probability_yes,
-            maker_confidence=min_confidence,  # quant path doesn't self-report confidence the way an LLM does
+            # The quant path does not self-report confidence the way an LLM
+            # does; this is a fixed prior, not a model output.
+            maker_confidence=min_confidence,
             reasoning=(
-                f"Quant model: spot={self.spot_price:.2f}, strike={self.candidate.floor_strike}, "
-                f"{self.seconds_to_expiry:.0f}s to expiry, vol={self.volatility_used:.5f} "
-                f"(per-observation-interval stdev of log returns)"
+                f"Quant digital-option model: spot={self.spot_price:.4f} "
+                f"({self.spot_age_seconds:.0f}s old), strike="
+                f"{self.candidate.floor_strike}, {self.seconds_to_expiry:.0f}s to "
+                f"expiry, per-second vol={self.volatility_per_second:.3e} from "
+                f"{self.observations_used} observations, vol-to-expiry="
+                f"{self.volatility_to_expiry:.5f}"
             ),
             source="quant",
         )
+        net = net_edge(self.probability_yes, self.candidate, proposal.direction)
+        if net < CONFIG.risk.min_edge_threshold:
+            return None
+        return proposal
 
 
 class QuantMaker:
     def __init__(self, spot_client: SpotPriceClient = None):
         self.spot = spot_client or SpotPriceClient()
+        self._declined: dict[str, str] = {}
 
-    def _resolve_symbol(self, candidate: Candidate) -> Optional[tuple[str, str]]:
-        for prefix, (symbol, source) in SERIES_SPOT_MAP.items():
-            if candidate.series_ticker.upper().startswith(prefix) or candidate.ticker.upper().startswith(prefix):
-                return symbol, source
-        return None
+    def begin_pass(self) -> None:
+        """Reset per-pass state. One spot fetch per symbol per pass."""
+        self.spot.begin_pass()
+        self._declined.clear()
+
+    # -- routing -----------------------------------------------------------
+
+    def spec_for_candidate(self, candidate: Candidate) -> Optional[ContractSpec]:
+        return spec_for(candidate.ticker, candidate.series_ticker)
 
     def can_handle(self, candidate: Candidate) -> bool:
+        """Whether the quant path may price this market.
+
+        Declining here sends the candidate to the LLM path or to being
+        skipped, both of which are better than pricing off a spot instrument
+        that may not settle the contract.
+        """
         if candidate.floor_strike is None or not candidate.strike_type:
             return False
-        if self._resolve_symbol(candidate) is None:
+        spec = self.spec_for_candidate(candidate)
+        ok, why = usable(spec)
+        if not ok:
+            # Logged once per family per pass rather than per market — a
+            # thousand BTC strikes should not produce a thousand lines.
+            key = spec.prefix if spec else candidate.ticker[:8]
+            if key not in self._declined:
+                self._declined[key] = why
+                log.info("Quant path declining %s: %s", key, why)
             return False
         seconds = candidate.seconds_to_close
-        return seconds is not None and 0 < seconds
+        return seconds is not None and seconds > 0
+
+    # -- pricing -----------------------------------------------------------
 
     def propose(self, candidate: Candidate) -> Optional[QuantProposal]:
-        resolved = self._resolve_symbol(candidate)
-        if not resolved:
+        spec = self.spec_for_candidate(candidate)
+        ok, why = usable(spec)
+        if not ok:
+            log.debug("%s: %s", candidate.ticker, why)
             return None
-        symbol, source = resolved
 
-        spot = self.spot.crypto_price(symbol) if source == "crypto" else self.spot.etf_price(symbol)
-        if spot is None:
-            log.warning("No spot price for %s (%s) — skipping", candidate.ticker, symbol)
+        quote = self.spot.get_quote(spec.symbol, spec.source)
+        if quote is None:
+            log.info("No usable spot quote for %s (%s) — skipping",
+                     candidate.ticker, spec.symbol)
             return None
+        if quote.is_stale():
+            log.warning(
+                "Spot quote for %s is %.0fs old (limit %.0fs) — skipping %s",
+                spec.symbol, quote.age_seconds,
+                CONFIG.risk.max_spot_age_seconds, candidate.ticker,
+            )
+            return None
+        spot = quote.price
 
         seconds_to_expiry = candidate.seconds_to_close
         if not seconds_to_expiry or seconds_to_expiry <= 0:
             return None
 
-        history = self.spot.get_history(symbol)
-        # Look back roughly 20x the time remaining, capped 1hr-24hr, so vol
-        # estimate is scaled to the market's own horizon rather than a fixed
-        # window that's wrong for both 15-min and daily contracts at once.
+        history = self.spot.get_history(spec.symbol)
+        if history is None:
+            return None
+        # Look back roughly 20x the time remaining, bounded, so the estimate
+        # is scaled to this contract's horizon rather than a fixed window
+        # that is wrong for 15-minute and daily contracts at once.
         lookback = max(3600, min(seconds_to_expiry * 20, 86400))
-        vol = history.realized_vol(lookback) if history else None
-        if vol is None or vol == 0:
-            # Not enough price history yet to trust a vol estimate — this
-            # improves automatically the longer the bot runs and keeps
-            # polling. Until then, decline rather than guess a number that
-            # would silently produce a false-confidence probability.
-            log.info("Insufficient price history for %s yet — skipping quant proposal", symbol)
+        if history.span_seconds() < CONFIG.risk.min_vol_span_seconds:
+            log.info(
+                "Only %.0fs of price history for %s (need %.0fs) — declining "
+                "rather than pricing off noise",
+                history.span_seconds(), spec.symbol,
+                CONFIG.risk.min_vol_span_seconds,
+            )
+            return None
+
+        vol_per_second = history.realized_vol(lookback)
+        if not vol_per_second or vol_per_second <= 0:
+            # Not enough history to trust a vol estimate. Improves as the bot
+            # keeps polling; until then decline rather than invent a number
+            # that would produce a false-confidence probability.
+            log.info("Insufficient price history for %s — skipping quant proposal",
+                     spec.symbol)
             return None
 
         strike = candidate.floor_strike
-        # Scale vol (per-poll-interval stdev) to the sqrt of periods between
-        # now and expiry, assuming polls roughly track SCOUT_POLL_SECONDS.
-        periods = max(seconds_to_expiry / max(CONFIG.scout_poll_seconds, 1), 1)
-        vol_to_expiry = vol * math.sqrt(periods)
+        if strike is None or strike <= 0 or spot <= 0:
+            return None
 
-        z = (math.log(strike / spot)) / vol_to_expiry if spot > 0 and strike > 0 else 0
-        # P(spot_T > strike) under lognormal assumption
+        # Diffusion scaling on real elapsed time, not on an assumed count of
+        # poll intervals.
+        vol_to_expiry = vol_per_second * math.sqrt(seconds_to_expiry)
+        if vol_to_expiry <= 0:
+            return None
+
+        z = math.log(strike / spot) / vol_to_expiry
         prob_above = 1 - _norm_cdf(z)
 
-        if candidate.strike_type == "greater":
+        strike_type = (candidate.strike_type or "").lower()
+        if strike_type in ("greater", "greater_or_equal"):
             prob_yes = prob_above
-        elif candidate.strike_type == "less":
+        elif strike_type in ("less", "less_or_equal"):
             prob_yes = 1 - prob_above
-        elif candidate.strike_type == "between" and candidate.cap_strike:
+        elif strike_type == "between" and candidate.cap_strike:
             z_cap = math.log(candidate.cap_strike / spot) / vol_to_expiry
             prob_yes = _norm_cdf(z_cap) - _norm_cdf(z)
         else:
             return None
 
+        if not math.isfinite(prob_yes):
+            log.warning("Non-finite probability for %s — skipping", candidate.ticker)
+            return None
         prob_yes = min(max(prob_yes, 0.001), 0.999)
+
         return QuantProposal(
             candidate=candidate,
             probability_yes=prob_yes,
             spot_price=spot,
-            volatility_used=vol,
+            volatility_per_second=vol_per_second,
+            volatility_to_expiry=vol_to_expiry,
             seconds_to_expiry=seconds_to_expiry,
+            spot_age_seconds=quote.age_seconds,
+            observations_used=len(history),
+            spec=spec,
         )
