@@ -1,7 +1,16 @@
-anthropic>=0.28.0
-openai>=1.0.0
+# Shared
+anthropic>=0.40
 requests>=2.31.0
+
+# DAEMON-POLY (Polymarket)
+openai>=1.0.0
 schedule>=1.2.0
 polymarket-us>=0.1.2
 py-clob-client>=0.34.0
 pytz>=2024.1
+
+# DAEMON-KALSHI
+httpx>=0.27
+websockets>=12.0
+cryptography>=42.0
+python-dotenv>=1.0

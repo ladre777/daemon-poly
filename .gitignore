@@ -50,3 +50,14 @@ Thumbs.db
 
 # Local Polymarket US credentials (never commit)
 .pm_creds.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Kalshi credentials (never commit)
+.env
+*.pem
+*.db
