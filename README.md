@@ -165,7 +165,9 @@ here — this repo has no historical data or backtest harness of its own yet
 daemon-kalshi/
   core/
     kalshi_client.py     # REST client: RSA-PSS signing, rate-limit backoff
-    kalshi_ws.py          # WebSocket: orderbook snapshot+delta, seq tracking, reconnect
+    account_state.py      # reconciled exposure: balance, positions, orders, fills
+    order_state.py         # order lifecycle states + deterministic client order IDs
+    kalshi_ws.py            # WebSocket: orderbook snapshot+delta, seq tracking, reconnect
     espn_client.py          # Free, keyless ESPN data (github.com/pseudo-r/Public-ESPN-API)
     weather_client.py        # Free, keyless NOAA/NWS data, mapped to Kalshi's settlement stations
     fred_client.py             # Free-key Federal Reserve economic data
@@ -175,19 +177,40 @@ daemon-kalshi/
     maker.py                # Kimi/Moonshot signal proposer (+ ESPN context, + playbook)
     quant_maker.py            # Fast no-LLM digital-option pricing for 15-min/hourly numeric markets
     checker.py                 # Claude Sonnet second-opinion verifier
-    risk_guardrail.py           # PF-04/PF-09/PF-10 stubs + drawdown kill switch
-    execution.py                 # order placement + fill tracking
+    risk_guardrail.py           # worst-case dollar exposure caps + kill switch
+    execution.py                 # idempotent submission + fill reconciliation
     ledger.py                     # trade log, P&L, edge memory writeback
     context.py                     # ESPN/NOAA/FRED grounding for candidates
     reflect.py                      # turns settled trades into an evolving playbook
   memory/
-    edge_store.py           # SQLite-backed memory of past edges + outcomes
+    db.py                   # shared SQLite connection handling (WAL, busy timeout)
+    edge_store.py            # SQLite-backed memory of past edges + outcomes
+    order_store.py            # durable orders, fills and settlements
+  tests/                     # pytest suite — see docs/SAFETY.md
+  docs/SAFETY.md            # safety model, risk formulas, what is NOT verified
   main.py                    # orchestrator loop
   config.py                  # env-driven config
   requirements.txt
+  requirements-dev.txt
   railway.toml
   Procfile
   .env.example
+```
+
+## Safety model
+
+Read [`docs/SAFETY.md`](docs/SAFETY.md) before pointing this at a production
+key. It covers the signal → order → fill → settlement state machine, the exact
+risk formulas, the fail-closed conditions, and — most importantly — the list
+of Kalshi API assumptions that have **not** been verified against a live
+endpoint.
+
+`DRY_RUN` defaults to `true`; a fresh checkout places no real orders. Run the
+tests with:
+
+```
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest
 ```
 
 ## Setup
