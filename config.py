@@ -183,10 +183,49 @@ class RiskConfig:
 
 
 @dataclass
+class TelegramConfig:
+    """Operator alerting. Entirely optional — with no token or chat ID the
+    client disables itself and the bot runs exactly as before, silently.
+
+    Get a token from @BotFather and a chat ID from @userinfobot; see the
+    README's "Telegram alerting" section.
+    """
+
+    bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    timeout_seconds: float = _float("TELEGRAM_TIMEOUT_SECONDS", 10.0)
+    # Bounded queue: alerts are dropped rather than buffered without limit,
+    # because unbounded buffering in a long-running process is a memory leak
+    # and hours-old alerts are not worth the memory.
+    queue_maxsize: int = _int("TELEGRAM_QUEUE_MAXSIZE", 200)
+    # Telegram allows roughly one message per second to a given chat.
+    min_interval_seconds: float = _float("TELEGRAM_MIN_INTERVAL_SECONDS", 1.0)
+    max_backoff_seconds: float = _float("TELEGRAM_MAX_BACKOFF_SECONDS", 30.0)
+    # Default suppression window for keyed alerts, so a condition that
+    # repeats every scan pass does not send an alert every 30 seconds.
+    throttle_seconds: float = _float("TELEGRAM_THROTTLE_SECONDS", 900.0)
+    kill_switch_throttle_seconds: float = _float(
+        "TELEGRAM_KILL_SWITCH_THROTTLE_SECONDS", 21_600.0
+    )
+    stall_throttle_seconds: float = _float("TELEGRAM_STALL_THROTTLE_SECONDS", 1_800.0)
+    flush_timeout_seconds: float = _float("TELEGRAM_FLUSH_TIMEOUT_SECONDS", 5.0)
+    # Alert on every order that reaches the exchange. Turn off if the volume
+    # is noisy; the kill switch and systemic errors still alert.
+    notify_trades: bool = _bool("TELEGRAM_NOTIFY_TRADES", True)
+    # Hour (UTC, 0-23) to send the daily summary. -1 disables it.
+    daily_summary_hour_utc: int = _int("TELEGRAM_DAILY_SUMMARY_HOUR_UTC", -1)
+    # Watchdog: alert when no scan or reconciliation has succeeded within
+    # this many seconds. A bot that has quietly stopped trading looks exactly
+    # like a bot finding no edges; this is what distinguishes them.
+    stall_alert_seconds: float = _float("TELEGRAM_STALL_ALERT_SECONDS", 900.0)
+
+
+@dataclass
 class AppConfig:
     kalshi: KalshiConfig = field(default_factory=KalshiConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
     # Group names from core/kalshi_categories.py, ported from Jon Becker's
     # 72.1M-trade Kalshi analysis. These replace a guessed list
     # ("Sports,Crypto,Politics,Economics,Climate,Culture") in which three of

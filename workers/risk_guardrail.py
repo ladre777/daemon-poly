@@ -87,7 +87,12 @@ class RiskGuardrail:
         bankroll_usd: float,
         store: EdgeStore = None,
         order_store: OrderStore = None,
+        notifier=None,
     ):
+        #: Optional TelegramClient. Alerting is best-effort and must never
+        #: affect a risk decision, so every call is guarded and the absence
+        #: of a notifier changes nothing.
+        self.notifier = notifier
         #: Operator-declared ceiling. The effective bankroll is the lesser of
         #: this and the real exchange balance — the CLI value can only ever
         #: reduce risk, never authorise more than the account holds.
@@ -199,6 +204,15 @@ class RiskGuardrail:
             reason = f"realized daily PnL {pnl_today:.2f} breached limit {loss_limit:.2f}"
             self.store.set_kill_switch(True, reason)
             log.error("KILL SWITCH TRIPPED (persisted): %s", reason)
+            # Alerted at the moment of tripping rather than from the caller,
+            # so it fires on every path that trips the switch. Wrapped
+            # because an alerting failure must not stop the halt from taking
+            # effect — the switch is already set and persisted above.
+            if self.notifier is not None:
+                try:
+                    self.notifier.notify_kill_switch(reason, pnl_today, bankroll_usd)
+                except Exception:
+                    log.exception("Kill-switch alert failed — the halt still stands")
             return True
         return False
 

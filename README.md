@@ -213,6 +213,69 @@ pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest
 ```
 
+## Telegram alerting
+
+The bot is otherwise silent: it runs on Railway, logs to a stream nobody
+watches, and a redeploy looks exactly like a crash. Alerting is optional but
+strongly recommended before leaving it unattended.
+
+With `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` unset the client disables
+itself and everything runs as before.
+
+### Setup
+
+1. **Create the bot.** Message [@BotFather](https://t.me/BotFather), send
+   `/newbot`, follow the prompts. It replies with a token shaped like
+   `123456789:AAE...`. That token is a credential — treat it like a password.
+2. **Message your bot.** Open the chat and send it anything. Telegram does not
+   let a bot start a conversation, so skipping this makes every send fail with
+   `403 bot can't initiate conversation with a user`.
+3. **Get the chat ID.** Message [@userinfobot](https://t.me/userinfobot), or
+   open `https://api.telegram.org/bot<TOKEN>/getUpdates` and read
+   `result[0].message.chat.id`. For a group, add the bot to the group and use
+   the group's ID — a negative number like `-1001234567890`.
+4. **Verify**, which sends a test message and exits non-zero on failure:
+
+   ```bash
+   TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python -m core.telegram_client
+   ```
+
+   Common failures: `401` wrong token, `400 chat not found` wrong chat ID,
+   `403` you skipped step 2.
+
+### What it alerts on
+
+| Event | Detail |
+|---|---|
+| Startup | mode (**PAPER** vs **LIVE — REAL ORDERS**), environment, balance, effective bankroll, open positions, worst-case exposure |
+| Every order reaching the exchange | ticker, direction, filled/requested, average fill price, cost and fees, and whether it was paper or live. A zero fill and a partial fill are labelled distinctly from a full fill |
+| Kill switch tripping | the reason, realized daily PnL, the limit it breached, and that it survives restart |
+| Systemic errors | auth, config, reconciliation and account-state failures — the classes that stop trading rather than being retried |
+| Watchdog | no successful scan or reconciliation within `TELEGRAM_STALL_ALERT_SECONDS`. A bot that has quietly stopped trading looks identical to one finding no edges; this is what distinguishes them |
+| Shutdown | SIGTERM/SIGINT, so a Railway redeploy is visible rather than silent |
+| Daily summary | optional, off by default; set `TELEGRAM_DAILY_SUMMARY_HOUR_UTC` to an hour 0-23 |
+
+### Design guarantees
+
+Alerting can never interfere with trading:
+
+- **Non-blocking.** Sends go onto a bounded queue drained by a background
+  thread. The trading loop's call returns immediately, so a hanging Telegram
+  API cannot stall a scan pass. The loop runs on a 30-second cycle; a
+  synchronous send with a 10-second timeout would eat a third of it.
+- **Never raises.** Every failure path — bad token, wrong chat, 429, timeout,
+  Telegram down entirely — logs a warning and drops the message.
+- **Bounded.** A full queue drops the oldest messages rather than growing
+  without limit. Dropping alerts is the right failure mode in a long-running
+  process; leaking memory is not.
+- **Throttled.** Repeating conditions are suppressed per-key, so
+  reconciliation failing every pass sends one alert per window rather than
+  120 an hour.
+
+The kill switch is the sharpest illustration: it is set and persisted
+*before* the alert is attempted, so a Telegram failure cannot prevent the halt
+from taking effect. There is a test for exactly that.
+
 ## Setup
 
 1. `openssl genrsa -out kalshi_private_key.pem 2048` (or reuse the key you
