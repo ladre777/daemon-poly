@@ -40,9 +40,34 @@ class KalshiAPIError(Exception):
         self.body = body
         super().__init__(f"Kalshi API error {status_code}: {body}")
 
+    @property
+    def is_client_error(self) -> bool:
+        """4xx: the exchange understood us and refused. Retrying the same
+        request will be refused the same way, so callers treat this as a
+        terminal rejection rather than something to back off on."""
+        return 400 <= self.status_code < 500
+
 
 class RateLimitError(KalshiAPIError):
     pass
+
+
+class KalshiTimeoutError(Exception):
+    """The request did not come back with a usable answer.
+
+    Distinct from :class:`KalshiAPIError` because the failure modes are
+    opposite: an API error tells us the exchange's state (it rejected us), a
+    timeout tells us nothing — the order may be live, may never have arrived.
+    Order submission turns this into the ``unknown`` state and refuses to
+    trade again until a lookup by client order ID settles the question. Never
+    blind-retry a write on this.
+    """
+
+    def __init__(self, method: str, endpoint: str, cause: Exception):
+        self.method = method
+        self.endpoint = endpoint
+        self.cause = cause
+        super().__init__(f"Kalshi request {method} {endpoint} did not complete: {cause!r}")
 
 
 class KalshiClient:
@@ -103,9 +128,16 @@ class KalshiClient:
 
         backoff = 1.0
         for attempt in range(max_retries + 1):
-            resp = self._http.request(
-                method, endpoint, params=params, json=json_body, headers=headers
-            )
+            try:
+                resp = self._http.request(
+                    method, endpoint, params=params, json=json_body, headers=headers
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                # Deliberately not retried here. For reads the caller can retry
+                # safely; for POST /portfolio/orders a retry would be a second
+                # submission attempt against an exchange that may already hold
+                # the first one. Execution resolves it by lookup instead.
+                raise KalshiTimeoutError(method, endpoint, e) from e
             if resp.status_code == 429:
                 if attempt == max_retries:
                     raise RateLimitError(429, resp.text)
@@ -168,11 +200,50 @@ class KalshiClient:
             "GET", "/portfolio/positions", params={"settlement_status": settlement_status}
         )
 
-    def get_fills(self, ticker: str = None, limit: int = 100) -> dict:
+    def get_fills(
+        self, ticker: str = None, order_id: str = None, limit: int = 100
+    ) -> dict:
+        """Exchange-confirmed executions. This is the only source of truth for
+        exposure — order acknowledgements are not fills."""
         params = {"limit": limit}
         if ticker:
             params["ticker"] = ticker
+        if order_id:
+            params["order_id"] = order_id
         return self._request("GET", "/portfolio/fills", params=params)
+
+    def get_orders(
+        self,
+        ticker: str = None,
+        status: str = None,
+        client_order_id: str = None,
+        limit: int = 200,
+        cursor: str = None,
+    ) -> dict:
+        """List orders. ``client_order_id`` is the lookup that resolves an
+        ``unknown`` order after a submission timeout: it asks the exchange
+        whether it holds the order we may or may not have sent."""
+        params = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        if status:
+            params["status"] = status
+        if client_order_id:
+            params["client_order_id"] = client_order_id
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", "/portfolio/orders", params=params)
+
+    def get_order(self, order_id: str) -> dict:
+        return self._request("GET", f"/portfolio/orders/{order_id}")
+
+    def get_settlements(self, limit: int = 200, cursor: str = None) -> dict:
+        """Exchange-confirmed market settlements — the authoritative outcome,
+        replacing the old inference from PnL sign or resting-order counts."""
+        params = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", "/portfolio/settlements", params=params)
 
     def get_account_limits(self) -> dict:
         return self._request("GET", "/account/limits")

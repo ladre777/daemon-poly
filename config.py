@@ -104,7 +104,47 @@ class RiskConfig:
     # did by default before). "maker" = GTC at current bid, doesn't cross the
     # spread, targets the documented maker-side edge — but can go unfilled;
     # see execution.py's module docstring before flipping this in production.
+    # NOTE: maker mode is refused at startup until order-lifecycle management
+    # exists — see main.py and workers/execution.py.
     order_strategy: str = os.getenv("ORDER_STRATEGY", "taker")
+
+    # -- exposure caps (worst-case dollars, not position counts) -----------
+    # A count of open positions says nothing about how much money is at risk:
+    # 15 positions at $2 and 15 at $200 are the same number. These are the
+    # limits risk actually enforces, all as a fraction of the effective
+    # bankroll (the lesser of the CLI --bankroll and the real exchange
+    # balance).
+    max_total_exposure_pct: float = _float("MAX_TOTAL_EXPOSURE_PCT", 0.50)
+    max_ticker_exposure_pct: float = _float("MAX_TICKER_EXPOSURE_PCT", 0.05)
+    # Markets inside one event are usually mutually exclusive outcomes of the
+    # same question, so several positions there are one correlated bet.
+    max_event_exposure_pct: float = _float("MAX_EVENT_EXPOSURE_PCT", 0.10)
+    max_category_exposure_pct: float = _float("MAX_CATEGORY_EXPOSURE_PCT", 0.25)
+    # Kalshi's taker fee is roughly 0.07 * price * (1 - price) per contract,
+    # peaking near 50c. Charged conservatively into every sizing and edge
+    # calculation rather than discovered after the fact.
+    fee_rate: float = _float("FEE_RATE", 0.07)
+    # Added to the executable price when budgeting worst-case cost, so a
+    # quote that moves between decision and fill doesn't breach a limit.
+    slippage_cents: float = _float("SLIPPAGE_CENTS", 1.0)
+
+    # -- reconciliation / lifecycle ---------------------------------------
+    # Older than this and the account picture is not trusted for trading.
+    # Two scan passes' worth of slack at the default 30s poll.
+    max_reconciliation_age_seconds: float = _float("MAX_RECONCILIATION_AGE_SECONDS", 90.0)
+    # Two intents for the same ticker/side/price/size inside one window
+    # collapse to a single order, which is what stops the 30s scan loop from
+    # stacking duplicates on a signal that persists across passes.
+    dedupe_window_seconds: float = _float("DEDUPE_WINDOW_SECONDS", 3600.0)
+    # TTL for resting orders. Unused while maker mode is refused, but the
+    # lifecycle code reads it so enabling maker mode later has a bounded
+    # default rather than orders that rest forever.
+    order_ttl_seconds: float = _float("ORDER_TTL_SECONDS", 300.0)
+    # First run against an account that already holds manually opened
+    # positions will always show local-vs-exchange drift. Setting this true
+    # logs the drift loudly instead of blocking startup. Leave it false in
+    # production: drift normally means the fill record is wrong.
+    allow_position_drift: bool = _bool("ALLOW_POSITION_DRIFT", False)
 
 
 @dataclass
