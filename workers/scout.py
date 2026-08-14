@@ -33,6 +33,11 @@ class Candidate:
     volume: float
     close_time: str
     series_ticker: str = ""
+    # Markets inside one event are usually mutually exclusive outcomes of the
+    # same question, so risk treats the event as the correlation unit and
+    # caps exposure across it. Carried from Kalshi's own event object rather
+    # than parsed out of the ticker where possible.
+    event_ticker: str = ""
     strike_type: str = ""          # "greater" | "less" | "between"
     floor_strike: Optional[float] = None
     cap_strike: Optional[float] = None
@@ -96,6 +101,9 @@ class Scout:
                             volume=volume,
                             close_time=m.get("close_time", event.get("close_time", "")),
                             series_ticker=event.get("series_ticker", ""),
+                            event_ticker=(
+                                m.get("event_ticker") or event.get("event_ticker", "")
+                            ),
                             strike_type=m.get("strike_type", ""),
                             floor_strike=m.get("floor_strike"),
                             cap_strike=m.get("cap_strike"),
