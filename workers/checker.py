@@ -1,0 +1,94 @@
+"""
+Checker: the expensive, high-trust second opinion. Maker proposes cheaply and
+in volume; Checker is the gate that has to independently agree before capital
+moves — same division of labor as DÆMON-POLY's Claude Sonnet checker role.
+Checker gets the Maker's reasoning but is explicitly told to critique it
+rather than rubber-stamp it, since a Checker that just agrees with Maker
+provides no actual risk reduction.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+import anthropic
+
+from config import CONFIG
+from core.llm_client import first_text_block
+from core.validation import validate_checker_output
+from workers.maker import Proposal
+
+log = logging.getLogger("daemon_kalshi.checker")
+
+SYSTEM_PROMPT = """You are the Checker in an autonomous prediction-market \
+trading system. Another model (the Maker) has proposed a probability estimate \
+for a Kalshi market and identified an apparent edge against the current \
+market price. Your job is to independently evaluate whether that edge is \
+real — actively look for reasons the Maker's estimate could be wrong: stale \
+information, overconfidence, a market that's actually well-calibrated for \
+reasons the Maker missed, or reasoning that doesn't hold up. Do not simply \
+agree because the reasoning sounds plausible. Respond ONLY with JSON: \
+{"verdict": "approve"|"reject"|"abstain", "confidence": 0.0-1.0, \
+"reasoning": "2-4 sentences explaining your independent view"}"""
+
+
+@dataclass
+class Verdict:
+    proposal: Proposal
+    verdict: str
+    confidence: float
+    reasoning: str
+
+    @property
+    def approved(self) -> bool:
+        return (
+            self.verdict == "approve"
+            and self.confidence >= CONFIG.risk.checker_min_confidence
+        )
+
+
+class Checker:
+    def __init__(self):
+        self._client = anthropic.Anthropic(api_key=CONFIG.models.anthropic_api_key)
+
+    def check(self, proposal: Proposal) -> Verdict:
+        c = proposal.candidate
+        user_msg = (
+            f"Market: {c.title} ({c.ticker})\n"
+            f"Market implied probability: {c.implied_yes_probability:.2%} "
+            f"(bid/ask {c.yes_bid}/{c.yes_ask})\n"
+            f"Maker's estimate: {proposal.maker_probability:.2%} "
+            f"(confidence {proposal.maker_confidence:.2%})\n"
+            f"Maker's reasoning: {proposal.reasoning}\n"
+            f"Implied edge: {proposal.edge_size:.2%} toward {proposal.direction.upper()}\n"
+            f"Volume: {c.volume}"
+        )
+        resp = self._client.messages.create(
+            model=CONFIG.models.checker_model,
+            # Production truncated a verdict mid-string at 500 tokens:
+            # {"verdict": "approve", "confidence": 0.72, "reasoning": "Seattle
+            # mid-August climatology genuinely shows low precipitation ...
+            # and then nothing. Validation correctly refused the unparseable
+            # JSON and abstained — so a well-reasoned approval became a
+            # non-answer purely because the budget ran out mid-sentence.
+            max_tokens=CONFIG.models.checker_max_tokens,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        # Not content[0]: a thinking block sits at position 0 whenever the
+        # model reasons, and reaching for .text on it raises. See
+        # core/llm_client.first_text_block.
+        raw = first_text_block(resp)
+        # Strictly validated: an unparseable response, an unknown verdict
+        # string, or a non-finite/out-of-range confidence all become an
+        # abstention rather than an exception mid-pass or a value that
+        # accidentally clears the confidence threshold. The previous version
+        # indexed straight into the parsed dict and called float() on whatever
+        # was there.
+        checked = validate_checker_output(raw, ticker=c.ticker)
+        return Verdict(
+            proposal=proposal,
+            verdict=checked.verdict,
+            confidence=checked.confidence,
+            reasoning=checked.reasoning,
+        )

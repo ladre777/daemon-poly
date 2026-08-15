@@ -1,0 +1,25 @@
+# Railway build and deploy configuration.
+#
+# Dockerfile.kalshi is the source of truth for how this service builds. This
+# file only points at it; the base image, dependency install and start
+# command all live there, in one place.
+#
+# This previously declared builder = "NIXPACKS" while the deployment that
+# actually worked was built from Dockerfile.kalshi via
+# RAILWAY_DOCKERFILE_PATH — so the checked-in config described a build that
+# was not the one running, and the Nixpacks path installed from a
+# requirements.txt shared with an unrelated bot. NIXPACKS is also no longer
+# among Railway's supported builder values.
+#
+# Config as code overrides the dashboard for the deployment it applies to,
+# but does not write back to the service settings.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.kalshi"
+
+[deploy]
+# No startCommand: the Dockerfile's CMD is authoritative, so the start
+# command is stated once rather than in two places that can drift apart.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

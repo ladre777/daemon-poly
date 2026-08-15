@@ -1,0 +1,62 @@
+# CI for the Kalshi daemon (safety brief item 12: reproducible checks).
+#
+# Deliberately narrow: this repo also contains an unrelated Polymarket/TS
+# tree, and a workflow that tries to build everything fails for reasons that
+# have nothing to do with the trading logic and gets ignored within a week.
+name: kalshi checks
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "core/**"
+      - "workers/**"
+      - "memory/**"
+      - "backtest/**"
+      - "tests/**"
+      - "main.py"
+      - "config.py"
+      - "requirements.txt"
+      - "Dockerfile.kalshi"
+      - "railway.toml"
+      - ".github/workflows/kalshi-checks.yml"
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check core workers memory backtest tests main.py config.py
+
+      - name: Tests
+        # No credentials are set, which is the point: every test must run
+        # against fakes. A suite that needs a live Kalshi key is a suite that
+        # silently stops running the day the key rotates.
+        run: python -m pytest -q
+
+      - name: Refuse to ship a live-trading default
+        # DRY_RUN defaults to true and must stay that way. Flipping the
+        # shipped default is a one-character change with unlimited downside,
+        # so it is checked rather than trusted.
+        run: |
+          python - <<'PY'
+          import os
+          os.environ.pop("DRY_RUN", None)
+          from config import CONFIG
+          assert CONFIG.risk.dry_run is True, "DRY_RUN must default to true"
+          assert CONFIG.risk.order_strategy == "taker", "maker mode is unsupported"
+          print("shipped defaults are safe")
+          PY
