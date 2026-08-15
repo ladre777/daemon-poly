@@ -13,9 +13,8 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import httpx
-
 from config import CONFIG
+from core.llm_client import build_maker_llm
 from core.pricing import fee_cents_per_contract
 from core.validation import clamp_text, validate_maker_output
 from workers.scout import Candidate
@@ -104,13 +103,19 @@ class Proposal:
 
 
 class Maker:
-    def __init__(self, enricher=None):
-        self._http = httpx.Client(
-            base_url=CONFIG.models.moonshot_base_url,
-            headers={"Authorization": f"Bearer {CONFIG.models.moonshot_api_key}"},
-            timeout=30.0,
-        )
+    def __init__(self, enricher=None, llm=None):
+        # The provider is behind MakerLLM rather than a bare httpx client so
+        # that a dead or misconfigured Moonshot account fails over to
+        # Anthropic instead of muting the Maker entirely. See
+        # core/llm_client.py for why that stopped being hypothetical.
+        self._llm = llm or build_maker_llm(CONFIG.models)
         self.enricher = enricher
+        log.info("Maker LLM: %s", self._llm.describe())
+
+    @property
+    def on_fallback(self) -> bool:
+        """Whether Maker calls are currently going to the fallback provider."""
+        return self._llm.on_fallback
 
     def propose(self, candidate: Candidate) -> Optional[Proposal]:
         user_msg = (
@@ -137,23 +142,7 @@ class Maker:
                 "\n\nLessons from past trades (use as a prior, not gospel):\n"
                 + clamp_text(playbook, CONFIG.risk.max_playbook_chars)
             )
-        resp = self._http.post(
-            "/chat/completions",
-            json={
-                "model": CONFIG.models.moonshot_model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-                "temperature": 0.3,
-            },
-        )
-        resp.raise_for_status()
-        try:
-            content = resp.json()["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, ValueError):
-            log.warning("Maker response had no message content for %s", candidate.ticker)
-            return None
+        content = self._llm.complete(SYSTEM_PROMPT, user_msg, temperature=0.3)
 
         # Strictly validated: a non-finite or out-of-range probability, a
         # missing field, or prose instead of JSON all mean "no proposal", not

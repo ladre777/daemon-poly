@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from config import CONFIG
 from core.account_state import AccountState, ReconciliationError
+from core.errors import CircuitBreaker, classify
 from core.kalshi_client import KalshiClient
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
@@ -178,6 +179,14 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
 
     filled_this_pass = 0
     llm_calls_this_pass = 0
+    # One failing candidate must not cost us the other 2,913. Model calls are
+    # contained per candidate and counted; only a *run* of failures — which
+    # means the provider is down, not that one market confused it — stops the
+    # pass. Before this, a single 404 from the Maker's provider unwound the
+    # entire pass and did so every 30 seconds, silently, forever.
+    model_breaker = CircuitBreaker(
+        name="model-calls", threshold=CONFIG.model_failure_threshold, cooldown_seconds=0
+    )
     for candidate in candidates:
         # Route: quant path for markets with a live spot feed + numeric
         # strike (fast, no LLM); LLM path only for categories where Maker
@@ -193,11 +202,32 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 proposal = quant_result.to_maker_proposal()
         elif candidate.category.lower() in CONFIG.llm_reasoning_categories:
             is_priority = _is_priority(candidate)
-            if not is_priority and CONFIG.max_llm_calls_per_pass and llm_calls_this_pass >= CONFIG.max_llm_calls_per_pass:
+            # The budget tightens while the Maker is on its fallback provider,
+            # which is dearer per call than the one the default cap was sized
+            # for. Priority markets bypass both caps, as before.
+            call_cap = (
+                CONFIG.max_fallback_llm_calls_per_pass
+                if getattr(maker, "on_fallback", False)
+                else CONFIG.max_llm_calls_per_pass
+            )
+            if not is_priority and call_cap and llm_calls_this_pass >= call_cap:
                 log.debug("LLM call cap (%d) reached this pass — skipping non-priority %s",
-                          CONFIG.max_llm_calls_per_pass, candidate.ticker)
+                          call_cap, candidate.ticker)
                 continue
-            proposal = maker.propose(candidate)
+            try:
+                proposal = maker.propose(candidate)
+            except Exception as e:                  # noqa: BLE001 - contained per candidate
+                severity = classify(e)
+                log.warning("Maker failed on %s (%s): %s", candidate.ticker, severity.value, e)
+                if model_breaker.record_failure(f"{type(e).__name__}: {e}"):
+                    _alert(notifier, "notify_systemic_error", "maker",
+                           f"{model_breaker.consecutive_failures} consecutive Maker "
+                           f"failures — ending pass. Last error: {e}")
+                    log.error("Maker has failed %d times in a row — ending pass",
+                              model_breaker.consecutive_failures)
+                    break
+                continue
+            model_breaker.record_success()
             llm_calls_this_pass += 1
         else:
             log.debug(
@@ -215,7 +245,23 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             candidate.implied_yes_probability * 100, proposal.edge_size * 100,
         )
 
-        verdict = checker.check(proposal)
+        # Same containment for the Checker. A Checker that cannot answer means
+        # this proposal is unreviewed, and an unreviewed proposal is never
+        # traded — skipping is the fail-closed outcome, not a lost opportunity.
+        try:
+            verdict = checker.check(proposal)
+        except Exception as e:                      # noqa: BLE001 - contained per candidate
+            severity = classify(e)
+            log.warning("Checker failed on %s (%s): %s", candidate.ticker, severity.value, e)
+            if model_breaker.record_failure(f"{type(e).__name__}: {e}"):
+                _alert(notifier, "notify_systemic_error", "checker",
+                       f"{model_breaker.consecutive_failures} consecutive Checker "
+                       f"failures — ending pass. Last error: {e}")
+                log.error("Checker has failed %d times in a row — ending pass",
+                          model_breaker.consecutive_failures)
+                break
+            continue
+        model_breaker.record_success()
         log.info("Checker verdict on %s: %s (conf %.2f)", candidate.ticker, verdict.verdict, verdict.confidence)
 
         # Risk runs against the snapshot as it stands right now, including

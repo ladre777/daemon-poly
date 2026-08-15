@@ -80,6 +80,21 @@ class ModelConfig:
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     checker_model: str = os.getenv("CHECKER_MODEL", "claude-sonnet-5")
 
+    # Which backend answers Maker calls. "auto" (default) uses Moonshot and
+    # falls back to Anthropic when Moonshot is unreachable, unauthorised, or
+    # has no usable model for the key — see core/llm_client.py. "moonshot" or
+    # "anthropic" pin a single provider with no failover.
+    maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "auto")
+    # Model used when the Maker falls back to Anthropic. NOT the Checker's
+    # model: the Maker is the high-volume path (tens of calls per 30-second
+    # pass) and the Checker is the low-volume one (only on proposals that
+    # already cleared an edge threshold). Running the Maker's volume through
+    # the Checker's model is how a fallback meant to keep the bot alive turns
+    # into a bill larger than the trading account. Haiku by default.
+    maker_fallback_model: str = os.getenv(
+        "MAKER_FALLBACK_MODEL", "claude-haiku-4-5-20251001"
+    )
+
     # Grounding data sources (not LLMs, but live here alongside the other
     # external-service keys for a single place to look).
     fred_api_key: str = os.getenv("FRED_API_KEY", "")
@@ -276,6 +291,17 @@ class AppConfig:
     # Quant-path markets (crypto/commodities) aren't affected — no LLM call
     # to cap there. 0 = unlimited.
     max_llm_calls_per_pass: int = _int("MAX_LLM_CALLS_PER_PASS", 40)
+    # Tighter cap that applies while the Maker is running on its fallback
+    # provider. The default cap is sized for Moonshot's price; the fallback
+    # exists to keep the bot trading through an outage, not to run the same
+    # volume through a dearer provider indefinitely. Priority markets still
+    # bypass both caps.
+    max_fallback_llm_calls_per_pass: int = _int("MAX_FALLBACK_LLM_CALLS_PER_PASS", 10)
+    # Consecutive Maker/Checker failures that end a pass. Below this, a failed
+    # model call skips that one candidate and the pass continues; at it, the
+    # provider is presumed down and the pass stops with an alert. One bad
+    # response should cost one candidate, not the whole scan.
+    model_failure_threshold: int = _int("MODEL_FAILURE_THRESHOLD", 5)
     scout_poll_seconds: int = _int("SCOUT_POLL_SECONDS", 30)
     # Safety valve on pages fetched per scan, 200 markets each.
     #
