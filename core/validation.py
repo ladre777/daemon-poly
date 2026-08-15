@@ -198,8 +198,26 @@ def validate_market(raw: dict, event: dict = None, now: float = None) -> Validat
         raise MarketDataInvalid(f"{ticker}: missing title")
     title = clamp_text(title, CONFIG.risk.max_title_chars)
 
-    yes_bid = finite(raw.get("yes_bid"))
-    yes_ask = finite(raw.get("yes_ask"))
+    # A market with nothing resting on one side returns null for that price.
+    # VERIFIED AGAINST PRODUCTION: this is the common case, not an anomaly —
+    # roughly 3,000 of every 5,000 open markets have a null yes_bid. Treating
+    # null as malformed data was wrong twice over: it rejected the entire
+    # catalog, and it logged a data-quality alarm for what is really just an
+    # untraded market.
+    #
+    # No bid means nobody will buy from us at any price, i.e. an effective
+    # bid of 0. No ask means nobody will sell to us, i.e. an effective ask of
+    # 100. Encoding it that way lets the ordinary liquidity and spread gates
+    # decide — a 0/100 market has a 100c spread and almost always zero
+    # volume, so it is filtered downstream as untradeable rather than
+    # reported as broken.
+    #
+    # A price that is *present* but not a number is still bad data and still
+    # raises: null and "banana" are different problems.
+    missing_bid = raw.get("yes_bid") is None
+    missing_ask = raw.get("yes_ask") is None
+    yes_bid = 0.0 if missing_bid else finite(raw.get("yes_bid"))
+    yes_ask = MAX_PRICE_CENTS if missing_ask else finite(raw.get("yes_ask"))
     if yes_bid is None:
         raise MarketDataInvalid(f"{ticker}: yes_bid is not a finite number "
                                 f"({raw.get('yes_bid')!r})")
@@ -263,6 +281,10 @@ def validate_market(raw: dict, event: dict = None, now: float = None) -> Validat
             )
 
     warnings: list[str] = []
+    if missing_bid:
+        warnings.append("no resting bid — treated as 0c (nothing to sell into)")
+    if missing_ask:
+        warnings.append("no resting ask — treated as 100c (nothing to buy from)")
     quote_ts, quote_source = None, "scan"
     for candidate_field in _QUOTE_TIME_FIELDS:
         if candidate_field in raw:

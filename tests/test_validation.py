@@ -112,10 +112,40 @@ def test_missing_required_strings_are_rejected(field_name):
         validate_market(market(**{field_name: None}))
 
 
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "cheap", None])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "cheap"])
 def test_non_finite_prices_are_rejected(bad):
+    """Present but not a number is bad data. null is a different thing —
+    see test_a_missing_bid_means_no_bid_not_bad_data."""
     with pytest.raises(MarketDataInvalid, match="yes_bid"):
         validate_market(market(yes_bid=bad))
+
+
+def test_a_missing_bid_means_no_bid_not_bad_data():
+    """VERIFIED AGAINST PRODUCTION: ~3,000 of every 5,000 open Kalshi markets
+    return a null yes_bid. Treating null as malformed rejected the entire
+    catalog and raised a data-quality alarm for what is just an untraded
+    market. No bid means an effective bid of 0 — nobody will buy from us."""
+    valid = validate_market(market(yes_bid=None))
+
+    assert valid.quote.yes_bid == 0.0
+    assert any("no resting bid" in w for w in valid.warnings)
+
+
+def test_a_missing_ask_means_nothing_to_buy():
+    valid = validate_market(market(yes_ask=None))
+
+    assert valid.quote.yes_ask == 100.0
+    assert any("no resting ask" in w for w in valid.warnings)
+
+
+def test_a_market_with_no_quotes_at_all_is_untradeable_not_invalid():
+    """It validates, then gets filtered downstream by the spread and volume
+    gates — which is the honest outcome: the data is fine, the market is
+    just not tradeable."""
+    valid = validate_market(market(yes_bid=None, yes_ask=None))
+
+    assert (valid.quote.yes_bid, valid.quote.yes_ask) == (0.0, 100.0)
+    assert valid.quote.yes_ask - valid.quote.yes_bid == 100.0
 
 
 @pytest.mark.parametrize("bid,ask", [(-1, 52), (48, 101), (150, 200)])
