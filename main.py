@@ -25,7 +25,7 @@ from core.errors import CircuitBreaker, classify
 from core.kalshi_client import KalshiClient
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
-from memory.order_store import OrderStore
+from memory.order_store import OrderStore, SignalAlertStore, signal_key
 from workers.scout import Scout
 from workers.maker import Maker
 from workers.checker import Checker
@@ -186,7 +186,7 @@ def install_shutdown_handlers() -> dict:
 
 
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
-             notifier=None, health=None):
+             notifier=None, health=None, alert_store=None):
     """One scan pass. Returns the number of orders that actually filled.
 
     Reconciliation happens first: if it fails, the pass places no orders at
@@ -210,6 +210,11 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # API calls, nor write ten duplicate observations into the volatility
     # buffer (duplicates drive the vol estimate toward zero, and vol is in
     # the denominator of the quant probability).
+    # Built here rather than required of every caller so existing tests and
+    # entry points keep working; main() passes a shared one.
+    if alert_store is None:
+        alert_store = SignalAlertStore()
+
     quant_maker.begin_pass()
 
     candidates = scout.scan()
@@ -404,7 +409,30 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         if health is not None:
             health.mark_order()
         if CONFIG.telegram.notify_trades:
-            _alert(notifier, "notify_trade", record, decision)
+            # A standing signal is not news every time it is re-derived. The
+            # order-level dedupe window lets an unchanged signal be submitted
+            # again once an hour, which is deliberate — but alerting had
+            # inherited that clock by accident, so one standing paper trade
+            # announced itself four times in a day as though each were new.
+            #
+            # Suppression here is never permanent: a signal speaks again when
+            # it is new, when it moves, or when the reminder interval
+            # elapses. See SignalAlertStore.evaluate.
+            key = signal_key(record.ticker, record.action, record.side,
+                             verdict.proposal.source)
+            # The same net edge the alert itself reports, so "moved 6pp"
+            # always refers to the number the operator was shown last time.
+            edge = decision.detail.get("net_edge")
+            price = decision.executable_price_cents or record.limit_price_cents
+            verdict_alert = alert_store.evaluate(key, edge, price)
+            if verdict_alert.should_alert:
+                alert_store.record(key, record.ticker, record.action, record.side,
+                                   verdict.proposal.source, edge, price)
+                _alert(notifier, "notify_trade", record, decision,
+                       reason=verdict_alert.reason)
+            else:
+                stats["alert_suppressed"] += 1
+                log.info("Not re-alerting %s: %s", record.ticker, verdict_alert.reason)
         if record.filled_count > 0:
             filled_this_pass += 1
             if health is not None:
@@ -520,6 +548,7 @@ def main():
         raise
     store = EdgeStore()
     order_store = OrderStore()
+    alert_store = SignalAlertStore()
     account = AccountState(client, order_store)
 
     scout = Scout(client)
@@ -606,7 +635,8 @@ def main():
         while True:
             try:
                 run_once(scout, maker, quant_maker, checker, risk, execution,
-                         ledger, account, notifier=notifier, health=health)
+                         ledger, account, notifier=notifier, health=health,
+                         alert_store=alert_store)
                 ledger.reconcile_settlements()
                 pass_count += 1
                 if args.reflect_every and pass_count % args.reflect_every == 0:

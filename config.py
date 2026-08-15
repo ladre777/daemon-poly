@@ -250,6 +250,28 @@ class TelegramConfig:
     )
     stall_throttle_seconds: float = _float("TELEGRAM_STALL_THROTTLE_SECONDS", 1_800.0)
     flush_timeout_seconds: float = _float("TELEGRAM_FLUSH_TIMEOUT_SECONDS", 5.0)
+
+    # -- standing-signal alert suppression ---------------------------------
+    #
+    # A signal that persists is not news every time it is re-derived. These
+    # bound how often an unchanged one may speak, and what counts as changed.
+    #
+    # Distinct from the order-level dedupe window (DEDUPE_WINDOW_SECONDS),
+    # which governs whether an order may be *submitted* again. Conflating the
+    # two is what produced four alerts in one day for one standing trade: the
+    # hourly submission bucket was doing its job, and alerting inherited its
+    # clock by accident.
+    #
+    # How much the net edge must move to count as a fresh signal, in absolute
+    # probability. 0.05 = 5 percentage points.
+    alert_edge_move_threshold: float = _float("ALERT_EDGE_MOVE_THRESHOLD", 0.05)
+    # How far the executable price must move to count as fresh, in cents.
+    alert_price_move_cents: float = _float("ALERT_PRICE_MOVE_CENTS", 5.0)
+    # Re-alert an unchanged, still-standing signal at most this often, so
+    # suppression is a quiet period rather than permanent silence. 0 disables
+    # the reminder entirely (not recommended — a forgotten standing trade is
+    # its own failure).
+    alert_reminder_seconds: float = _float("ALERT_REMINDER_SECONDS", 3600.0)
     # Alert on every order that reaches the exchange. Turn off if the volume
     # is noisy; the kill switch and systemic errors still alert.
     notify_trades: bool = _bool("TELEGRAM_NOTIFY_TRADES", True)

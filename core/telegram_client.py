@@ -306,7 +306,7 @@ class TelegramClient:
             f"Realized PnL today: ${realized_pnl:+,.2f}"
         )
 
-    def notify_trade(self, record, decision=None) -> None:
+    def notify_trade(self, record, decision=None, reason: str = "") -> None:
         """One alert per order that reached the exchange.
 
         Deliberately reports *filled* quantity and average fill price, not
@@ -336,6 +336,10 @@ class TelegramClient:
             if edge is not None:
                 lines.append(f"Net edge: {edge:.2%}")
         lines.append(f"State: {record.state.value}")
+        # Why this alert fired now. On a standing signal that has been quiet,
+        # "edge moved 6.2pp" is the whole point of breaking the silence.
+        if reason:
+            lines.append(f"Alerting because: {reason}")
         self.send("\n".join(lines))
 
     def notify_duplicate_blocked(self, ticker: str, detail: str) -> None:
