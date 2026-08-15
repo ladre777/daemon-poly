@@ -188,6 +188,8 @@ daemon-kalshi/
     order_store.py            # durable orders, fills and settlements
   tests/                     # pytest suite — see docs/SAFETY.md
   docs/SAFETY.md            # safety model, risk formulas, what is NOT verified
+  docs/RUNBOOK.md           # what to check when it isn't trading — every entry
+                            # is a failure this bot actually produced in prod
   main.py                    # orchestrator loop
   config.py                  # env-driven config
   requirements.txt
