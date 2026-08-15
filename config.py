@@ -229,6 +229,46 @@ class RiskConfig:
     # because none has been checked against Kalshi's own settlement rules.
     # Setting this true prices them anyway — for demo experimentation only.
     quant_allow_unverified: bool = _bool("QUANT_ALLOW_UNVERIFIED", False)
+    # Crypto contracts settle on a 60-second average of the CF Benchmarks
+    # Real-Time Index, not a spot snapshot (Kalshi Help Center, "Crypto
+    # Markets"). Point-in-time spot pricing is least reliable exactly inside
+    # that averaging window, so the quant path stops pricing crypto this many
+    # seconds before close. Set 0 to disable the blackout.
+    crypto_settlement_blackout_seconds: float = _float(
+        "CRYPTO_SETTLEMENT_BLACKOUT_SECONDS", 90.0
+    )
+
+    # -- fractional Kelly sizing (see core/kelly.py) ------------------------
+    # Size by how good the bet is, not just by how much headroom is left.
+    # Enters sizing as one more cap among the concentration gates, so it can
+    # only ever make a position smaller — no existing control is weakened by
+    # enabling it, which is why it defaults on.
+    kelly_enabled: bool = _bool("KELLY_ENABLED", True)
+    # Fraction of full Kelly. 0.25 (quarter-Kelly) matches the most
+    # conservative of the surveyed bots; 0.5 is half-Kelly. Full Kelly (1.0)
+    # is not recommended: it is optimal only if the model's probabilities are
+    # exactly right, and ours are estimates.
+    kelly_fraction: float = _float("KELLY_FRACTION", 0.25)
+
+
+@dataclass
+class ArbitrageConfig:
+    """Structural (locked) arbitrage detection — see workers/arbitrage.py.
+
+    Off by default. This is detection-only today: it reports opportunities
+    and does not place orders, because a two-legged trade needs both legs or
+    neither and the execution path has no order-lifecycle management yet.
+    """
+
+    enabled: bool = _bool("ARB_ENABLED", False)
+    # Minimum guaranteed profit per YES+NO pair, in cents, AFTER both legs'
+    # real Kalshi fees. Not a percentage of anything — the payout is fixed at
+    # 100c, so cents are the natural unit. 1c is roughly the smallest profit
+    # worth the two-sided execution risk.
+    min_profit_cents: float = _float("ARB_MIN_PROFIT_CENTS", 1.0)
+    # Ceiling on pairs per opportunity, so a fat-fingered book cannot size
+    # into an unbounded position while the operator is asleep.
+    max_pairs: int = _int("ARB_MAX_PAIRS", 100)
 
 
 @dataclass
@@ -296,6 +336,7 @@ class AppConfig:
     kalshi: KalshiConfig = field(default_factory=KalshiConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     # Group names from core/kalshi_categories.py, ported from Jon Becker's
     # 72.1M-trade Kalshi analysis. These replace a guessed list

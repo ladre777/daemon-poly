@@ -363,6 +363,27 @@ class TelegramClient:
             key=f"duplicate:{ticker}",
         )
 
+    def notify_locked_arb(self, arb) -> None:
+        """A dual-side opportunity whose profit does not depend on the outcome.
+
+        Detection only — the bot does not place these. A two-legged trade
+        needs both legs or neither, and a half-filled arb is an unhedged
+        directional position taken for no reason. So this asks the operator to
+        act rather than acting, and says so plainly rather than implying a
+        trade was made.
+        """
+        self.send(
+            "\n".join([
+                "\U0001f7e2 LOCKED ARB DETECTED (not traded)",
+                arb.describe(),
+                f"Guaranteed after fees: ${arb.total_profit_cents / 100:,.2f} "
+                f"across {arb.max_pairs} pair(s).",
+                "The bot does not execute these — both legs must fill or "
+                "neither, and it has no order-lifecycle management yet.",
+            ]),
+            key=f"arb:{arb.ticker}",
+        )
+
     def notify_kill_switch(self, reason: str, realized_pnl_today: float,
                            bankroll_usd: float) -> None:
         limit = -abs(CONFIG.risk.max_daily_loss_pct * bankroll_usd)

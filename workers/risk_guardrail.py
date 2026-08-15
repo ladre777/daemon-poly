@@ -40,6 +40,7 @@ from typing import Optional
 
 from config import CONFIG
 from core.account_state import AccountSnapshot
+from core.kelly import kelly_cap_cents, win_probability_for
 from core.pricing import (
     executable_price_cents as _executable_price_cents,
     fee_cents_per_contract as _fee_cents_per_contract,
@@ -428,6 +429,21 @@ class RiskGuardrail:
         bankroll_cents = bankroll_usd * 100.0
         max_position_cents = bankroll_cents * CONFIG.risk.max_position_pct
         gates = self._exposure_gates(account, c, bankroll_usd)
+
+        # Fractional Kelly joins the gates rather than replacing them, so it
+        # competes on equal terms and the smallest cap still wins. Every
+        # surveyed open-source Kalshi bot sizes by edge magnitude this way
+        # (ryanfrigo 0.25, OctagonAI 0.5, brandononchain 0.25); this repo
+        # sized purely by headroom, which spends the same budget on a 4pp
+        # edge as on a 40pp one. See core/kelly.py.
+        if CONFIG.risk.kelly_enabled:
+            p_win = win_probability_for(verdict.proposal.maker_probability, direction)
+            gates.append((
+                "kelly cap",
+                0.0,
+                kelly_cap_cents(p_win, cost_per_contract, bankroll_cents,
+                                CONFIG.risk.kelly_fraction),
+            ))
 
         headroom_cents = max_position_cents
         binding = "max position size"

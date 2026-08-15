@@ -45,6 +45,7 @@ from core.fred_client import FredClient
 from core.spot_price_client import SpotPriceClient
 from core.telegram_client import TelegramClient
 from workers.quant_maker import QuantMaker
+from workers.arbitrage import ArbitrageScanner
 
 logging.basicConfig(
     level=CONFIG.log_level,
@@ -186,7 +187,7 @@ def install_shutdown_handlers() -> dict:
 
 
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
-             notifier=None, health=None, alert_store=None):
+             notifier=None, health=None, alert_store=None, arb_scanner=None):
     """One scan pass. Returns the number of orders that actually filled.
 
     Reconciliation happens first: if it fails, the pass places no orders at
@@ -234,6 +235,14 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # different problems that all look identical in the log. Every candidate
     # leaves via exactly one of these buckets.
     stats: dict[str, int] = defaultdict(int)
+
+    # Structural arbs are model-free and cost nothing to look for, so they are
+    # checked across the whole scan before any LLM budget is spent. Off unless
+    # ARB_ENABLED; detection only — see workers/arbitrage.py.
+    if arb_scanner is not None:
+        arb_scanner.begin_pass()
+        stats["locked_arbs"] += len(arb_scanner.scan(candidates))
+
     # One failing candidate must not cost us the other 2,913. Model calls are
     # contained per candidate and counted; only a *run* of failures — which
     # means the provider is down, not that one market confused it — stops the
@@ -564,6 +573,9 @@ def main():
     )
     maker = Maker(enricher=enricher)
     quant_maker = QuantMaker(SpotPriceClient())
+    # Model-free structural-arb detection. Constructed unconditionally;
+    # the scanner itself is a no-op unless ARB_ENABLED.
+    arb_scanner = ArbitrageScanner(notifier=notifier)
     checker = Checker()
     risk = RiskGuardrail(bankroll_usd=args.bankroll, store=store,
                          order_store=order_store, notifier=notifier)
@@ -641,7 +653,7 @@ def main():
             try:
                 run_once(scout, maker, quant_maker, checker, risk, execution,
                          ledger, account, notifier=notifier, health=health,
-                         alert_store=alert_store)
+                         alert_store=alert_store, arb_scanner=arb_scanner)
                 ledger.reconcile_settlements()
                 pass_count += 1
                 if args.reflect_every and pass_count % args.reflect_every == 0:
