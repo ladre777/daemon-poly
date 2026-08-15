@@ -132,6 +132,14 @@ class RiskConfig:
     # PF-04/PF-09/PF-10 numbers — these are conservative placeholders.
     max_position_pct: float = _float("MAX_POSITION_PCT", 0.05)       # 5% of bankroll per position
     max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 0.10)    # kill switch trigger
+    # Whether unrealized *gains* may offset realized losses in the daily-loss
+    # control. Unrealized losses always count — that is the point of marking
+    # to market. Gains are excluded by default, because letting paper profit
+    # extend the day's loss budget is how a bot that is genuinely down keeps
+    # trading: a mark on a thin prediction-market book can evaporate between
+    # one pass and the next, and the realized loss it was offsetting cannot.
+    # Set true for symmetric mark-to-market accounting.
+    count_unrealized_gains: bool = _bool("COUNT_UNREALIZED_GAINS", False)
     max_open_positions: int = _int("MAX_OPEN_POSITIONS", 15)
     min_edge_threshold: float = _float("MIN_EDGE_THRESHOLD", 0.04)    # 4pp min edge to act
     min_liquidity_usd: float = _float("MIN_LIQUIDITY_USD", 500.0)

@@ -128,7 +128,7 @@ headroom = min(
     MAX_EVENT_EXPOSURE_PCT  × bankroll − event_exposure,
     MAX_CATEGORY_EXPOSURE_PCT × bankroll − category_exposure,
     available_balance − pending_exposure,
-    MAX_DAILY_LOSS_PCT × bankroll − realized_loss_today,
+    MAX_DAILY_LOSS_PCT × bankroll − drawdown_today,
 )
 size = floor(headroom / cost_per_contract)
 ```
@@ -141,16 +141,46 @@ The invariant, enforced immediately before submission:
 
 ### Two distinct loss controls
 
-- **Kill switch** — trips on *realized* daily losses breaching
+- **Kill switch** — trips on the day's total drawdown breaching
   `MAX_DAILY_LOSS_PCT`, persists to SQLite, and requires a human to clear.
   An in-memory flag would un-trip itself on the next Railway redeploy.
-- **Daily loss budget** — a sizing gate: losses already booked today shrink
+- **Daily loss budget** — a sizing gate: losses already taken today shrink
   how much *new* risk may be opened, so a bad morning tightens the afternoon.
 
-These are deliberately separate. An earlier draft counted all open exposure
-as a same-day loss, which made `MAX_TOTAL_EXPOSURE_PCT` (50%) unreachable
-under a 10% daily limit — the larger cap became dead code and every order was
-refused once exposure passed 10%. Open positions are not a realized loss.
+Both read the same number:
+
+```
+drawdown_today = realized_pnl_today + unrealized_pnl_today
+unrealized     = Σ quantity × bid_on_the_side_held − (cost basis + fees)
+```
+
+Realized PnL alone answers the wrong question. A bot that has closed nothing
+and is down 40% on open positions has a realized PnL of exactly zero, so a
+realized-only switch watches the drawdown happen without ever tripping — it
+is blindest in precisely the situation it exists for.
+
+Positions are marked to the **bid on the side held**, not the midpoint. The
+midpoint values a position at a price nobody is offering; the entry path
+already prices at the ask for the same reason, and this is that conservatism
+pointed the other way. A position whose book cannot be read is marked
+`None`, never zero — "unknown" and "worthless" are different claims — and
+the cost basis behind unpriced positions is reported alongside the figure so
+a loss number with a hole in it is never mistaken for a complete one.
+
+**Unrealized gains do not offset realized losses** unless
+`COUNT_UNREALIZED_GAINS=true`. The asymmetry is the safety property: a paper
+gain on a thin book can evaporate between one pass and the next, and the
+realized loss it was offsetting cannot. Letting paper profit extend the
+day's loss budget is how a bot that is genuinely down keeps trading.
+
+### What is *not* counted as a loss
+
+Exposure is what a position **could** lose; unrealized PnL is what it **has**
+lost. Only the second belongs in the loss controls. An earlier draft counted
+all open exposure as a same-day loss, which made `MAX_TOTAL_EXPOSURE_PCT`
+(50%) unreachable under a 10% daily limit — the larger cap became dead code
+and every order was refused once exposure passed 10%. Full exposure stays in
+the concentration caps above, where it belongs.
 
 ## Settlement
 
