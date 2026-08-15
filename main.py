@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from config import CONFIG
 from core.account_state import AccountState, ReconciliationError
 from core.kalshi_client import KalshiClient
+from memory.db import storage_status
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore
 from workers.scout import Scout
@@ -300,6 +301,45 @@ def main():
         _alert(notifier, "notify_systemic_error", "config", str(e))
         notifier.flush()
         raise SystemExit(str(e))
+
+    # Storage check before anything opens the database. Every P0 durability
+    # guarantee — rebuilding exposure after a restart, not double-counting
+    # settled PnL, a kill switch that cannot un-trip itself — depends on this
+    # file outliving the process.
+    storage = storage_status()
+    if not storage.usable:
+        _alert(notifier, "notify_systemic_error", "storage",
+               f"No writable database location: {storage.reason}")
+        notifier.flush()
+        raise SystemExit(f"Cannot open a ledger database: {storage.reason}")
+
+    if not storage.durable:
+        message = (
+            f"Ledger storage is NOT durable: {storage.reason}. Order, fill "
+            f"and settlement history — and the kill-switch state — will be "
+            f"lost on the next redeploy."
+        )
+        if CONFIG.kalshi.env == "prod" and not CONFIG.risk.dry_run:
+            # Refusing here is the point. Live trading against amnesiac
+            # storage means that after any redeploy the bot cannot reconstruct
+            # what it holds, and a tripped kill switch silently clears itself.
+            _alert(notifier, "notify_systemic_error", "storage", message)
+            notifier.flush()
+            raise SystemExit(
+                f"{message}\n\n"
+                f"Refusing to trade real money without durable storage.\n"
+                f"Fix: attach a Railway Volume mounted at /data to this "
+                f"service, then redeploy. See docs/SAFETY.md."
+            )
+        # Demo or paper mode: warn loudly but keep running, because losing
+        # paper history is an inconvenience rather than a risk.
+        log.warning("%s Continuing because env=%s dry_run=%s.",
+                    message, CONFIG.kalshi.env, CONFIG.risk.dry_run)
+
+    if storage.effective_path != CONFIG.ledger_db_path:
+        log.warning("Falling back to %s for the ledger database",
+                    storage.effective_path)
+        CONFIG.ledger_db_path = storage.effective_path
 
     try:
         client = KalshiClient()

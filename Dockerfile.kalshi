@@ -1,0 +1,47 @@
+# Build for the DÆMON-KALSHI service.
+#
+# A Dockerfile rather than Nixpacks, deliberately. This repo root is
+# ambiguous to a build autodetector: it contains package.json and
+# pnpm-lock.yaml (a Node pnpm workspace), nixpacks.toml (Python), a
+# Dockerfile whose CMD runs the *Polymarket* bot, and .replit. Nixpacks
+# inspects the tree and guesses, and the guess is not stable across builder
+# versions — a deploy that works today can start pulling in a Node phase, or
+# pick the wrong start command, after an upstream change nobody here made.
+#
+# This file removes the guessing. One base image, one dependency file, one
+# start command, all explicit.
+#
+# Point a Railway service at it by setting:
+#   RAILWAY_DOCKERFILE_PATH=Dockerfile.kalshi
+FROM python:3.11-slim
+
+# Fail fast and log immediately: without PYTHONUNBUFFERED, output sits in a
+# buffer and a crash loop shows an empty log, which is the worst possible
+# thing to debug a trading bot with.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Dependencies first so they cache independently of source changes.
+COPY requirements-kalshi.txt .
+RUN pip install --no-cache-dir -r requirements-kalshi.txt
+
+# Only what the daemon actually needs at runtime. Copying the whole tree
+# would drag in the Polymarket bot, the Node workspace, ~200KB of lockfile
+# and the attached_assets directory — none of which this service runs.
+COPY main.py config.py ./
+COPY core/ ./core/
+COPY workers/ ./workers/
+COPY memory/ ./memory/
+
+# Default location for the SQLite ledger. Mount a Railway Volume here, or
+# the database is ephemeral and every redeploy wipes order, fill and
+# settlement history along with the kill-switch state. main.py refuses to
+# start in prod without durable storage; see docs/SAFETY.md.
+ENV LEDGER_DB_PATH=/data/daemon_kalshi.db
+VOLUME ["/data"]
+
+CMD ["python", "main.py"]
