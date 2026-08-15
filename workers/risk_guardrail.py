@@ -192,16 +192,63 @@ class RiskGuardrail:
         )
         return self.order_store.realized_pnl_since(day_start)
 
-    def check_kill_switch(self, bankroll_usd: float) -> bool:
-        """True if trading must halt. Trips on *realized* losses breaching the
-        daily limit, and persists the flag so a restart cannot clear it."""
+    def drawdown_today(self, account: AccountSnapshot = None) -> tuple[float, str]:
+        """(PnL in dollars, what that number is made of).
+
+        Realized PnL alone answers the wrong question. A bot that has closed
+        nothing and is down 40% on open positions has a realized PnL of
+        exactly zero, so a realized-only kill switch watches it fall without
+        ever tripping — the drawdown the switch exists to stop is invisible
+        precisely while it is happening.
+
+        Unrealized PnL is therefore added when a reconciled snapshot is
+        available. Fees are already inside both halves: realized PnL is net
+        of them, and each position's unrealized figure subtracts the fees
+        paid to open it.
+        """
+        realized = self.realized_pnl_today()
+        if account is None:
+            return realized, f"realized {realized:.2f} (no snapshot — open positions uncounted)"
+
+        unrealized = account.unrealized_pnl_cents() / 100.0
+        counted = unrealized
+        if unrealized > 0 and not CONFIG.risk.count_unrealized_gains:
+            # Asymmetric on purpose, and the asymmetry is the safety property:
+            # a paper gain must not buy room to lose more real money. See
+            # RiskConfig.count_unrealized_gains.
+            counted = 0.0
+        detail = f"realized {realized:.2f} + unrealized {unrealized:.2f}"
+        if counted != unrealized:
+            detail += " (gain not counted against the loss budget)"
+        unmarked = account.unmarked_positions()
+        if unmarked:
+            # Said out loud rather than folded in silently. The unrealized
+            # half is incomplete by at most the cost basis behind these
+            # positions, and an operator reading a kill-switch message
+            # deserves to know the figure has a hole in it.
+            detail += (
+                f" (incomplete: {len(unmarked)} position(s) unpriced, "
+                f"up to ${account.unmarked_exposure_cents() / 100:.2f} unaccounted)"
+            )
+        return realized + counted, detail
+
+    def check_kill_switch(self, bankroll_usd: float,
+                          account: AccountSnapshot = None) -> bool:
+        """True if trading must halt. Trips on the day's total drawdown —
+        realized *and* unrealized — and persists the flag so a restart cannot
+        clear it.
+
+        ``account`` is optional only so that callers without a snapshot still
+        get the realized-only check rather than no check at all. That path
+        understates the drawdown, and says so in the reason string.
+        """
         if self._killed:
             return True
-        pnl_today = self.realized_pnl_today()
+        pnl_today, basis = self.drawdown_today(account)
         loss_limit = -abs(CONFIG.risk.max_daily_loss_pct * bankroll_usd)
         if pnl_today <= loss_limit:
             self._killed = True
-            reason = f"realized daily PnL {pnl_today:.2f} breached limit {loss_limit:.2f}"
+            reason = f"daily PnL {pnl_today:.2f} breached limit {loss_limit:.2f} [{basis}]"
             self.store.set_kill_switch(True, reason)
             log.error("KILL SWITCH TRIPPED (persisted): %s", reason)
             # Alerted at the moment of tripping rather than from the caller,
@@ -272,18 +319,23 @@ class RiskGuardrail:
                 account.pending_exposure_cents(),
                 account.available_balance_cents,
             ),
-            # Losses already booked today shrink how much *new* risk may be
+            # Losses already taken today shrink how much *new* risk may be
             # added, so a bad morning tightens the afternoon automatically.
             #
-            # Deliberately not "realized PnL minus all open exposure against
-            # the daily limit": open positions are not a realized loss, and
-            # counting them as one would make MAX_TOTAL_EXPOSURE_PCT (50%)
-            # unreachable under a 10% daily loss limit — the larger cap would
-            # be dead code. This bounds new risk instead, which is the part a
-            # pre-trade check can actually control.
+            # Both halves count: money lost on closed trades, and money lost
+            # on open ones that have moved against us. A position down 30c is
+            # 30c of the day's budget spent whether or not it has been sold.
+            #
+            # Still deliberately NOT "the whole cost of open positions
+            # against the daily limit". Counting full exposure as loss would
+            # make MAX_TOTAL_EXPOSURE_PCT (50%) unreachable under a 10% daily
+            # limit and leave the larger cap as dead code. The distinction is
+            # the point: exposure is what a position *could* lose and belongs
+            # in the caps above; unrealized PnL is what it *has* lost and
+            # belongs here.
             (
                 "daily loss budget",
-                max(-self.realized_pnl_today(), 0.0) * 100.0,
+                max(-self.drawdown_today(account)[0], 0.0) * 100.0,
                 abs(CONFIG.risk.max_daily_loss_pct * bankroll_cents),
             ),
         ]
@@ -312,7 +364,7 @@ class RiskGuardrail:
                 f"${account.balance_cents / 100:.2f})",
             )
 
-        if self.check_kill_switch(bankroll_usd):
+        if self.check_kill_switch(bankroll_usd, account):
             raise KillSwitchTripped("Daily drawdown limit hit — trading halted")
 
         if not verdict.approved:
@@ -450,6 +502,13 @@ class RiskGuardrail:
                 "binding_constraint": binding,
                 "cost_per_contract_cents": cost_per_contract,
                 "realized_pnl_today": realized_today,
+                # Recorded next to the realized figure so the audit trail
+                # shows the drawdown the kill switch was actually measured
+                # against, not just the closed-trade half of it.
+                "unrealized_pnl_today": account.unrealized_pnl_cents() / 100.0,
+                "total_drawdown_today": self.drawdown_today(account)[0],
+                "unmarked_positions": len(account.unmarked_positions()),
+                "unmarked_exposure_cents": account.unmarked_exposure_cents(),
                 "reconciled_age_seconds": account.age_seconds,
                 "evaluated_at": time.time(),
                 # The exact quote this decision was made against, so the
