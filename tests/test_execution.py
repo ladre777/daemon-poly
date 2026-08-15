@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from config import CONFIG
-from core.kalshi_client import KalshiAPIError
+from core.kalshi_client import KalshiAPIError, KalshiTimeoutError
 from core.order_state import OrderIntent, OrderState
 from workers.execution import DuplicateOrderBlocked, UnmanagedMakerMode
 from workers.risk_guardrail import RiskDecision
@@ -180,7 +180,9 @@ def test_unresolvable_timeout_leaves_the_order_unknown_and_blocks(execution, cli
 
     client.get_orders = explode
 
-    with pytest.raises(Exception):
+    # The submission timeout is what propagates: the recovery lookup failing
+    # means we never learn the order's fate, so the timeout stands.
+    with pytest.raises(KalshiTimeoutError):
         execution.execute(make_verdict(), approved(size=10))
 
     unknown = order_store.unknown_orders()

@@ -380,3 +380,73 @@ def test_a_failing_checker_skips_the_candidate_rather_than_trading_it(pass_parts
 
     assert filled == 0
     assert client.place_order_calls == [], "no order without a Checker verdict"
+
+
+# -- snapshot freshness ------------------------------------------------------
+
+
+def test_stale_snapshot_does_not_block_the_trade(client, order_store, edge_store,
+                                                 account, execution, risk, ledger):
+    """Production: a 400-page scan plus a model call per candidate aged the
+    snapshot past its freshness limit, so risk refused every proposal in
+    every pass with "account state is stale (109s old, limit 90s)".
+
+    Refusing to trade on stale state is correct. Letting it go stale and
+    then calling that a risk decision is not.
+    """
+    CONFIG.risk.dry_run = False
+    candidates = [make_candidate()]
+    _positions_follow_fills(client, candidates)
+
+    class AgeingScout:
+        def __init__(self):
+            self.scans = 0
+
+        def scan(self):
+            self.scans += 1
+            # Simulate a pass slow enough to outlive the freshness limit.
+            account.snapshot.reconciled_at -= (
+                CONFIG.risk.max_reconciliation_age_seconds * 3
+            )
+            return list(candidates)
+
+    filled = main.run_once(
+        AgeingScout(), StubMaker(), StubQuantMaker(), StubChecker(),
+        risk, execution, ledger, account,
+    )
+
+    assert filled == 1, "a slow pass must refresh its snapshot, not refuse forever"
+    assert len(client.place_order_calls) == 1
+
+
+def test_a_failed_mid_pass_refresh_ends_the_pass(client, order_store, edge_store,
+                                                 account, execution, risk, ledger):
+    """Fail closed: if the refreshed picture cannot be obtained, stop."""
+    CONFIG.risk.dry_run = False
+    candidates = [make_candidate()]
+    calls = {"n": 0}
+
+    class AgeingScout:
+        def scan(self):
+            account.snapshot.reconciled_at -= (
+                CONFIG.risk.max_reconciliation_age_seconds * 3
+            )
+            return list(candidates)
+
+    original = client.get_balance
+
+    def fail_after_first(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise ReconciliationError("exchange unreachable")
+        return original()
+
+    client.get_balance = fail_after_first
+
+    filled = main.run_once(
+        AgeingScout(), StubMaker(), StubQuantMaker(), StubChecker(),
+        risk, execution, ledger, account,
+    )
+
+    assert filled == 0
+    assert client.place_order_calls == []

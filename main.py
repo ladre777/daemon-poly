@@ -305,6 +305,30 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         # Risk runs against the snapshot as it stands right now, including
         # every order already placed earlier in this same pass — that is why
         # the snapshot is refreshed after each fill rather than reused.
+        #
+        # It is also refreshed when it simply got old. A pass over 2,700
+        # candidates takes minutes: a 400-page scan, then a model call per
+        # candidate. The snapshot taken at the top of the pass was 109
+        # seconds old by the time the first proposal reached risk, past the
+        # 90-second freshness limit, so risk refused it — and would have
+        # refused every proposal in every pass, forever, for a reason that
+        # reads like a transient hiccup.
+        #
+        # Refusing to trade on stale state is right. Letting the state go
+        # stale and calling that a risk decision is not: the fix is to go
+        # get a current picture, and to fail closed only if that fails too.
+        if account.snapshot is None or account.snapshot.is_stale(
+            CONFIG.risk.max_reconciliation_age_seconds * 0.5
+        ):
+            try:
+                account.reconcile()
+            except ReconciliationError as e:
+                log.error("Could not refresh account state mid-pass — ending pass: %s", e)
+                _alert(notifier, "notify_systemic_error", "reconciliation", str(e))
+                break
+            if health is not None:
+                health.mark_reconciled()
+
         try:
             decision = risk.evaluate(verdict, account.snapshot)
         except KillSwitchTripped as e:
@@ -401,7 +425,7 @@ def main():
     except UnmanagedMakerMode as e:
         _alert(notifier, "notify_systemic_error", "config", str(e))
         notifier.flush()
-        raise SystemExit(str(e))
+        raise SystemExit(str(e)) from e
 
     # Storage check before anything opens the database. Every P0 durability
     # guarantee — rebuilding exposure after a restart, not double-counting
@@ -488,7 +512,7 @@ def main():
         raise SystemExit(
             f"Startup reconciliation with Kalshi failed: {e}\n"
             f"Refusing to start — the bot cannot know its own exposure."
-        )
+        ) from e
     if not snapshot.is_tradeable:
         _alert(notifier, "notify_systemic_error", "account_state",
                f"Startup blocked: {snapshot.blocking_reason()}")
@@ -548,7 +572,7 @@ def main():
                 # loop would just spin. Exit loudly instead. The alert itself
                 # already fired from inside RiskGuardrail.
                 exit_reason = f"kill switch tripped: {e}"
-                raise SystemExit(exit_reason)
+                raise SystemExit(exit_reason) from e
             except Exception:
                 log.exception("Unhandled error in main loop pass — continuing")
 

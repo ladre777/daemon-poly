@@ -85,6 +85,12 @@ class ModelConfig:
     # has no usable model for the key — see core/llm_client.py. "moonshot" or
     # "anthropic" pin a single provider with no failover.
     maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "auto")
+    # Per-call timeout for the Maker's primary provider. Short on purpose:
+    # this budget is paid once per candidate, and in production a hung
+    # Moonshot at 30s aged the account snapshot past its freshness limit
+    # before the first proposal ever reached risk. Failing over quickly is
+    # worth more here than waiting out a slow response.
+    maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 15.0)
     # Model used when the Maker falls back to Anthropic. NOT the Checker's
     # model: the Maker is the high-volume path (tens of calls per 30-second
     # pass) and the Checker is the low-volume one (only on proposals that

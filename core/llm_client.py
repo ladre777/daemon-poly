@@ -83,7 +83,7 @@ class MoonshotBackend:
 
     name = "moonshot"
 
-    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 30.0):
+    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 15.0):
         self._api_key = api_key
         self._base_url = base_url
         self.model = model
@@ -138,7 +138,7 @@ class MoonshotBackend:
                         self._reject(model, retry_error)
                         model = self._next_model()
                         if model is None:
-                            raise last_error
+                            raise                 # re-raise the active 400
                         continue
                     else:
                         log.warning(
@@ -151,7 +151,7 @@ class MoonshotBackend:
                 self._reject(model, e)
                 model = self._next_model()
                 if model is None:
-                    raise last_error
+                    raise                         # re-raise the active 4xx
                 continue
             else:
                 self._adopt(model)
@@ -371,6 +371,7 @@ def build_maker_llm(models_config) -> MakerLLM:
         api_key=models_config.moonshot_api_key,
         base_url=models_config.moonshot_base_url,
         model=models_config.moonshot_model,
+        timeout=getattr(models_config, "maker_timeout_seconds", 15.0),
     )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,
