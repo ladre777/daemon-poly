@@ -285,9 +285,28 @@ from taking effect. There is a test for exactly that.
    `KALSHI_PRIVATE_KEY_PATH` (or `KALSHI_PRIVATE_KEY_PEM` for Railway, since
    Railway env vars are easier as a single string than a mounted file),
    `MOONSHOT_API_KEY`, `ANTHROPIC_API_KEY`.
+
+   `MOONSHOT_MODEL` is a starting guess, not a guarantee: Moonshot answers
+   `404` for a model your key cannot use, and the model line-up changes.
+   The Maker recovers on its own — it asks the account which models it has,
+   walks them in preference order (general chat models before code-tuned
+   ones), and logs the id to pin via `MOONSHOT_MODEL`. If none work it fails
+   over to Anthropic on `MAKER_FALLBACK_MODEL`, under a tighter per-pass
+   call cap. Set `MAKER_LLM_PROVIDER=moonshot` or `=anthropic` to pin one
+   provider and disable failover.
 3. `pip install -r requirements.txt`
 4. Point `KALSHI_ENV=demo` first and run `python main.py --dry-run` against
    `demo-api.kalshi.co` before touching production.
+
+   **Demo and production keys are not interchangeable.** A key issued on the
+   production account returns `401 authentication_error` against
+   `demo-api.kalshi.co` and vice versa, and the bot correctly refuses to
+   start rather than trading against an account it cannot read. If startup
+   fails with a 401, check which host the log line names before assuming the
+   key is bad — a production key hitting the demo host looks identical to a
+   revoked one. For paper trading on the real order book, set
+   `KALSHI_ENV=prod` with `DRY_RUN=true`: real prices, real reconciliation,
+   no orders submitted.
 5. Push to a new GitHub repo, connect it in Railway the same way
    `daemon-poly-wc` is connected, set the env vars in the Railway dashboard
    (never commit the private key), deploy.
