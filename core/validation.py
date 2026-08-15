@@ -197,6 +197,11 @@ _QUOTE_TIME_FIELDS: tuple[str, ...] = ()
 PRICE_FIELDS = {
     "yes_bid": (("yes_bid", 1.0), ("yes_bid_dollars", 100.0)),
     "yes_ask": (("yes_ask", 1.0), ("yes_ask_dollars", 100.0)),
+    # Read only by mark_price_cents below. Kalshi quotes the NO book
+    # directly, so a NO position is marked against Kalshi's own number
+    # rather than one derived from the YES side.
+    "no_bid": (("no_bid", 1.0), ("no_bid_dollars", 100.0)),
+    "no_ask": (("no_ask", 1.0), ("no_ask_dollars", 100.0)),
 }
 
 #: Liquidity signals, best first. `liquidity_dollars` is the USD figure that
@@ -221,6 +226,40 @@ def _price_cents(raw: dict, key: str):
             return None, True          # present but unusable -> bad data
         return value * multiplier, True
     return None, False                 # absent -> "no resting order"
+
+
+def mark_price_cents(raw: dict, side: str) -> Optional[float]:
+    """What one contract of ``side`` could actually be sold for right now.
+
+    Marked to the *bid* on the side held, not the midpoint. This number feeds
+    a loss control, and the midpoint values a position at a price nobody is
+    currently offering — it reports the book as friendlier than it is, in the
+    one place where being flattered is most expensive. Marking to the bid is
+    the same conservatism the entry path already applies in
+    ``executable_price_cents``, pointed the other way.
+
+    Returns ``None`` when the market quotes nothing usable. That is not zero:
+    a market with no bid has not become worthless, we simply cannot say what
+    it is worth, and the caller has to handle not knowing. Treating it as
+    zero would book a total loss on every illiquid position.
+    """
+    if side not in ("yes", "no"):
+        return None
+    value, _ = _price_cents(raw, "no_bid" if side == "no" else "yes_bid")
+    if value is None:
+        # No direct quote for that side. The opposite ask is the same number
+        # by construction (a bid of 40 on NO is an ask of 60 on YES), so it
+        # is a derivation rather than a guess — but only ever a fallback,
+        # because Kalshi's own field is authoritative when it is present.
+        opposite, _ = _price_cents(raw, "no_ask" if side == "yes" else "yes_ask")
+        if opposite is None:
+            return None
+        value = 100.0 - opposite
+    if not 0.0 <= value <= 100.0:
+        # Crossed or nonsensical book. Same rule as everywhere else in this
+        # file: unusable input is refused, never coerced into range.
+        return None
+    return value
 
 
 def _best_liquidity(raw: dict):

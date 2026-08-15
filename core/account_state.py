@@ -26,6 +26,22 @@ worst-case loss equals cash committed:
 Selling to close would cap the loss lower, but assuming we can exit is
 assuming liquidity that may not be there at settlement time, so the
 conservative figure is the one risk enforces against.
+
+Mark-to-market
+--------------
+Worst-case exposure answers "how much could this lose in total"; it does not
+answer "how much has it lost so far", and the daily-loss control needs the
+second question. Each open position is therefore also priced against the
+current book:
+
+    unrealized = quantity * bid_on_the_side_held - (cost basis + fees)
+
+Marked to the bid rather than the midpoint, for the same reason entries are
+priced at the ask: the number that matters is the one someone will actually
+transact at. A position whose book cannot be read is marked ``None`` — not
+zero — and the exposure sitting behind those positions is reported
+separately, so a loss figure with a hole in it is never mistaken for a
+complete one.
 """
 from __future__ import annotations
 
@@ -37,6 +53,7 @@ from typing import Optional
 from config import CONFIG
 from core.kalshi_client import KalshiAPIError, KalshiClient, KalshiTimeoutError
 from core.order_state import Fill, OrderRecord, OrderState
+from core.validation import mark_price_cents
 from memory.order_store import OrderStore
 
 log = logging.getLogger("daemon_kalshi.account")
@@ -59,10 +76,39 @@ class Position:
     fees_cents: float = 0.0
     event_ticker: str = ""
     category: str = ""
+    #: Current exit price for this side, in cents, or None if the market
+    #: quotes nothing usable. None means "unknown", never "worthless".
+    mark_price_cents: Optional[float] = None
 
     @property
     def worst_case_loss_cents(self) -> float:
         return max(self.quantity, 0) * self.avg_price_cents + self.fees_cents
+
+    @property
+    def cost_basis_cents(self) -> float:
+        """Everything this position has cost so far, fees included."""
+        return max(self.quantity, 0) * self.avg_price_cents + self.fees_cents
+
+    @property
+    def market_value_cents(self) -> Optional[float]:
+        """What the position could be liquidated for now, or None if unknown."""
+        if self.mark_price_cents is None:
+            return None
+        return max(self.quantity, 0) * self.mark_price_cents
+
+    @property
+    def unrealized_pnl_cents(self) -> Optional[float]:
+        """Mark-to-market gain or loss, or None when the mark is unknown.
+
+        Fees already paid count as the loss they are: that money has left the
+        account and no future price recovers it. Excluding them would let a
+        position that has merely broken even on price read as flat when it is
+        in fact down by the commission.
+        """
+        value = self.market_value_cents
+        if value is None:
+            return None
+        return value - self.cost_basis_cents
 
 
 @dataclass
@@ -160,6 +206,37 @@ class AccountSnapshot:
 
     def open_position_count(self) -> int:
         return len([p for p in self.positions if p.quantity > 0])
+
+    # -- mark-to-market ----------------------------------------------------
+
+    def unrealized_pnl_cents(self) -> float:
+        """Mark-to-market PnL across every position we can currently price.
+
+        Positions without a mark contribute nothing here, which is why
+        ``unmarked_exposure_cents`` exists alongside it: a caller that reads
+        this number without also asking how much of the book it covers is
+        reading a loss figure with an unknown hole in it.
+        """
+        return sum(
+            pnl
+            for pnl in (p.unrealized_pnl_cents for p in self.positions)
+            if pnl is not None
+        )
+
+    def unmarked_positions(self) -> list[Position]:
+        """Open positions whose current price could not be determined."""
+        return [p for p in self.positions if p.quantity > 0 and p.mark_price_cents is None]
+
+    def unmarked_exposure_cents(self) -> float:
+        """Cost basis sitting behind positions we could not mark.
+
+        This bounds the error in ``unrealized_pnl_cents``: the unknown loss
+        cannot exceed it, because a contract cannot fall below zero.
+        """
+        return sum(p.cost_basis_cents for p in self.unmarked_positions())
+
+    def is_fully_marked(self) -> bool:
+        return not self.unmarked_positions()
 
 
 def _event_of(ticker: str) -> str:
@@ -305,7 +382,39 @@ class AccountState:
                 )
             )
         self._attach_metadata(positions)
+        self._attach_marks(positions)
         return positions
+
+    def _attach_marks(self, positions: list[Position]) -> None:
+        """Price every open position against the current book.
+
+        One request per position. That is bounded by how many positions the
+        bot actually holds — single digits under the concentration caps — not
+        by the thousands of markets Scout scans.
+
+        A market that cannot be fetched or cannot be priced leaves the mark
+        as None and does not abort reconciliation. Refusing to trade at all
+        because one position's book is momentarily unreadable would convert a
+        pricing gap into an outage; the gap is instead reported, and callers
+        decide what to do about not knowing.
+        """
+        for p in positions:
+            if p.quantity <= 0:
+                continue
+            try:
+                payload = self.client.get_market(p.ticker) or {}
+            except (KalshiAPIError, KalshiTimeoutError) as e:
+                log.warning("Couldn't price open position %s: %s", p.ticker, e)
+                continue
+            market = payload.get("market", payload)
+            if not isinstance(market, dict):
+                continue
+            p.mark_price_cents = mark_price_cents(market, p.side)
+            if p.mark_price_cents is None:
+                log.warning(
+                    "No usable %s bid for open position %s — its unrealized PnL "
+                    "is unknown, not zero", p.side.upper(), p.ticker,
+                )
 
     def _attach_metadata(self, positions: list[Position]) -> None:
         """Fill in event/category from our own order history where the
