@@ -86,12 +86,19 @@ class ModelConfig:
     # Checker: slower, higher-trust second opinion before capital moves.
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     checker_model: str = os.getenv("CHECKER_MODEL", "claude-sonnet-5")
-    # Token budget for a Checker verdict. 500 truncated real verdicts mid-JSON
-    # in production, which validation then correctly refused as unparseable —
-    # turning a well-reasoned approval into an abstention for no reason but
-    # the budget. Verdicts are small; the cost of headroom here is trivial
-    # next to the cost of silently discarding them.
-    checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 1500)
+    # Token budget for a Checker verdict — thinking AND answer together.
+    #
+    # This was 500, then 1500, and production truncated verdicts mid-JSON at
+    # both. Raising the number was treating the symptom: claude-sonnet-5 runs
+    # adaptive thinking whenever `thinking` is omitted, thinking is billed
+    # against max_tokens alongside the response, and deliberation simply
+    # expanded to fill each larger budget. The fix is this value AND
+    # checker_effort below, which bounds the thinking half.
+    checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 4000)
+    # How much of that budget the Checker may spend thinking. "low" suits a
+    # small, well-scoped judgement with a fixed output shape; raise it only
+    # if verdict quality measurably improves, and raise max_tokens with it.
+    checker_effort: str = os.getenv("CHECKER_EFFORT", "low")
 
     # Which backend answers Maker calls. "auto" (default) uses Moonshot and
     # falls back to Anthropic when Moonshot is unreachable, unauthorised, or

@@ -29,7 +29,12 @@ information, overconfidence, a market that's actually well-calibrated for \
 reasons the Maker missed, or reasoning that doesn't hold up. Do not simply \
 agree because the reasoning sounds plausible. Respond ONLY with JSON: \
 {"verdict": "approve"|"reject"|"abstain", "confidence": 0.0-1.0, \
-"reasoning": "2-4 sentences explaining your independent view"}"""
+"reasoning": "2-4 sentences explaining your independent view"}
+
+Keep `reasoning` to at most 4 sentences and emit nothing outside the JSON \
+object. The response is parsed by a machine and a verdict that runs past the \
+token budget is discarded entirely, so a complete short answer is worth far \
+more than a thorough one that gets cut off."""
 
 
 @dataclass
@@ -63,18 +68,46 @@ class Checker:
             f"Implied edge: {proposal.edge_size:.2%} toward {proposal.direction.upper()}\n"
             f"Volume: {c.volume}"
         )
+        # max_tokens caps thinking AND response text together, and
+        # claude-sonnet-5 runs adaptive thinking whenever `thinking` is
+        # omitted. Raising the number alone therefore does not fix
+        # truncation — deliberation simply expands into the larger budget
+        # and the JSON is still cut off. Both levers are needed: `effort`
+        # bounds how much of the budget thinking may take, and max_tokens
+        # gives what remains enough room for the verdict.
+        #
+        # `low` is deliberate. This is a small, well-scoped judgement with a
+        # fixed output shape, which is exactly the shape `low` is for; the
+        # Checker's value is an independent opinion, not a long deliberation.
         resp = self._client.messages.create(
             model=CONFIG.models.checker_model,
-            # Production truncated a verdict mid-string at 500 tokens:
-            # {"verdict": "approve", "confidence": 0.72, "reasoning": "Seattle
-            # mid-August climatology genuinely shows low precipitation ...
-            # and then nothing. Validation correctly refused the unparseable
-            # JSON and abstained — so a well-reasoned approval became a
-            # non-answer purely because the budget ran out mid-sentence.
             max_tokens=CONFIG.models.checker_max_tokens,
+            output_config={"effort": CONFIG.models.checker_effort},
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
         )
+
+        # Truncation is a distinct failure from bad output, and conflating
+        # them is what made this bug recur. A verdict cut off mid-JSON was
+        # reported as "unparseable JSON" — which reads as "the model
+        # answered badly" and sent three separate investigations after the
+        # prompt. The API says plainly when it ran out of room; ask it.
+        if getattr(resp, "stop_reason", None) == "max_tokens":
+            log.error(
+                "Checker hit the %d-token cap on %s and was cut off mid-answer. "
+                "This is a BUDGET failure, not a bad verdict — raise "
+                "CHECKER_MAX_TOKENS or lower CHECKER_EFFORT. Abstaining.",
+                CONFIG.models.checker_max_tokens, c.ticker,
+            )
+            return Verdict(
+                proposal=proposal,
+                verdict="abstain",
+                confidence=0.0,
+                reasoning=(
+                    f"truncated: response hit the "
+                    f"{CONFIG.models.checker_max_tokens}-token cap"
+                ),
+            )
         # Not content[0]: a thinking block sits at position 0 whenever the
         # model reasons, and reaching for .text on it raises. See
         # core/llm_client.first_text_block.
