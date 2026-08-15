@@ -57,6 +57,22 @@ _MOONSHOT_MODEL_PREFERENCE = (
     "moonshot-v1-8k",
 )
 
+# Substrings marking models that are the wrong tool for this job even when
+# the account has them. Code-specialised checkpoints answer a probability
+# question worse than the general chat models do, so they are tried last
+# rather than first when falling back to whatever the key actually has.
+_DEPRIORITISED_MODEL_MARKERS = ("code", "vision", "audio", "embed")
+
+# How many distinct model ids to try before giving up and letting the caller
+# fail over to the other provider. Bounded so a key with thirty models cannot
+# turn one candidate into thirty API calls.
+_MAX_MODEL_ATTEMPTS = 4
+
+# Truncation for provider error bodies in logs. The body is where the actual
+# reason lives ("model not found", "unsupported parameter"), and not logging
+# it is what turned a one-line diagnosis into two deploy cycles.
+_ERROR_BODY_CHARS = 400
+
 
 class LLMUnavailable(SystemicError):
     """No configured provider could produce a completion."""
@@ -76,53 +92,120 @@ class MoonshotBackend:
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout,
         )
-        self._model_resolved = False
+        self._probed = False
+        self._available: list[str] = []
+        self._rejected: set[str] = set()
+        self._no_temperature: set[str] = set()
 
     @property
     def configured(self) -> bool:
         return bool(self._api_key)
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
-        try:
-            return self._post(self.model, system, user, temperature)
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code != 404 or self._model_resolved:
-                raise
-            # 404 means "no such model for this key" far more often than it
-            # means "no such endpoint". Ask, don't guess.
-            resolved = self._resolve_model()
-            self._model_resolved = True
-            if not resolved or resolved == self.model:
-                raise
-            log.warning(
-                "Moonshot rejected model %r (404). The key does have %r — "
-                "switching to it for the rest of this process. Set "
-                "MOONSHOT_MODEL=%s to make this permanent.",
-                self.model, resolved, resolved,
-            )
-            self.model = resolved
-            return self._post(self.model, system, user, temperature)
+        """Post a completion, walking the account's model list if need be.
 
-    def _post(self, model: str, system: str, user: str, temperature: float) -> str:
-        resp = self._client.post(
-            "/chat/completions",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": temperature,
-            },
-        )
+        Both rejections we have actually seen in production are handled here,
+        because either one alone still leaves the Maker silent:
+
+          404 — the configured model is not on this key at all.
+          400 — the model exists but rejects the request as sent. Observed on
+                a newer checkpoint that will not accept `temperature`.
+
+        A 400 is therefore retried once on the same model without the
+        sampling parameter before moving on, and only then is the model
+        treated as unusable. Anything other than 400/404 propagates: a 401 is
+        a credential problem and trying four models with a bad key is four
+        ways to fail.
+        """
+        model = self.model
+        last_error: Optional[httpx.HTTPStatusError] = None
+
+        for _ in range(_MAX_MODEL_ATTEMPTS):
+            try:
+                text = self._post(model, system, user, temperature)
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status not in (400, 404):
+                    raise
+                if status == 400 and model not in self._no_temperature:
+                    # Try once without `temperature` before blaming the model.
+                    self._no_temperature.add(model)
+                    try:
+                        text = self._post(model, system, user, None)
+                    except httpx.HTTPStatusError as retry_error:
+                        self._no_temperature.discard(model)
+                        last_error = retry_error
+                        self._reject(model, retry_error)
+                        model = self._next_model()
+                        if model is None:
+                            raise last_error
+                        continue
+                    else:
+                        log.warning(
+                            "Moonshot model %r rejects `temperature`; sending "
+                            "without it from now on.", model,
+                        )
+                        self._adopt(model)
+                        return text
+                last_error = e
+                self._reject(model, e)
+                model = self._next_model()
+                if model is None:
+                    raise last_error
+                continue
+            else:
+                self._adopt(model)
+                return text
+
+        raise last_error if last_error else SystemicError("Moonshot: no usable model")
+
+    def _adopt(self, model: str) -> None:
+        if model != self.model:
+            log.warning(
+                "Moonshot: switched to model %r for the rest of this process. "
+                "Set MOONSHOT_MODEL=%s to make this permanent.", model, model,
+            )
+            self.model = model
+
+    def _reject(self, model: str, error: httpx.HTTPStatusError) -> None:
+        self._rejected.add(model)
+        body = ""
+        try:
+            body = error.response.text[:_ERROR_BODY_CHARS]
+        except Exception:                           # noqa: BLE001 - diagnostic only
+            pass
+        log.warning("Moonshot rejected model %r with HTTP %d: %s",
+                    model, error.response.status_code, body or "(no body)")
+
+    def _post(self, model: str, system: str, user: str,
+              temperature: Optional[float]) -> str:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if temperature is not None and model not in self._no_temperature:
+            payload["temperature"] = temperature
+        resp = self._client.post("/chat/completions", json=payload)
         resp.raise_for_status()
         try:
             return resp.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as e:
             raise SystemicError(f"Moonshot response had no message content: {e}") from e
 
-    def _resolve_model(self) -> Optional[str]:
-        """Ask the provider which models this key can use."""
+    def _next_model(self) -> Optional[str]:
+        """The next model id worth trying, probing the account once if needed."""
+        if not self._probed:
+            self._probed = True
+            self._available = self._list_models()
+        for candidate in self._ranked(self._available):
+            if candidate not in self._rejected:
+                return candidate
+        return None
+
+    def _list_models(self) -> list[str]:
         try:
             resp = self._client.get("/models")
             resp.raise_for_status()
@@ -131,22 +214,32 @@ class MoonshotBackend:
                 if isinstance(m, dict) and m.get("id")
             ]
         except Exception as e:                      # noqa: BLE001 - diagnostic path
-            log.warning("Could not list Moonshot models to recover from the 404: %s", e)
-            return None
+            log.warning("Could not list Moonshot models: %s", e)
+            return []
 
         if not available:
             log.warning("Moonshot listed no models for this key")
-            return None
+        else:
+            log.info("Moonshot models available to this key: %s",
+                     ", ".join(sorted(available)))
+        return available
 
-        log.info("Moonshot models available to this key: %s", ", ".join(sorted(available)))
-        for preferred in _MOONSHOT_MODEL_PREFERENCE:
-            if preferred in available:
-                return preferred
-        # Nothing recognised; take the first kimi-ish model, else the first.
-        for candidate in available:
-            if "kimi" in candidate.lower():
-                return candidate
-        return available[0]
+    @staticmethod
+    def _ranked(available: list[str]) -> list[str]:
+        """Known-good names first, then general models, then specialised ones."""
+        ranked = [m for m in _MOONSHOT_MODEL_PREFERENCE if m in available]
+        rest = [m for m in available if m not in ranked]
+
+        def specialised(model: str) -> bool:
+            lowered = model.lower()
+            return any(marker in lowered for marker in _DEPRIORITISED_MODEL_MARKERS)
+
+        general = sorted(m for m in rest if not specialised(m))
+        # Newest-looking general model first: "kimi-k3" should be tried before
+        # "kimi-k2.6" when neither is on the known-good list.
+        ranked += sorted(general, reverse=True)
+        ranked += sorted(m for m in rest if specialised(m))
+        return ranked
 
 
 class AnthropicBackend:

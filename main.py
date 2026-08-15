@@ -49,6 +49,23 @@ logging.basicConfig(
     level=CONFIG.log_level,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+# httpx logs every request at INFO as "HTTP Request: <METHOD> <full URL>".
+# Two reasons that is not acceptable here:
+#
+# 1. Secrets. Telegram puts the bot token in the URL path, so every alert
+#    printed a working bot token into Railway's log stream, where it is
+#    retained and visible to anyone with project access.
+# 2. Volume. A scan is 400 paginated calls, so each 30-second pass wrote 400
+#    lines of cursor noise, burying the handful of lines that say what the
+#    bot actually decided.
+#
+# WARNING keeps genuine transport failures and drops the per-request chatter.
+# Set HTTPX_LOG_LEVEL=INFO to get it back while debugging a request — but not
+# while a real bot token is configured.
+logging.getLogger("httpx").setLevel(CONFIG.httpx_log_level)
+logging.getLogger("httpcore").setLevel("WARNING")
+
 log = logging.getLogger("daemon_kalshi.main")
 
 

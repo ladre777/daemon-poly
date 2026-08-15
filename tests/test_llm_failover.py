@@ -277,3 +277,98 @@ def test_on_fallback_is_false_without_a_fallback_configured():
     primary = _StubBackend("moonshot", result="ok")
     llm = MakerLLM(primary=primary, fallback=None)
     assert llm.on_fallback is False
+
+
+# --------------------------------------------------------------------------
+# Moonshot 400 handling — the second production rejection
+# --------------------------------------------------------------------------
+
+def test_400_retries_without_temperature_before_blaming_the_model():
+    """Observed in production: a newer checkpoint rejects `temperature`."""
+    import json
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "kimi-k3"}]})
+        body = json.loads(request.content)
+        seen.append(("temperature" in body, body["model"]))
+        if "temperature" in body:
+            return httpx.Response(400, json={"error": {"message": "unsupported parameter"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    backend = _moonshot_with_transport(handler, model="kimi-k3")
+    assert backend.complete("sys", "user") == "ok"
+    assert seen == [(True, "kimi-k3"), (False, "kimi-k3")]
+
+    # And it remembers, rather than paying the 400 on every later call.
+    assert backend.complete("sys", "user") == "ok"
+    assert seen[-1] == (False, "kimi-k3")
+
+
+def test_walks_to_the_next_model_when_one_is_unusable():
+    """404 on the configured model, 400 on the first replacement."""
+    import json
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [
+                {"id": "kimi-k3"}, {"id": "kimi-k2.6"},
+            ]})
+        model = json.loads(request.content)["model"]
+        if model == "kimi-k2-turbo-preview":
+            return httpx.Response(404, json={})
+        if model == "kimi-k3":
+            return httpx.Response(400, json={"error": {"message": "nope"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    backend = _moonshot_with_transport(handler)
+    assert backend.complete("sys", "user") == "ok"
+    assert backend.model == "kimi-k2.6"
+
+
+def test_model_walk_is_bounded():
+    """A key with many models must not turn one candidate into many calls."""
+    import json
+    posts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={
+                "data": [{"id": f"kimi-m{i}"} for i in range(20)]
+            })
+        posts.append(json.loads(request.content)["model"])
+        return httpx.Response(404, json={})
+
+    backend = _moonshot_with_transport(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        backend.complete("sys", "user")
+    assert len(set(posts)) <= 4
+
+
+def test_auth_failure_is_not_retried_across_models():
+    """A 401 is a credential problem; four models is four ways to fail."""
+    posts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request.url.path)
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+    backend = _moonshot_with_transport(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        backend.complete("sys", "user")
+    assert len(posts) == 1
+
+
+def test_code_models_are_tried_after_general_ones():
+    ranked = MoonshotBackend._ranked(
+        ["kimi-k2.7-code", "kimi-k2.6", "kimi-k3", "kimi-k2.7-code-highspeed"]
+    )
+    assert ranked[0] == "kimi-k3"           # newest general model first
+    assert ranked[1] == "kimi-k2.6"
+    assert all("code" in m for m in ranked[2:])
+
+
+def test_known_good_names_outrank_everything():
+    ranked = MoonshotBackend._ranked(["kimi-k3", "kimi-k2-turbo-preview"])
+    assert ranked[0] == "kimi-k2-turbo-preview"

@@ -325,6 +325,11 @@ class AppConfig:
     scout_max_pages: int = _int("SCOUT_MAX_PAGES", 400)
     ledger_db_path: str = os.getenv("LEDGER_DB_PATH", "/data/daemon_kalshi.db")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    # httpx's INFO logging prints full request URLs, which for Telegram means
+    # printing the bot token on every alert, and for Scout means 400 lines of
+    # pagination cursors per pass. Kept at WARNING; raise it deliberately and
+    # temporarily when debugging a specific request.
+    httpx_log_level: str = os.getenv("HTTPX_LOG_LEVEL", "WARNING")
 
 
 CONFIG = AppConfig()

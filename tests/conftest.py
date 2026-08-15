@@ -110,6 +110,8 @@ def make_candidate(
     yes_ask=52.0,
     volume=10_000.0,
     event_ticker="KXTEST-25AUG14",
+    taxonomy_category="",
+    taxonomy_subcategory="",
 ) -> Candidate:
     return Candidate(
         ticker=ticker,
@@ -120,6 +122,8 @@ def make_candidate(
         volume=volume,
         close_time="2026-12-31T00:00:00Z",
         event_ticker=event_ticker,
+        taxonomy_category=taxonomy_category,
+        taxonomy_subcategory=taxonomy_subcategory,
     )
 
 
