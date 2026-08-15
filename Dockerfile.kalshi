@@ -37,11 +37,14 @@ COPY core/ ./core/
 COPY workers/ ./workers/
 COPY memory/ ./memory/
 
-# Default location for the SQLite ledger. Mount a Railway Volume here, or
-# the database is ephemeral and every redeploy wipes order, fill and
-# settlement history along with the kill-switch state. main.py refuses to
+# Default location for the SQLite ledger. Attach a Railway Volume mounted at
+# /data, or the database is ephemeral and every redeploy wipes order, fill
+# and settlement history along with the kill-switch state. main.py refuses to
 # start in prod without durable storage; see docs/SAFETY.md.
+#
+# Deliberately no `VOLUME ["/data"]` instruction: Railway rejects the build
+# outright with "docker VOLUME at Line N is not supported, use Railway
+# Volumes". Persistence is attached to the service, not declared in the image.
 ENV LEDGER_DB_PATH=/data/daemon_kalshi.db
-VOLUME ["/data"]
 
 CMD ["python", "main.py"]
