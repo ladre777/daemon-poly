@@ -1,0 +1,8 @@
+# Test-only dependencies. Install alongside requirements.txt:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   python -m pytest
+pytest>=8.0
+
+# Lint. Configured in ruff.toml to the rules that catch defects rather than
+# the ones that restyle working code — see the comment there.
+ruff>=0.6
