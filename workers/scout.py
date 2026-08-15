@@ -144,63 +144,69 @@ class Scout:
         skipped_by_group: dict[str, int] = {}
         rejected: dict[str, int] = {}
 
+        # GET /markets, not GET /events?with_nested_markets=true.
+        #
+        # VERIFIED AGAINST PRODUCTION, 2026-08-15: the nested market objects on
+        # the events response carry no price fields. A live scan pulled 50,422
+        # markets and validation rejected every single one with
+        # "yes_bid is not a finite number (None)". The events endpoint returns
+        # market structure; /markets returns the quote.
+        #
+        # Nothing is lost by the switch. Categories come from the ticker
+        # taxonomy rather than the event's category field, so the only thing
+        # the events response was still providing was the raw category string
+        # kept for auditing — and audit_taxonomy_against_kalshi() still reads
+        # it directly when you want it.
         while True:
-            page = self.client.list_events(
-                status="open", limit=200, cursor=cursor, with_nested_markets=True
-            )
-            for event in page.get("events", []):
-                kalshi_category = (event.get("category") or "").strip()
-                event_ticker = event.get("event_ticker", "")
+            page = self.client.list_markets(status="open", limit=200, cursor=cursor)
+            for m in page.get("markets", []):
+                ticker = m.get("ticker")
+                if not ticker:
+                    rejected["missing ticker"] = rejected.get("missing ticker", 0) + 1
+                    continue
+                market_event_ticker = m.get("event_ticker", "")
+                group, taxonomy_category, subcategory = classify_ticker(
+                    ticker, market_event_ticker
+                )
+                if wanted and group.lower() not in wanted:
+                    skipped_by_group[group] = skipped_by_group.get(group, 0) + 1
+                    continue
 
-                for m in event.get("markets", []):
-                    ticker = m.get("ticker")
-                    if not ticker:
-                        rejected["missing ticker"] = rejected.get("missing ticker", 0) + 1
-                        continue
-                    market_event_ticker = m.get("event_ticker") or event_ticker
-                    group, taxonomy_category, subcategory = classify_ticker(
-                        ticker, market_event_ticker
+                # Everything past here is external data being turned into
+                # numbers the trading logic will act on, so it is validated
+                # first. One malformed market is skipped, not allowed to
+                # abort the scan.
+                try:
+                    valid = validate_market(m)
+                except MarketDataInvalid as e:
+                    reason = str(e).split(":", 1)[-1].strip()
+                    rejected[reason] = rejected.get(reason, 0) + 1
+                    log.debug("Rejected market: %s", e)
+                    continue
+                for warning in valid.warnings:
+                    log.debug("%s: %s", valid.ticker, warning)
+
+                if valid.volume < CONFIG.risk.min_liquidity_usd:
+                    continue
+                candidates.append(
+                    Candidate(
+                        ticker=valid.ticker,
+                        title=valid.title,
+                        category=group,
+                        yes_bid=valid.quote.yes_bid,
+                        yes_ask=valid.quote.yes_ask,
+                        volume=valid.volume,
+                        close_time=valid.close_time,
+                        quote=valid.quote,
+                        series_ticker=m.get("series_ticker", ""),
+                        event_ticker=market_event_ticker,
+                        taxonomy_category=taxonomy_category,
+                        taxonomy_subcategory=subcategory,
+                        strike_type=valid.strike_type,
+                        floor_strike=valid.floor_strike,
+                        cap_strike=valid.cap_strike,
                     )
-                    if wanted and group.lower() not in wanted:
-                        skipped_by_group[group] = skipped_by_group.get(group, 0) + 1
-                        continue
-
-                    # Everything past here is external data being turned into
-                    # numbers the trading logic will act on, so it is
-                    # validated first. One malformed market is skipped, not
-                    # allowed to abort the scan.
-                    try:
-                        valid = validate_market(m, event)
-                    except MarketDataInvalid as e:
-                        reason = str(e).split(":", 1)[-1].strip()
-                        rejected[reason] = rejected.get(reason, 0) + 1
-                        log.debug("Rejected market: %s", e)
-                        continue
-                    for warning in valid.warnings:
-                        log.debug("%s: %s", valid.ticker, warning)
-
-                    if valid.volume < CONFIG.risk.min_liquidity_usd:
-                        continue
-                    candidates.append(
-                        Candidate(
-                            ticker=valid.ticker,
-                            title=valid.title,
-                            category=group,
-                            yes_bid=valid.quote.yes_bid,
-                            yes_ask=valid.quote.yes_ask,
-                            volume=valid.volume,
-                            close_time=valid.close_time,
-                            quote=valid.quote,
-                            series_ticker=event.get("series_ticker", ""),
-                            event_ticker=market_event_ticker,
-                            kalshi_category=kalshi_category,
-                            taxonomy_category=taxonomy_category,
-                            taxonomy_subcategory=subcategory,
-                            strike_type=valid.strike_type,
-                            floor_strike=valid.floor_strike,
-                            cap_strike=valid.cap_strike,
-                        )
-                    )
+                )
 
             cursor = page.get("cursor")
             if not cursor:

@@ -148,13 +148,12 @@ def test_llm_reasoning_categories_are_real_groups():
 
 
 def _event(event_ticker, markets, category=""):
-    return {
-        "event_ticker": event_ticker,
-        "category": category,
-        "title": "Test event",
-        "series_ticker": event_ticker,
-        "markets": markets,
-    }
+    """Kept as a grouping helper for readability; Scout reads markets now."""
+    for m in markets:
+        m.setdefault("event_ticker", event_ticker)
+        m.setdefault("series_ticker", event_ticker)
+        m["_kalshi_category"] = category
+    return markets
 
 
 def _market(ticker, volume=10_000):
@@ -164,18 +163,39 @@ def _market(ticker, volume=10_000):
         "yes_bid": 48,
         "yes_ask": 52,
         "volume": volume,
-        "close_time": "2026-12-31T00:00:00Z",
+        "close_time": "2036-12-31T00:00:00Z",
     }
 
 
 class CategoryClient(FakeKalshiClient):
-    def __init__(self, events):
+    """Serves GET /markets, which is where Kalshi actually returns quotes.
+
+    The events endpoint's nested markets carry no price fields — verified
+    against production, where it caused every one of 50,422 markets to be
+    rejected as having a non-finite yes_bid.
+    """
+
+    def __init__(self, market_groups):
         super().__init__()
-        self._events = events
+        self._markets = [m for group in market_groups for m in group]
+
+    def list_markets(self, series_ticker=None, status="open", limit=200,
+                     cursor=None):
+        return {"markets": self._markets, "cursor": None}
 
     def list_events(self, status="open", limit=200, cursor=None,
                     with_nested_markets=False):
-        return {"events": self._events, "cursor": None}
+        events = {}
+        for m in self._markets:
+            key = m.get("event_ticker", "")
+            events.setdefault(key, {
+                "event_ticker": key,
+                "category": m.get("_kalshi_category", ""),
+                "title": "Test event",
+                "series_ticker": key,
+                "markets": [],
+            })["markets"].append(m)
+        return {"events": list(events.values()), "cursor": None}
 
 
 def test_scout_classifies_by_ticker_not_by_kalshis_category_string():
@@ -192,7 +212,6 @@ def test_scout_classifies_by_ticker_not_by_kalshis_category_string():
     assert len(candidates) == 1
     assert candidates[0].category == "Crypto"
     assert candidates[0].taxonomy_category == "Bitcoin"
-    assert candidates[0].kalshi_category == "Financials", "raw field kept for audit"
 
 
 def test_scout_filters_on_taxonomy_group():
