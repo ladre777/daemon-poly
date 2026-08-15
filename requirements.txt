@@ -1,0 +1,56 @@
+# DÆMON-KALSHI dependencies.
+#
+# One file, deliberately. This repository previously carried three
+# overlapping lists — requirements.txt (shared with an unrelated Polymarket
+# bot, installing py-clob-client and polymarket-us here for no reason),
+# requirements-kalshi.txt, and requirements-dev.txt — with the Dockerfile
+# and CI reading different ones. Nothing downstream benefited from the
+# split, and the divergence is the sort that only surfaces at deploy time.
+#
+# Every entry below is something this codebase actually imports. Derived by
+# walking the AST of every .py file under core/, workers/, memory/,
+# backtest/, tests/, main.py and config.py and subtracting the standard
+# library, rather than by inheriting whatever the previous list happened to
+# contain. `requests` was in the old shared file and is imported nowhere;
+# it is gone.
+#
+# Versions are floored at what was actually tested and capped below the next
+# breaking release. The floors matter: the previous list capped
+# cryptography<46 and websockets<16, but the suite that certifies this build
+# runs against cryptography 50 and websockets 17 — those ceilings excluded
+# the very versions under test, which is worse than no pin at all because it
+# reads like a measurement.
+
+# --- runtime ---------------------------------------------------------------
+
+# Every HTTP call in the repo: Kalshi REST, ESPN, NOAA, FRED, CoinGecko,
+# Yahoo, Telegram, Moonshot.
+httpx>=0.28,<0.29
+
+# RSA-PSS request signing for Kalshi authentication (core/kalshi_client.py).
+cryptography>=50.0,<51
+
+# Checker verdicts, the Reflector, and the Maker's fallback provider.
+anthropic>=0.122,<1.0
+
+# Kalshi market-data WebSocket (core/kalshi_ws.py).
+#
+# NOTE: nothing currently imports core/kalshi_ws.py — the live path polls
+# GET /markets instead. The module is retained because it is part of the
+# ported codebase, so its dependency is listed here rather than silently
+# dropped. If the WebSocket path is not going to be used, delete the module
+# and this line together.
+websockets>=17.0,<18
+
+# Loads .env in local development. On Railway the real environment variables
+# are already injected, and config.py degrades gracefully without this.
+python-dotenv>=1.2,<2.0
+
+# --- development -----------------------------------------------------------
+# Needed by the test suite and by ruff.toml. Present in the runtime image as
+# well, which costs a few megabytes and keeps there being exactly one
+# dependency file to reason about.
+
+pytest>=9.1,<10
+
+ruff>=0.16,<0.17

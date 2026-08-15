@@ -1,18 +1,20 @@
 # Build for the DÆMON-KALSHI service.
 #
-# A Dockerfile rather than Nixpacks, deliberately. This repo root is
-# ambiguous to a build autodetector: it contains package.json and
-# pnpm-lock.yaml (a Node pnpm workspace), nixpacks.toml (Python), a
-# Dockerfile whose CMD runs the *Polymarket* bot, and .replit. Nixpacks
-# inspects the tree and guesses, and the guess is not stable across builder
-# versions — a deploy that works today can start pulling in a Node phase, or
-# pick the wrong start command, after an upstream change nobody here made.
+# A Dockerfile rather than an autodetected builder, deliberately. Build
+# autodetection inspects the tree and guesses, and the guess is not stable
+# across builder versions — a deploy that works today can pick a different
+# phase or start command after an upstream change nobody here made. This is
+# the build that was proven working on the live Railway service.
 #
 # This file removes the guessing. One base image, one dependency file, one
-# start command, all explicit.
+# start command, all explicit, and it is the single source of truth for how
+# this service builds: railway.toml points at it rather than declaring a
+# builder of its own.
 #
-# Point a Railway service at it by setting:
-#   RAILWAY_DOCKERFILE_PATH=Dockerfile.kalshi
+# Railway builds with a Dockerfile whenever it finds one. railway.toml also
+# names this file explicitly via build.dockerfilePath, so the non-standard
+# filename is honoured without needing RAILWAY_DOCKERFILE_PATH set on the
+# service. Setting that variable as well is harmless and still works.
 FROM python:3.11-slim
 
 # Fail fast and log immediately: without PYTHONUNBUFFERED, output sits in a
@@ -26,12 +28,12 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Dependencies first so they cache independently of source changes.
-COPY requirements-kalshi.txt .
-RUN pip install --no-cache-dir -r requirements-kalshi.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Only what the daemon actually needs at runtime. Copying the whole tree
-# would drag in the Polymarket bot, the Node workspace, ~200KB of lockfile
-# and the attached_assets directory — none of which this service runs.
+# Only what the daemon actually needs at runtime. tests/, backtest/ and
+# docs/ are deliberately absent: verified by AST walk, nothing reachable
+# from main.py imports them, so they are build context rather than runtime.
 COPY main.py config.py ./
 COPY core/ ./core/
 COPY workers/ ./workers/

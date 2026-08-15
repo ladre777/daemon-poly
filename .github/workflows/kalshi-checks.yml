@@ -16,8 +16,9 @@ on:
       - "tests/**"
       - "main.py"
       - "config.py"
-      - "requirements-kalshi.txt"
-      - "requirements-dev.txt"
+      - "requirements.txt"
+      - "Dockerfile.kalshi"
+      - "railway.toml"
       - ".github/workflows/kalshi-checks.yml"
   pull_request:
 
@@ -32,11 +33,10 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install pinned runtime + test dependencies
+      - name: Install pinned dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-kalshi.txt -r requirements-dev.txt
-          pip install ruff
+          pip install -r requirements.txt
 
       - name: Lint
         run: ruff check core workers memory backtest tests main.py config.py
