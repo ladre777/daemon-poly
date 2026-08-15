@@ -154,6 +154,37 @@ class Health:
         return True
 
 
+def install_shutdown_handlers() -> dict:
+    """Install SIGTERM/SIGINT handlers and return the shutdown flag.
+
+    Railway sends SIGTERM on every redeploy, so without this a deploy looks
+    identical to a crash: no shutdown alert, and any in-flight order left for
+    the next process to discover during reconciliation.
+
+    The handler only *sets a flag*. It deliberately does not raise, exit, or
+    interrupt anything, because the moments a redeploy is most likely to
+    arrive — mid-scan, mid-submission, mid-reconciliation — are exactly the
+    moments where being interrupted does damage. Tearing down between
+    `place_order` returning and the fill being written to the ledger converts
+    an orderly redeploy into an unrecorded position. The loop checks the flag
+    at its own boundaries and finishes what it started.
+
+    Returned as a mutable dict rather than a closure variable so the loop and
+    the tests can both observe it.
+    """
+    shutdown = {"signal": None}
+
+    def _on_signal(signum, _frame):
+        name = signal.Signals(signum).name
+        if shutdown["signal"] is None:
+            log.warning("%s received — finishing this pass, then shutting down", name)
+            shutdown["signal"] = name
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _on_signal)
+    return shutdown
+
+
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
              notifier=None, health=None):
     """One scan pass. Returns the number of orders that actually filled.
@@ -509,6 +540,21 @@ def main():
         _alert(notifier, "notify_systemic_error", "reconciliation",
                f"Startup reconciliation failed, refusing to start: {e}")
         notifier.flush()
+        # Refusing to start is right. Refusing to start *instantly* is not:
+        # the supervisor restarts the container immediately, so the process
+        # re-runs this same failing call every couple of seconds forever. If
+        # the cause is the exchange rate-limiting or throttling the key, that
+        # restart loop is actively making the problem worse — several hundred
+        # failed auth attempts per hour against a key already in trouble.
+        #
+        # Holding before exit converts the loop into a slow retry, which is
+        # what a transient outage needs and what a genuinely revoked key
+        # costs nothing.
+        hold = CONFIG.startup_failure_hold_seconds
+        if hold > 0:
+            log.error("Startup reconciliation failed; holding %ds before exit so "
+                      "the restart loop does not hammer the exchange", hold)
+            time.sleep(hold)
         raise SystemExit(
             f"Startup reconciliation with Kalshi failed: {e}\n"
             f"Refusing to start — the bot cannot know its own exposure."
@@ -540,21 +586,7 @@ def main():
         bankroll_usd=risk.effective_bankroll_usd(snapshot),
     )
 
-    # Graceful shutdown. Railway sends SIGTERM on every redeploy, so without
-    # this a deploy looks identical to a crash: no alert, and any in-flight
-    # order left for the next process to reconcile. The handler only sets a
-    # flag — the loop finishes its current pass rather than being interrupted
-    # partway through an order.
-    shutdown = {"signal": None}
-
-    def _on_signal(signum, _frame):
-        name = signal.Signals(signum).name
-        if shutdown["signal"] is None:
-            log.warning("%s received — finishing this pass, then shutting down", name)
-            shutdown["signal"] = name
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, _on_signal)
+    shutdown = install_shutdown_handlers()
 
     pass_count = 0
     exit_reason = "loop ended"

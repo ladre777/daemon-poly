@@ -21,6 +21,7 @@ it with production keys.
 from __future__ import annotations
 
 import base64
+import threading
 import time
 import logging
 from typing import Any, Optional
@@ -77,6 +78,10 @@ class KalshiClient:
             self.cfg.load_private_key_bytes(), password=None
         )
         self._http = httpx.Client(base_url=self.cfg.rest_base, timeout=timeout)
+        # Outbound pacing state. Locked because settlement reconciliation and
+        # the main loop share one client across threads.
+        self._pace_lock = threading.Lock()
+        self._next_request_at = 0.0
 
     def close(self):
         self._http.close()
@@ -113,6 +118,32 @@ class KalshiClient:
             "Content-Type": "application/json",
         }
 
+    # -- outbound pacing ----------------------------------------------------
+
+    def _pace(self) -> None:
+        """Hold every request to a minimum spacing.
+
+        A full Scout pass is 400 paginated calls. At the poll interval this
+        repo shipped with, that was a sustained ~8 requests/second against
+        Kalshi, all day, from a container that restarts on every deploy —
+        and each restart immediately re-ran the whole scan. Reacting to 429s
+        after the fact is not enough when the steady-state rate is the
+        problem: by then the damage to the key's standing is done.
+
+        This is a floor on spacing, not a token bucket. It costs nothing when
+        the caller is slower than the limit, and it is the difference between
+        a scan that takes 50 seconds and one that takes 80 — against a poll
+        interval measured in minutes, that is not a cost worth optimising.
+        """
+        interval = CONFIG.kalshi.min_request_interval_seconds
+        if interval <= 0:
+            return
+        with self._pace_lock:
+            wait = self._next_request_at - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._next_request_at = time.monotonic() + interval
+
     # -- core request with retry/backoff ------------------------------------
 
     def _request(
@@ -124,6 +155,7 @@ class KalshiClient:
         max_retries: int = 3,
     ) -> dict:
         full_path = f"/trade-api/v2{endpoint}"
+        self._pace()
         headers = self._auth_headers(method, full_path)
 
         backoff = 1.0

@@ -40,6 +40,13 @@ class KalshiConfig:
     # directly in an env var since there's no persistent filesystem to mount.
     private_key_path: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
     private_key_pem: str = os.getenv("KALSHI_PRIVATE_KEY_PEM", "")
+    # Minimum spacing between outbound Kalshi requests, in seconds. 0.15s is
+    # ~6.7 requests/second. A full Scout pass is 400 paginated calls, so
+    # without a floor here the bot ran at roughly 8/s sustained and re-ran
+    # the whole scan on every container restart. Reacting to 429s afterwards
+    # does not undo a rate that was too high to begin with. Set to 0 to
+    # disable (tests do).
+    min_request_interval_seconds: float = _float("KALSHI_MIN_REQUEST_INTERVAL", 0.15)
 
     @property
     def rest_base(self) -> str:
@@ -308,7 +315,19 @@ class AppConfig:
     # provider is presumed down and the pass stops with an alert. One bad
     # response should cost one candidate, not the whole scan.
     model_failure_threshold: int = _int("MODEL_FAILURE_THRESHOLD", 5)
-    scout_poll_seconds: int = _int("SCOUT_POLL_SECONDS", 30)
+    # How long to hold before exiting when startup reconciliation fails, so
+    # the supervisor's restart loop becomes a slow retry rather than a
+    # sustained burst of failing auth calls. See main().
+    startup_failure_hold_seconds: int = _int("STARTUP_FAILURE_HOLD_SECONDS", 60)
+    # Gap between scan passes.
+    #
+    # Was 30s, which is what a bot scanning a handful of markets wants. This
+    # one paginates the entire ~80,000-market catalog every pass, so 30s meant
+    # re-reading all of Kalshi twice a minute, forever, to act on at most a
+    # few dozen candidates. Nothing downstream benefits: the LLM call cap
+    # bounds how many candidates a pass can even evaluate, and market prices
+    # do not move enough in 30 seconds to justify 400 more API calls.
+    scout_poll_seconds: int = _int("SCOUT_POLL_SECONDS", 180)
     # Safety valve on pages fetched per scan, 200 markets each.
     #
     # MEASURED IN PRODUCTION, 2026-08-15: GET /markets returns a page in about
