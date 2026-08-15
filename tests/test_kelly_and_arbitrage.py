@@ -315,3 +315,61 @@ def test_describe_states_the_real_cost_including_fees():
     text = arb.describe()
     assert "fees" in text and "KXA-1" in text
     assert "per pair" in text
+
+
+# --------------------------------------------------------------------------
+# the two merged mechanisms together
+# --------------------------------------------------------------------------
+#
+# Kelly (this branch) and unrealized-PnL loss control (PR #4) were developed
+# independently and both touch the sizing gates. The merge was textually
+# clean, which is not the same as correct, so their interaction is pinned
+# here rather than assumed.
+
+
+def test_kelly_and_the_unrealized_loss_budget_both_apply(risk):
+    """Both gates live in one list, and the smallest still wins."""
+    from core.account_state import Position
+
+    CONFIG.risk.kelly_enabled = True
+    CONFIG.risk.kelly_fraction = 0.25
+
+    # $80 down on open positions against a $100 daily limit leaves $20 of new
+    # risk — tighter than the Kelly cap on a strong edge, so the loss budget
+    # should bind.
+    losing = AccountSnapshot(
+        balance_cents=100_000.0,
+        available_balance_cents=100_000.0,
+        positions=[Position(ticker="KXOTHER-1", side="yes", quantity=400,
+                            avg_price_cents=60.0, mark_price_cents=40.0,
+                            event_ticker="KXOTHER")],
+        reconciled_at=time.time(),
+    )
+    decision = risk.evaluate(make_verdict(maker_probability=0.95), losing)
+    assert decision.approved
+    assert decision.detail["binding_constraint"] == "daily loss budget"
+    assert decision.detail["unrealized_pnl_today"] == pytest.approx(-80.0)
+
+    # With a flat book, a thin edge puts Kelly back in charge.
+    risk.reset_kill_switch()
+    thin = risk.evaluate(make_verdict(maker_probability=0.60), snapshot())
+    assert thin.approved
+    assert thin.detail["binding_constraint"] == "kelly cap"
+
+
+def test_an_unrealized_loss_still_trips_the_switch_with_kelly_on(risk):
+    """Kelly must not accidentally mask the drawdown halt."""
+    from core.account_state import Position
+    from workers.risk_guardrail import KillSwitchTripped
+
+    CONFIG.risk.kelly_enabled = True
+    deep = AccountSnapshot(
+        balance_cents=100_000.0,
+        available_balance_cents=100_000.0,
+        positions=[Position(ticker="KXOTHER-1", side="yes", quantity=500,
+                            avg_price_cents=60.0, mark_price_cents=35.0,
+                            event_ticker="KXOTHER")],
+        reconciled_at=time.time(),
+    )
+    with pytest.raises(KillSwitchTripped):
+        risk.evaluate(make_verdict(), deep)
