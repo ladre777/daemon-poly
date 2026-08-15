@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 from config import CONFIG
@@ -32,7 +34,7 @@ from memory.db import connect, transaction
 
 log = logging.getLogger("daemon_kalshi.order_store")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -113,6 +115,31 @@ CREATE INDEX IF NOT EXISTS idx_settlements_ticker ON settlements(ticker);
 
 -- Last known exchange truth, so a restart has something to compare against
 -- and can tell "never reconciled" apart from "reconciled a while ago".
+-- Alert suppression for a standing signal.
+--
+-- Separate from `orders` on purpose. An order record answers "did we submit
+-- this intent", and its identity deliberately includes an hourly dedupe
+-- bucket so an unchanged signal may be retried later in the day. That is
+-- correct for submission and wrong for alerting: it re-alerted the same
+-- standing trade once an hour, every hour, as though each were news.
+--
+-- This table answers the different question "have we already told the
+-- operator about this signal, and has anything changed since". Its key
+-- excludes the time bucket, so the same signal is one row all day.
+CREATE TABLE IF NOT EXISTS signal_alerts (
+    signal_key        TEXT PRIMARY KEY,
+    ticker            TEXT NOT NULL,
+    action            TEXT NOT NULL,
+    side              TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    last_alerted_at   REAL NOT NULL,
+    last_edge         REAL,
+    last_price_cents  REAL,
+    alert_count       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_alerts_ticker ON signal_alerts(ticker);
+
 CREATE TABLE IF NOT EXISTS account_snapshot (
     id                      INTEGER PRIMARY KEY CHECK (id = 1),
     balance_cents           REAL,
@@ -444,3 +471,121 @@ def _row_to_fill(row) -> Fill:
         client_order_id=row["client_order_id"],
         created_at=row["created_at"],
     )
+
+
+# -- signal alert suppression ------------------------------------------------
+#
+# Appended as module-level helpers rather than OrderStore methods so the
+# alerting concern stays visibly separate from order lifecycle: these read and
+# write one table and know nothing about orders, fills, or settlement.
+
+def signal_key(ticker: str, action: str, side: str, source: str = "llm") -> str:
+    """Identity of a *signal*, deliberately excluding the time bucket.
+
+    This is the difference that fixes the bug. `OrderIntent.intent_key()`
+    includes `dedupe_bucket`, so the same standing trade is a new identity
+    every hour — correct for "may we submit again", wrong for "is this news".
+    """
+    return "|".join([ticker, action.lower(), side.lower(), source.lower()])
+
+
+@dataclass
+class AlertDecision:
+    """Whether to alert, and the reason — which the alert itself can quote."""
+
+    should_alert: bool
+    reason: str
+    previous_edge: Optional[float] = None
+    previous_price_cents: Optional[float] = None
+
+
+class SignalAlertStore:
+    """Remembers what the operator has already been told about a signal."""
+
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or CONFIG.ledger_db_path
+        with connect(self.db_path) as conn:
+            conn.executescript(SCHEMA)
+            conn.commit()
+
+    def evaluate(self, key: str, edge: Optional[float],
+                 price_cents: Optional[float], now: float = None) -> AlertDecision:
+        """Decide whether this signal is worth telling the operator about.
+
+        Suppression is never permanent. A signal goes quiet only while it is
+        genuinely unchanged, and any of three things brings it back: it is new,
+        it moved, or the reminder interval elapsed. A standing trade that is
+        silently forgotten is its own failure mode.
+        """
+        now = time.time() if now is None else now
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT last_alerted_at, last_edge, last_price_cents "
+                "FROM signal_alerts WHERE signal_key = ?", (key,)
+            ).fetchone()
+
+        if row is None:
+            return AlertDecision(True, "new signal")
+
+        last_at, last_edge, last_price = row[0], row[1], row[2]
+
+        if edge is not None and last_edge is not None:
+            moved = abs(edge - last_edge)
+            if moved >= CONFIG.telegram.alert_edge_move_threshold:
+                return AlertDecision(
+                    True,
+                    f"edge moved {moved * 100:.1f}pp "
+                    f"({last_edge * 100:.1f}% -> {edge * 100:.1f}%)",
+                    last_edge, last_price,
+                )
+
+        if price_cents is not None and last_price is not None:
+            moved_c = abs(price_cents - last_price)
+            if moved_c >= CONFIG.telegram.alert_price_move_cents:
+                return AlertDecision(
+                    True,
+                    f"price moved {moved_c:.0f}c ({last_price:.0f}c -> {price_cents:.0f}c)",
+                    last_edge, last_price,
+                )
+
+        age = now - last_at
+        ttl = CONFIG.telegram.alert_reminder_seconds
+        if ttl > 0 and age >= ttl:
+            return AlertDecision(True, f"still standing after {age / 3600:.1f}h",
+                                 last_edge, last_price)
+
+        return AlertDecision(
+            False,
+            f"unchanged, last alerted {age / 60:.0f}m ago",
+            last_edge, last_price,
+        )
+
+    def record(self, key: str, ticker: str, action: str, side: str, source: str,
+               edge: Optional[float], price_cents: Optional[float],
+               now: float = None) -> None:
+        """Note that the operator has now been told."""
+        now = time.time() if now is None else now
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO signal_alerts (
+                    signal_key, ticker, action, side, source,
+                    last_alerted_at, last_edge, last_price_cents, alert_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(signal_key) DO UPDATE SET
+                    last_alerted_at  = excluded.last_alerted_at,
+                    last_edge        = excluded.last_edge,
+                    last_price_cents = excluded.last_price_cents,
+                    alert_count      = signal_alerts.alert_count + 1
+                """,
+                (key, ticker, action.lower(), side.lower(), source.lower(),
+                 now, edge, price_cents),
+            )
+
+    def get(self, key: str) -> Optional[dict]:
+        with connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM signal_alerts WHERE signal_key = ?", (key,)
+            ).fetchone()
+        return dict(row) if row else None
