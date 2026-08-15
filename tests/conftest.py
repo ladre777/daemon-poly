@@ -28,6 +28,7 @@ from tests.fakes import FakeKalshiClient  # noqa: E402
 #: App-level CONFIG attributes tests mutate. Restored alongside CONFIG.risk.
 _APP_FIELDS = (
     "telegram",
+    "arbitrage",
     "scout_categories",
     "llm_reasoning_categories",
     "priority_keywords",

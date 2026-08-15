@@ -130,7 +130,40 @@ class QuantMaker:
                 log.info("Quant path declining %s: %s", key, why)
             return False
         seconds = candidate.seconds_to_close
-        return seconds is not None and seconds > 0
+        if seconds is None or seconds <= 0:
+            return False
+        if self._in_settlement_blackout(spec, seconds):
+            return False
+        return True
+
+    def _in_settlement_blackout(self, spec, seconds_to_close: float) -> bool:
+        """True inside the window where spot pricing is least defensible.
+
+        Kalshi's crypto contracts settle on a 60-second average of the CF
+        Benchmarks Real-Time Index, so the last minute of a contract's life is
+        not a price to be predicted — it is the average currently being taken.
+        A point-in-time CoinGecko quote is furthest from the settlement value
+        precisely there: the averaging damps the very move the model is
+        reacting to, and spot-vs-RTI divergence is unhedged.
+
+        This is independent of the ``verified`` flag on purpose. Verifying a
+        family means confirming what it settles on; it does not make a spot
+        snapshot a good estimate of a 60-second index mean.
+        """
+        blackout = CONFIG.risk.crypto_settlement_blackout_seconds
+        if blackout <= 0 or spec is None or spec.source != "crypto":
+            return False
+        if seconds_to_close > blackout:
+            return False
+        key = f"{spec.prefix}:blackout"
+        if key not in self._declined:
+            self._declined[key] = "settlement blackout"
+            log.info(
+                "Quant path declining %s: %.0fs to close is inside the %.0fs "
+                "crypto settlement blackout (settles on a 60s RTI average, "
+                "not a spot print)", spec.prefix, seconds_to_close, blackout,
+            )
+        return True
 
     # -- pricing -----------------------------------------------------------
 
@@ -157,6 +190,10 @@ class QuantMaker:
 
         seconds_to_expiry = candidate.seconds_to_close
         if not seconds_to_expiry or seconds_to_expiry <= 0:
+            return None
+        # Re-checked here as well as in can_handle: propose() is public, and a
+        # gate that only exists on one of two entry points is not a gate.
+        if self._in_settlement_blackout(spec, seconds_to_expiry):
             return None
 
         history = self.spot.get_history(spec.symbol)

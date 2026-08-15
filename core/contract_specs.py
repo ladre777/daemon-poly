@@ -33,6 +33,31 @@ refused by the quant path unless ``QUANT_ALLOW_UNVERIFIED=true``, which exists
 for demo experimentation and is off by default. Refusing is not a
 conservatism tax: an unverified mapping produces confident-looking
 probabilities from the wrong number, which is worse than no probability.
+
+Crypto settlement, confirmed 2026-08-15
+---------------------------------------
+The caution above turned out to be justified, and the specific guess in the
+first bullet was right. Kalshi's crypto contracts settle on the **CF
+Benchmarks Real-Time Index, averaged over the final 60 seconds before the
+window closes** — not on a spot-price snapshot, and not on CoinGecko at all
+(Kalshi Help Center, "Crypto Markets"). The RTI itself aggregates order data
+across major exchanges once per second.
+
+Two consequences, both encoded below:
+
+1. ``KXBTCD`` previously recorded ``observation="point_in_time"``. That was
+   wrong. It is a 60-second average, and the distinction matters most exactly
+   where a point-in-time quote is least representative.
+2. Spot pricing is least reliable inside that averaging window, so the quant
+   path stops pricing crypto ``CRYPTO_SETTLEMENT_BLACKOUT_SECONDS`` before
+   close regardless of the ``verified`` flag.
+
+Kalshi's own API appears to expose the index directly, via an authenticated
+``cfbenchmarks_value`` WebSocket channel carrying the trailing 60-second
+average and — in the final minute before a quarter-hour close — the windowed
+average that *is* the settlement input. Verifying that (and whether it exists
+on demo) is the prerequisite for ever setting ``verified=True`` on a crypto
+family; pricing these off CoinGecko spot cannot get there.
 """
 from __future__ import annotations
 
@@ -62,7 +87,7 @@ class ContractSpec:
     #: Timezone the observation window is defined in.
     timezone: str
     #: Observation window semantics: "point_in_time", "daily_high",
-    #: "daily_close", "twap", or "unknown".
+    #: "daily_close", "twap", "rti_60s_average", or "unknown".
     observation: str
     #: True only when a human has checked this against Kalshi's own rules
     #: page. Nothing in this repo has been, so every entry ships False.
@@ -84,17 +109,22 @@ CONTRACT_SPECS: tuple[ContractSpec, ...] = (
         strike_units="USD per BTC",
         feed_units="USD per BTC",
         settlement_definition=(
-            "Daily bitcoin price market. Kalshi settles against its own "
-            "reference index at a stated time, NOT against a CoinGecko spot "
-            "print."
+            "Daily bitcoin price market. Settles on the CF Benchmarks "
+            "Bitcoin Real-Time Index (BRTI), averaged over the final 60 "
+            "seconds before the window closes — NOT a CoinGecko spot print, "
+            "and NOT an instantaneous value."
         ),
         timezone="US/Eastern",
-        observation="point_in_time",
+        # Corrected 2026-08-15. This said "point_in_time", which was wrong:
+        # the settlement value is a 60-second mean of a once-per-second index.
+        observation="rti_60s_average",
         verified=False,
         caveat=(
-            "Which index and which observation instant are unconfirmed. If "
-            "settlement is a TWAP over the closing window, a point-in-time "
-            "spot quote is the wrong input near expiry."
+            "Settlement mechanism now confirmed, but the feed is still "
+            "CoinGecko spot, which is not the settling instrument. Verifying "
+            "this family means sourcing the BRTI itself — see the module "
+            "docstring on Kalshi's cfbenchmarks_value channel — not "
+            "re-checking the strike units."
         ),
     ),
     ContractSpec(

@@ -345,3 +345,82 @@ def test_declines_are_logged_once_per_family_not_once_per_market(caplog):
             quant.can_handle(candidate(ticker=f"KXBTCD-25AUG14-{i}"))
 
     assert caplog.text.count("Quant path declining") == 1
+
+
+# -- crypto settlement blackout ---------------------------------------------
+#
+# Kalshi's crypto contracts settle on the CF Benchmarks Real-Time Index
+# averaged over the final 60 seconds before close (Kalshi Help Center, "Crypto
+# Markets"), not on a spot snapshot. A point-in-time CoinGecko quote is
+# furthest from the settlement value exactly inside that window: the averaging
+# damps the very move the model is reacting to.
+
+
+def _closing_in(seconds, ticker="KXBTCD-25AUG14-B"):
+    from datetime import datetime, timedelta, timezone
+
+    close = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return Candidate(
+        ticker=ticker, title=ticker, category="Crypto",
+        yes_bid=48, yes_ask=52, volume=10_000,
+        close_time=close.isoformat().replace("+00:00", "Z"),
+        series_ticker=ticker.split("-")[0],
+        strike_type="greater", floor_strike=50_000.0,
+    )
+
+
+def test_crypto_is_not_priced_inside_the_settlement_window():
+    CONFIG.risk.quant_allow_unverified = True
+    CONFIG.risk.crypto_settlement_blackout_seconds = 90.0
+    quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
+    quant.begin_pass()
+
+    assert quant.can_handle(_closing_in(3600)) is True, "an hour out is fine"
+    assert quant.can_handle(_closing_in(45)) is False, "inside the 60s average"
+    assert quant.can_handle(_closing_in(89)) is False
+
+
+def test_the_blackout_holds_even_for_a_verified_family():
+    """Verifying what a contract settles on does not make a spot snapshot a
+    good estimate of a 60-second index mean. Different claims."""
+    import core.contract_specs as specs
+
+    CONFIG.risk.crypto_settlement_blackout_seconds = 90.0
+    quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
+    quant.begin_pass()
+    spec = specs.spec_for("KXBTCD-25AUG14-B")
+    assert spec.source == "crypto"
+    assert quant._in_settlement_blackout(spec, 30.0) is True
+
+
+def test_the_blackout_is_configurable_off():
+    CONFIG.risk.quant_allow_unverified = True
+    CONFIG.risk.crypto_settlement_blackout_seconds = 0.0
+    quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
+    quant.begin_pass()
+    assert quant.can_handle(_closing_in(10)) is True
+
+
+def test_the_blackout_does_not_apply_to_non_crypto_families():
+    """Gold settles on an ETF close, not a 60-second crypto index."""
+    import core.contract_specs as specs
+
+    CONFIG.risk.crypto_settlement_blackout_seconds = 90.0
+    quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
+    spec = specs.spec_for("KXGOLD-25AUG")
+    assert spec.source != "crypto"
+    assert quant._in_settlement_blackout(spec, 10.0) is False
+
+
+def test_the_corrected_btcd_spec_records_the_real_settlement_mechanism():
+    """This said observation="point_in_time", which was factually wrong."""
+    import core.contract_specs as specs
+
+    spec = specs.spec_for("KXBTCD-25AUG14-B")
+    assert spec.observation == "rti_60s_average"
+    assert "60" in spec.settlement_definition
+    assert spec.verified is False, (
+        "confirming the mechanism is not the same as verifying the feed — "
+        "the bot still prices this off CoinGecko spot, which is not what "
+        "settles it"
+    )
