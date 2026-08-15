@@ -177,11 +177,50 @@ def parse_timestamp(value: Any) -> Optional[float]:
 _QUOTE_TIME_FIELDS: tuple[str, ...] = ()
 
 
-#: Fields that carry a liquidity signal, best first. Kalshi does not populate
-#: all of them on every endpoint, and which ones appear is exactly the sort of
-#: thing this repo has repeatedly guessed wrong — so read all of them and take
-#: the largest rather than trusting one name.
-LIQUIDITY_FIELDS = ("volume", "volume_24h", "open_interest", "liquidity")
+#: Price fields, as (field name, multiplier to convert to cents).
+#:
+#: VERIFIED AGAINST PRODUCTION, 2026-08-15, by logging the actual keys Kalshi
+#: returns. The live schema is:
+#:
+#:   yes_bid_dollars, yes_ask_dollars, no_bid_dollars, no_ask_dollars,
+#:   last_price_dollars, volume_fp, volume_24h_fp, open_interest_fp,
+#:   liquidity_dollars, updated_time, ...
+#:
+#: There is no `yes_bid` and no `volume`. Kalshi removed the integer-cent
+#: fields in March 2026 — this repo's own client docstring says so, and the
+#: order-placement path was updated for it, but the read path never was. So
+#: every price and liquidity read silently found nothing.
+#:
+#: The `_dollars` fields are dollar-denominated (0.52, not 52), hence the
+#: x100. Legacy cent names are still accepted first so an older or
+#: differently-versioned endpoint keeps working.
+PRICE_FIELDS = {
+    "yes_bid": (("yes_bid", 1.0), ("yes_bid_dollars", 100.0)),
+    "yes_ask": (("yes_ask", 1.0), ("yes_ask_dollars", 100.0)),
+}
+
+#: Liquidity signals, best first. `liquidity_dollars` is the USD figure that
+#: MIN_LIQUIDITY_USD is named for; the `_fp` fields are contract counts and
+#: serve as fallbacks. Read all of them and take the largest rather than
+#: trusting one name — guessing a single name is what caused three separate
+#: bugs in this file.
+LIQUIDITY_FIELDS = (
+    "liquidity_dollars", "notional_value_dollars",
+    "volume_fp", "volume_24h_fp", "open_interest_fp",
+    "volume", "volume_24h", "open_interest", "liquidity",
+)
+
+
+def _price_cents(raw: dict, key: str):
+    """(value_in_cents, was_present). Handles both cent and dollar schemas."""
+    for name, multiplier in PRICE_FIELDS[key]:
+        if name not in raw or raw.get(name) is None:
+            continue
+        value = finite(raw.get(name))
+        if value is None:
+            return None, True          # present but unusable -> bad data
+        return value * multiplier, True
+    return None, False                 # absent -> "no resting order"
 
 
 def _best_liquidity(raw: dict):
@@ -252,16 +291,16 @@ def validate_market(raw: dict, event: dict = None, now: float = None) -> Validat
     #
     # A price that is *present* but not a number is still bad data and still
     # raises: null and "banana" are different problems.
-    missing_bid = raw.get("yes_bid") is None
-    missing_ask = raw.get("yes_ask") is None
-    yes_bid = 0.0 if missing_bid else finite(raw.get("yes_bid"))
-    yes_ask = MAX_PRICE_CENTS if missing_ask else finite(raw.get("yes_ask"))
-    if yes_bid is None:
-        raise MarketDataInvalid(f"{ticker}: yes_bid is not a finite number "
-                                f"({raw.get('yes_bid')!r})")
-    if yes_ask is None:
-        raise MarketDataInvalid(f"{ticker}: yes_ask is not a finite number "
-                                f"({raw.get('yes_ask')!r})")
+    bid_value, bid_present = _price_cents(raw, "yes_bid")
+    ask_value, ask_present = _price_cents(raw, "yes_ask")
+    missing_bid = not bid_present
+    missing_ask = not ask_present
+    if bid_present and bid_value is None:
+        raise MarketDataInvalid(f"{ticker}: yes_bid is not a finite number")
+    if ask_present and ask_value is None:
+        raise MarketDataInvalid(f"{ticker}: yes_ask is not a finite number")
+    yes_bid = 0.0 if missing_bid else bid_value
+    yes_ask = MAX_PRICE_CENTS if missing_ask else ask_value
     for name, price in (("yes_bid", yes_bid), ("yes_ask", yes_ask)):
         if not (MIN_PRICE_CENTS <= price <= MAX_PRICE_CENTS):
             raise MarketDataInvalid(

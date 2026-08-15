@@ -450,3 +450,73 @@ def test_quote_staleness_uses_the_configured_limit():
                   captured_at=time.time() - CONFIG.risk.max_quote_age_seconds - 1)
     assert quote.is_stale()
     assert not quote.is_stale(max_age=1e6)
+
+
+# -- the real Kalshi schema -------------------------------------------------
+
+
+def live_market(**overrides):
+    """A market shaped like Kalshi's ACTUAL /markets response.
+
+    Field names captured from production on 2026-08-15 by logging the keys:
+    yes_bid_dollars, yes_ask_dollars, volume_fp, liquidity_dollars,
+    updated_time — there is no `yes_bid` and no `volume`.
+    """
+    base = {
+        "ticker": "KXBTCD-25AUG14-B",
+        "title": "Live-shaped market",
+        "yes_bid_dollars": "0.48",
+        "yes_ask_dollars": "0.52",
+        "volume_fp": "1200",
+        "volume_24h_fp": "300",
+        "open_interest_fp": "900",
+        "liquidity_dollars": "8500",
+        "close_time": "2036-12-31T00:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_dollar_denominated_prices_convert_to_cents():
+    """Kalshi removed integer-cent fields in March 2026. The order path was
+    updated; the read path was not, so every price read found nothing."""
+    valid = validate_market(live_market())
+
+    assert valid.quote.yes_bid == 48.0
+    assert valid.quote.yes_ask == 52.0
+    assert valid.quote.yes_ask - valid.quote.yes_bid == 4.0
+
+
+def test_a_live_shaped_market_is_fully_tradeable():
+    valid = validate_market(live_market())
+
+    assert valid.volume == 8500.0
+    assert valid.warnings == [] or all("quote timestamp" in w for w in valid.warnings)
+    assert valid.quote.executable_price_cents("yes") == 52.0
+    assert valid.quote.executable_price_cents("no") == 52.0
+
+
+def test_legacy_cent_fields_still_work():
+    """An older or differently-versioned endpoint keeps working."""
+    valid = validate_market(market())
+    assert (valid.quote.yes_bid, valid.quote.yes_ask) == (48.0, 52.0)
+
+
+def test_dollar_field_present_but_unusable_is_bad_data():
+    with pytest.raises(MarketDataInvalid, match="yes_bid"):
+        validate_market(live_market(yes_bid_dollars="banana"))
+
+
+def test_liquidity_dollars_is_preferred_and_beats_contract_counts():
+    valid = validate_market(live_market())
+    assert valid.volume == 8500.0, "liquidity_dollars is the USD figure"
+
+
+def test_a_live_market_with_no_bid_still_validates():
+    raw = live_market()
+    del raw["yes_bid_dollars"]
+
+    valid = validate_market(raw)
+
+    assert valid.quote.yes_bid == 0.0
+    assert any("no resting bid" in w for w in valid.warnings)
