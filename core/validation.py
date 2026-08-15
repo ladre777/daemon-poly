@@ -177,12 +177,36 @@ def parse_timestamp(value: Any) -> Optional[float]:
 _QUOTE_TIME_FIELDS: tuple[str, ...] = ()
 
 
+#: Fields that carry a liquidity signal, best first. Kalshi does not populate
+#: all of them on every endpoint, and which ones appear is exactly the sort of
+#: thing this repo has repeatedly guessed wrong — so read all of them and take
+#: the largest rather than trusting one name.
+LIQUIDITY_FIELDS = ("volume", "volume_24h", "open_interest", "liquidity")
+
+
+def _best_liquidity(raw: dict):
+    """Largest usable liquidity number on the payload, or None if absent.
+
+    None is meaningfully different from 0.0: it means Kalshi told us nothing
+    about this market's liquidity, not that the market is untraded. Callers
+    must not filter a None as though it were zero.
+    """
+    seen = []
+    for name in LIQUIDITY_FIELDS:
+        if name not in raw:
+            continue
+        value = finite(raw.get(name))
+        if value is not None:
+            seen.append(value)
+    return max(seen) if seen else None
+
+
 @dataclass
 class ValidatedMarket:
     ticker: str
     title: str
     quote: Quote
-    volume: float
+    volume: Optional[float]
     close_time: str
     seconds_to_close: float
     strike_type: str = ""
@@ -250,10 +274,24 @@ def validate_market(raw: dict, event: dict = None, now: float = None) -> Validat
             f"{ticker}: crossed book, bid {yes_bid}c > ask {yes_ask}c"
         )
 
-    volume = finite(raw.get("volume", 0))
-    if volume is None or volume < 0:
-        raise MarketDataInvalid(f"{ticker}: volume {raw.get('volume')!r} is not "
-                                f"a nonnegative number")
+    # Liquidity, from whichever field Kalshi actually populates.
+    #
+    # VERIFIED AGAINST PRODUCTION, 2026-08-15: reading only `volume` and
+    # defaulting a missing key to 0 reported all 79,947 open markets as having
+    # zero volume, so every one of them fell under MIN_LIQUIDITY_USD and the
+    # bot concluded there was nothing to trade. Same failure shape as the
+    # yes_bid bug: an absent field silently becomes a value that filters
+    # everything out, with no error anywhere.
+    #
+    # `volume` and `volume_24h` are contract counts; `open_interest` is
+    # contracts outstanding. Any of them is a usable liquidity proxy, and the
+    # largest is the least likely to be a spuriously quiet window.
+    #
+    # None (rather than 0) means "no liquidity field was present at all",
+    # which Scout must not treat as "illiquid" — see its handling.
+    volume = _best_liquidity(raw)
+    if volume is not None and volume < 0:
+        raise MarketDataInvalid(f"{ticker}: volume {volume!r} is negative")
 
     close_time = raw.get("close_time") or event.get("close_time") or ""
     close_ts = parse_timestamp(close_time)

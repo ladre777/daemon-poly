@@ -29,7 +29,12 @@ from typing import Optional
 
 from core.kalshi_client import KalshiClient
 from core.kalshi_categories import GROUPS, classify_ticker, ticker_prefix
-from core.validation import MarketDataInvalid, Quote, validate_market
+from core.validation import (
+    LIQUIDITY_FIELDS,
+    MarketDataInvalid,
+    Quote,
+    validate_market,
+)
 from config import CONFIG
 
 log = logging.getLogger("daemon_kalshi.scout")
@@ -145,6 +150,8 @@ class Scout:
         rejected: dict[str, int] = {}
         below_volume = 0
         highest_seen = 0.0
+        no_liquidity_data = 0
+        sampled_fields = False
 
         # GET /markets, not GET /events?with_nested_markets=true.
         #
@@ -167,7 +174,20 @@ class Scout:
                 break
             page = self.client.list_markets(status="open", limit=200, cursor=cursor)
             pages += 1
-            for m in page.get("markets", []):
+            markets = page.get("markets", [])
+            if markets and not sampled_fields:
+                # Log the actual field names once per scan. Three separate
+                # bugs in this file came from assuming a field name and
+                # silently defaulting when it was absent (yes_bid, volume,
+                # last_price_time). This ends the guessing: the schema is in
+                # the logs, at INFO, every run.
+                sampled_fields = True
+                log.info(
+                    "Kalshi /markets fields present on %s: %s",
+                    markets[0].get("ticker", "?"),
+                    ", ".join(sorted(markets[0].keys())),
+                )
+            for m in markets:
                 ticker = m.get("ticker")
                 if not ticker:
                     rejected["missing ticker"] = rejected.get("missing ticker", 0) + 1
@@ -194,7 +214,13 @@ class Scout:
                 for warning in valid.warnings:
                     log.debug("%s: %s", valid.ticker, warning)
 
-                if valid.volume < CONFIG.risk.min_liquidity_usd:
+                if valid.volume is None:
+                    # Kalshi told us nothing about this market's liquidity.
+                    # Filtering on an absent field is how the previous two
+                    # bugs happened, so this is counted and surfaced rather
+                    # than silently treated as zero.
+                    no_liquidity_data += 1
+                elif valid.volume < CONFIG.risk.min_liquidity_usd:
                     # Counted, not silent. "0 candidates" with no further
                     # detail is indistinguishable from a broken scan; knowing
                     # that 1,800 markets were classified and validated but sat
@@ -253,6 +279,13 @@ class Scout:
             skipped_by_group or "none", sum(rejected.values()),
             CONFIG.risk.min_liquidity_usd, below_volume,
         )
+        if no_liquidity_data:
+            log.warning(
+                "%d market(s) carried no liquidity field at all (%s). They "
+                "were NOT filtered on liquidity — an absent field is not the "
+                "same as an illiquid market.",
+                no_liquidity_data, ", ".join(LIQUIDITY_FIELDS),
+            )
         if not candidates and below_volume:
             # The single most useful line when nothing is tradeable: it says
             # whether the floor is slightly too high or wildly too high.

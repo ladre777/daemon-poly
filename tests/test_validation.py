@@ -173,10 +173,50 @@ def test_untraded_market_quoting_zero_to_one_hundred_is_allowed():
     assert valid.quote.midpoint_cents == 50
 
 
-@pytest.mark.parametrize("bad", [-1, float("nan"), "lots"])
-def test_invalid_volume_is_rejected(bad):
+def test_negative_volume_is_rejected():
     with pytest.raises(MarketDataInvalid, match="volume"):
-        validate_market(market(volume=bad))
+        validate_market(market(volume=-1))
+
+
+@pytest.mark.parametrize("junk", [float("nan"), "lots", None])
+def test_unusable_volume_reads_as_no_data_not_zero(junk):
+    """An unparseable liquidity value is "we don't know", not "illiquid".
+    Zero would silently filter the market out; None makes Scout say so."""
+    assert validate_market(market(volume=junk)).volume is None
+
+
+def test_liquidity_falls_back_across_fields():
+    """VERIFIED AGAINST PRODUCTION: reading only `volume` and defaulting a
+    missing key to 0 reported all 79,947 open markets as zero-volume, so every
+    one fell under MIN_LIQUIDITY_USD and the bot found nothing to trade."""
+    raw = market()
+    del raw["volume"]
+    raw["volume_24h"] = 250
+    raw["open_interest"] = 4000
+
+    # Largest wins — the least likely to be a spuriously quiet window.
+    assert validate_market(raw).volume == 4000
+
+
+def test_no_liquidity_field_at_all_is_none():
+    raw = market()
+    del raw["volume"]
+    assert validate_market(raw).volume is None
+
+
+def test_scout_does_not_filter_markets_with_no_liquidity_data():
+    """The bug shape that cost two rounds: an absent field becoming a value
+    that filters everything out, with no error anywhere."""
+    from config import CONFIG as _C
+    from workers.scout import Scout
+    from tests.test_categories import CategoryClient, _event, _market
+
+    raw = _market("KXBTCD-25AUG14-B")
+    del raw["volume"]
+    client = CategoryClient([_event("KXBTCD-25AUG14", [raw])])
+    _C.scout_categories = ["Crypto"]
+
+    assert len(Scout(client).scan()) == 1
 
 
 def test_an_already_closed_market_is_rejected():
