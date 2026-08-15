@@ -338,6 +338,27 @@ class TelegramClient:
         lines.append(f"State: {record.state.value}")
         self.send("\n".join(lines))
 
+    def notify_duplicate_blocked(self, ticker: str, detail: str) -> None:
+        """An approved decision that was deliberately not re-submitted.
+
+        Risk approved this trade and execution declined to place it because
+        an order for the same intent already exists. That is correct — it is
+        what stops a persistent signal from stacking orders every pass — but
+        without an alert the operator sees "approved" in the ledger and
+        nothing on their phone, which is indistinguishable from alerting
+        being broken. Keyed on the ticker so a signal that persists for hours
+        costs one message rather than one per pass.
+        """
+        self.send(
+            "\n".join([
+                "\u26aa ALREADY HOLDING (no new order)",
+                ticker,
+                detail,
+                "Approved again, but an order for this intent already exists.",
+            ]),
+            key=f"duplicate:{ticker}",
+        )
+
     def notify_kill_switch(self, reason: str, realized_pnl_today: float,
                            bankroll_usd: float) -> None:
         limit = -abs(CONFIG.risk.max_daily_loss_pct * bankroll_usd)

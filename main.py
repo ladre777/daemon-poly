@@ -377,9 +377,21 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         try:
             record = execution.execute(verdict, decision)
         except DuplicateOrderBlocked as e:
-            # The 30-second loop re-derives the same candidate while a signal
-            # persists; this is the guard that keeps that from stacking orders.
+            # The loop re-derives the same candidate for as long as the signal
+            # persists; this guard is what stops that from stacking orders,
+            # and blocking here is correct.
+            #
+            # What was wrong is that it `continue`d past the notification
+            # below in silence. The ledger recorded "approved: 91 contracts
+            # @ 53c" every few minutes while the operator's phone stayed
+            # quiet, so an approval that was deliberately not acted on looked
+            # exactly like alerting being broken. Every approved decision now
+            # produces an operator signal, even when the signal is "already
+            # holding this one". Throttled by intent, so a signal that
+            # persists for hours costs one message, not one per pass.
+            stats["duplicate_blocked"] += 1
             log.info("Skipping duplicate order for %s: %s", candidate.ticker, e)
+            _alert(notifier, "notify_duplicate_blocked", candidate.ticker, str(e))
             continue
         except ReconciliationError as e:
             log.error("Execution refused for %s: %s — ending pass", candidate.ticker, e)
