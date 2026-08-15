@@ -210,11 +210,6 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # API calls, nor write ten duplicate observations into the volatility
     # buffer (duplicates drive the vol estimate toward zero, and vol is in
     # the denominator of the quant probability).
-    # Built here rather than required of every caller so existing tests and
-    # entry points keep working; main() passes a shared one.
-    if alert_store is None:
-        alert_store = SignalAlertStore()
-
     quant_maker.begin_pass()
 
     candidates = scout.scan()
@@ -424,15 +419,25 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             # always refers to the number the operator was shown last time.
             edge = decision.detail.get("net_edge")
             price = decision.executable_price_cents or record.limit_price_cents
-            verdict_alert = alert_store.evaluate(key, edge, price)
-            if verdict_alert.should_alert:
-                alert_store.record(key, record.ticker, record.action, record.side,
-                                   verdict.proposal.source, edge, price)
-                _alert(notifier, "notify_trade", record, decision,
-                       reason=verdict_alert.reason)
+            if alert_store is None:
+                # No suppression memory was supplied. Speak — the pre-existing
+                # behaviour — rather than opening a database at a hard-coded
+                # production path on the caller's behalf. Silence must always
+                # be a decision taken against remembered state, never a side
+                # effect of having none; and a scan pass should not be the
+                # thing that decides where state lives. main() owns that.
+                should_alert, reason = True, "no suppression state"
+            else:
+                verdict_alert = alert_store.evaluate(key, edge, price)
+                should_alert, reason = verdict_alert.should_alert, verdict_alert.reason
+            if should_alert:
+                if alert_store is not None:
+                    alert_store.record(key, record.ticker, record.action, record.side,
+                                       verdict.proposal.source, edge, price)
+                _alert(notifier, "notify_trade", record, decision, reason=reason)
             else:
                 stats["alert_suppressed"] += 1
-                log.info("Not re-alerting %s: %s", record.ticker, verdict_alert.reason)
+                log.info("Not re-alerting %s: %s", record.ticker, reason)
         if record.filled_count > 0:
             filled_this_pass += 1
             if health is not None:

@@ -280,3 +280,61 @@ def test_run_once_records_the_alert_and_passes_a_reason(
     # Second pass, unchanged signal, same hour: silent.
     decision = alerts.evaluate(key, row["last_edge"], row["last_price_cents"])
     assert not decision.should_alert, "an unchanged standing signal must go quiet"
+
+
+def test_run_once_without_a_store_opens_no_database(
+    client, order_store, edge_store, account, execution, risk, ledger, monkeypatch
+):
+    """A scan pass must not decide where state lives.
+
+    The first version of this change had `run_once` build its own
+    SignalAlertStore when the caller passed none, which resolved to
+    CONFIG.ledger_db_path — `/data/daemon_kalshi.db` — and tried to mkdir
+    `/data`. Every existing caller that omits the argument then failed with
+    PermissionError, and a pass quietly opened a second connection to the
+    production database on top.
+
+    That defect was invisible locally because the dev sandbox runs as root,
+    where `/data` is creatable; CI, running unprivileged, failed 16 tests on
+    it. So this test does not depend on filesystem permissions at all — it
+    asserts the construction never happens, which is true for any uid.
+    """
+    import main
+    from tests.conftest import make_candidate
+    from tests.test_pass_loop import (
+        StubChecker, StubMaker, StubQuantMaker, StubScout, _positions_follow_fills,
+    )
+
+    def _refuse(*a, **kw):
+        raise AssertionError(
+            "run_once built a SignalAlertStore itself; it must use only the "
+            "one it was given"
+        )
+
+    monkeypatch.setattr(main, "SignalAlertStore", _refuse)
+
+    CONFIG.risk.dry_run = False
+    candidates = [make_candidate(ticker=TICKER)]
+    _positions_follow_fills(client, candidates)
+
+    class Notifier:
+        def __init__(self):
+            self.trades = []
+
+        def notify_trade(self, record, decision=None, reason=""):
+            self.trades.append((record.ticker, reason))
+
+        def __getattr__(self, _name):
+            return lambda *a, **kw: None
+
+    notifier = Notifier()
+    filled = main.run_once(
+        StubScout(candidates), StubMaker(), StubQuantMaker(), StubChecker(),
+        risk, execution, ledger, account, notifier=notifier,
+    )
+
+    assert filled == 1
+    # And without memory it speaks rather than going quiet: suppression is a
+    # decision taken against remembered state, never the absence of any.
+    assert len(notifier.trades) == 1
+    assert notifier.trades[0][1] == "no suppression state"
