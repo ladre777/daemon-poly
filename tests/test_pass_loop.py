@@ -265,3 +265,118 @@ def test_dry_run_pass_sends_nothing(client, order_store, edge_store, account,
 
     assert filled == 0
     assert client.place_order_calls == []
+
+
+# -- per-candidate failure containment --------------------------------------
+
+
+class ExplodingMaker:
+    """Fails on some tickers, proposes normally on the rest."""
+
+    def __init__(self, fail_on, error=None):
+        self.fail_on = set(fail_on)
+        self.error = error or RuntimeError("provider said no")
+        self.calls = []
+
+    def propose(self, candidate):
+        self.calls.append(candidate.ticker)
+        if candidate.ticker in self.fail_on:
+            raise self.error
+        return Proposal(candidate=candidate, maker_probability=0.70,
+                        maker_confidence=0.8, reasoning="stub")
+
+
+def _positions_follow_fills(client, candidates):
+    """Make the fake exchange report positions for whatever has filled.
+
+    Without this the post-trade reconcile finds local fills the exchange does
+    not know about and ends the pass, which would mask the very behaviour
+    these tests are checking.
+    """
+    events = {c.ticker: c.event_ticker for c in candidates}
+
+    def positions(settlement_status="unsettled"):
+        return {"market_positions": [
+            {
+                "ticker": fill["ticker"],
+                "position": fill["count"],
+                "market_exposure": fill["count"] * (fill["yes_price"] or 0),
+                "fees_paid": 0,
+                "event_ticker": events.get(fill["ticker"], ""),
+            }
+            for fill in client.fills
+        ]}
+
+    client.get_positions = positions
+    CONFIG.risk.allow_position_drift = True
+
+
+def test_one_maker_failure_does_not_discard_the_rest_of_the_pass(pass_parts, client):
+    """The production bug: a single 404 unwound a pass holding 2,914 candidates."""
+    candidates = [
+        make_candidate(ticker="KXA-1", event_ticker="KXA"),
+        make_candidate(ticker="KXB-2", event_ticker="KXB"),
+        make_candidate(ticker="KXC-3", event_ticker="KXC"),
+    ]
+    maker = ExplodingMaker(fail_on={"KXA-1"})
+    _positions_follow_fills(client, candidates)
+
+    filled, _ = pass_parts(candidates, maker=maker)
+
+    assert maker.calls == ["KXA-1", "KXB-2", "KXC-3"], "pass must continue past the failure"
+    assert filled == 2
+    assert len(client.place_order_calls) == 2
+
+
+def test_a_run_of_maker_failures_ends_the_pass(pass_parts, client):
+    """Sustained failure means the provider is down: stop, don't spin."""
+    original = CONFIG.model_failure_threshold
+    CONFIG.model_failure_threshold = 3
+    try:
+        candidates = [
+            make_candidate(ticker=f"KX{i}-1", event_ticker=f"KX{i}") for i in range(10)
+        ]
+        maker = ExplodingMaker(fail_on={c.ticker for c in candidates})
+
+        filled, _ = pass_parts(candidates, maker=maker)
+
+        assert filled == 0
+        assert len(maker.calls) == 3, "must stop at the threshold, not try all ten"
+        assert client.place_order_calls == []
+    finally:
+        CONFIG.model_failure_threshold = original
+
+
+def test_the_failure_run_must_be_consecutive_to_end_the_pass(pass_parts, client):
+    """One failure between successes is noise, not an outage."""
+    original = CONFIG.model_failure_threshold
+    CONFIG.model_failure_threshold = 2
+    try:
+        candidates = [
+            make_candidate(ticker="KXA-1", event_ticker="KXA"),
+            make_candidate(ticker="KXB-2", event_ticker="KXB"),   # fails
+            make_candidate(ticker="KXC-3", event_ticker="KXC"),
+            make_candidate(ticker="KXD-4", event_ticker="KXD"),   # fails
+            make_candidate(ticker="KXE-5", event_ticker="KXE"),
+        ]
+        maker = ExplodingMaker(fail_on={"KXB-2", "KXD-4"})
+        _positions_follow_fills(client, candidates)
+
+        filled, _ = pass_parts(candidates, maker=maker)
+
+        assert len(maker.calls) == 5, "interleaved failures must not trip the breaker"
+        assert filled == 3
+    finally:
+        CONFIG.model_failure_threshold = original
+
+
+def test_a_failing_checker_skips_the_candidate_rather_than_trading_it(pass_parts, client):
+    """An unreviewed proposal is never traded — fail closed."""
+    class BrokenChecker:
+        def check(self, proposal):
+            raise RuntimeError("checker unavailable")
+
+    filled, _ = pass_parts([make_candidate()], checker=BrokenChecker())
+
+    assert filled == 0
+    assert client.place_order_calls == [], "no order without a Checker verdict"

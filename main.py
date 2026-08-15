@@ -16,6 +16,7 @@ import argparse
 import logging
 import signal
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from config import CONFIG
@@ -196,6 +197,12 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
 
     filled_this_pass = 0
     llm_calls_this_pass = 0
+    # Per-pass funnel counters. Without these, "Scout returned 2917 candidates"
+    # followed by silence is indistinguishable from a crash, a threshold no
+    # market cleared, and a category filter that matched nothing — three very
+    # different problems that all look identical in the log. Every candidate
+    # leaves via exactly one of these buckets.
+    stats: dict[str, int] = defaultdict(int)
     # One failing candidate must not cost us the other 2,913. Model calls are
     # contained per candidate and counted; only a *run* of failures — which
     # means the provider is down, not that one market confused it — stops the
@@ -214,9 +221,12 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         # real edge in isn't a smaller edge, it's fee-paying speculation.
         proposal = None
         if quant_maker.can_handle(candidate):
+            stats["quant_attempted"] += 1
             quant_result = quant_maker.propose(candidate)
             if quant_result:
                 proposal = quant_result.to_maker_proposal()
+            else:
+                stats["quant_no_proposal"] += 1
         elif candidate.category.lower() in CONFIG.llm_reasoning_categories:
             is_priority = _is_priority(candidate)
             # The budget tightens while the Maker is on its fallback provider,
@@ -228,6 +238,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 else CONFIG.max_llm_calls_per_pass
             )
             if not is_priority and call_cap and llm_calls_this_pass >= call_cap:
+                stats["llm_capped"] += 1
                 log.debug("LLM call cap (%d) reached this pass — skipping non-priority %s",
                           call_cap, candidate.ticker)
                 continue
@@ -235,6 +246,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 proposal = maker.propose(candidate)
             except Exception as e:                  # noqa: BLE001 - contained per candidate
                 severity = classify(e)
+                stats["maker_failed"] += 1
                 log.warning("Maker failed on %s (%s): %s", candidate.ticker, severity.value, e)
                 if model_breaker.record_failure(f"{type(e).__name__}: {e}"):
                     _alert(notifier, "notify_systemic_error", "maker",
@@ -246,16 +258,21 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 continue
             model_breaker.record_success()
             llm_calls_this_pass += 1
+            stats["llm_called"] += 1
+            if proposal is None:
+                stats["llm_below_edge_threshold"] += 1
         else:
             log.debug(
                 "Skipping %s [%s] — no quant path and category isn't in "
                 "LLM_REASONING_CATEGORIES (no grounding data source)",
                 candidate.ticker, candidate.category,
             )
+            stats["no_grounding_source"] += 1
             continue
 
         if not proposal:
             continue
+        stats["proposed"] += 1
         log.info(
             "Maker edge: %s -> %.2f%% (market %.2f%%, edge %.2f%%)",
             candidate.ticker, proposal.maker_probability * 100,
@@ -269,6 +286,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             verdict = checker.check(proposal)
         except Exception as e:                      # noqa: BLE001 - contained per candidate
             severity = classify(e)
+            stats["checker_failed"] += 1
             log.warning("Checker failed on %s (%s): %s", candidate.ticker, severity.value, e)
             if model_breaker.record_failure(f"{type(e).__name__}: {e}"):
                 _alert(notifier, "notify_systemic_error", "checker",
@@ -279,6 +297,9 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 break
             continue
         model_breaker.record_success()
+        stats["checked"] += 1
+        if not verdict.approved:
+            stats["checker_rejected"] += 1
         log.info("Checker verdict on %s: %s (conf %.2f)", candidate.ticker, verdict.verdict, verdict.confidence)
 
         # Risk runs against the snapshot as it stands right now, including
@@ -292,8 +313,10 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
 
         edge_id = ledger.log_decision(verdict, decision)
         if not decision.approved:
+            stats["risk_refused"] += 1
             log.info("Risk refused %s: %s", candidate.ticker, decision.reason)
             continue
+        stats["approved"] += 1
 
         decision.edge_id = edge_id
         try:
@@ -329,6 +352,21 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             log.error("Post-trade reconciliation failed — ending pass: %s", e)
             break
 
+    # The funnel, on one line. Reading left to right tells you where every
+    # candidate went and therefore which stage to look at when nothing trades.
+    log.info(
+        "Pass funnel: %d candidate(s) -> quant %d (no proposal %d), llm %d "
+        "(below edge %d, failed %d, capped %d), no grounding source %d | "
+        "proposed %d -> checked %d (rejected %d, failed %d) -> approved %d "
+        "-> filled %d",
+        len(candidates),
+        stats["quant_attempted"], stats["quant_no_proposal"],
+        stats["llm_called"], stats["llm_below_edge_threshold"],
+        stats["maker_failed"], stats["llm_capped"],
+        stats["no_grounding_source"],
+        stats["proposed"], stats["checked"], stats["checker_rejected"],
+        stats["checker_failed"], stats["approved"], filled_this_pass,
+    )
     return filled_this_pass
 
 
