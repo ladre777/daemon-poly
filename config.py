@@ -277,20 +277,26 @@ class AppConfig:
     # to cap there. 0 = unlimited.
     max_llm_calls_per_pass: int = _int("MAX_LLM_CALLS_PER_PASS", 40)
     scout_poll_seconds: int = _int("SCOUT_POLL_SECONDS", 30)
-    # Hard cap on pages fetched per scan, 200 markets each.
+    # Safety valve on pages fetched per scan, 200 markets each.
     #
-    # MEASURED IN PRODUCTION, 2026-08-15: Kalshi's open catalog is ~50,000
-    # markets, so an unbounded scan pages for 6+ minutes. That breaks the bot
-    # in a way that is easy to miss — the quote on a market read at the start
-    # of the pass is already six minutes old by the time risk evaluates it,
-    # and MAX_QUOTE_AGE_SECONDS (60s) then rejects it. An unbounded scan
-    # therefore does not just run slowly, it throws away almost everything it
-    # collected, and burns rate-limit budget doing so.
+    # MEASURED IN PRODUCTION, 2026-08-15: GET /markets returns a page in about
+    # 29ms (25 pages in 0.72s), so the whole ~50,000-market catalog is roughly
+    # 8-12 seconds — comfortably inside SCOUT_POLL_SECONDS, and well inside
+    # MAX_QUOTE_AGE_SECONDS for the quotes read on the first page.
     #
-    # 25 pages ~= 5,000 markets ~= a few seconds, which fits comfortably
-    # inside SCOUT_POLL_SECONDS and keeps every quote well inside its
-    # freshness window. Raise it only alongside MAX_QUOTE_AGE_SECONDS.
-    scout_max_pages: int = _int("SCOUT_MAX_PAGES", 25)
+    # An earlier version of this comment claimed a full scan took 6+ minutes.
+    # That measurement was of GET /events?with_nested_markets=true, a far
+    # heavier response, and it does not apply to /markets. Capping at 25 pages
+    # on that basis was worse than useless: Kalshi returns the catalog in an
+    # order that front-loads low-volume esports and multi-game prop markets,
+    # so the bot was scanning ~5,000 markets that could never clear the
+    # liquidity floor and concluding there was nothing to trade.
+    #
+    # 400 pages covers the current catalog with headroom. The cap exists so a
+    # catalog that grows by an order of magnitude cannot silently turn a scan
+    # into a multi-minute stall; it is not meant to bind in normal operation.
+    # 0 disables it entirely.
+    scout_max_pages: int = _int("SCOUT_MAX_PAGES", 400)
     ledger_db_path: str = os.getenv("LEDGER_DB_PATH", "/data/daemon_kalshi.db")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 

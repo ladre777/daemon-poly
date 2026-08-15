@@ -143,6 +143,8 @@ class Scout:
             )
         skipped_by_group: dict[str, int] = {}
         rejected: dict[str, int] = {}
+        below_volume = 0
+        highest_seen = 0.0
 
         # GET /markets, not GET /events?with_nested_markets=true.
         #
@@ -193,6 +195,13 @@ class Scout:
                     log.debug("%s: %s", valid.ticker, warning)
 
                 if valid.volume < CONFIG.risk.min_liquidity_usd:
+                    # Counted, not silent. "0 candidates" with no further
+                    # detail is indistinguishable from a broken scan; knowing
+                    # that 1,800 markets were classified and validated but sat
+                    # under the liquidity floor points straight at
+                    # MIN_LIQUIDITY_USD rather than at the parser.
+                    below_volume += 1
+                    highest_seen = max(highest_seen, valid.volume)
                     continue
                 candidates.append(
                     Candidate(
@@ -239,10 +248,21 @@ class Scout:
             )
         log.info(
             "Scout found %d candidates across %s in %d page(s) "
-            "(skipped by group: %s, invalid: %d)",
+            "(skipped by group: %s, invalid: %d, below the $%.0f liquidity "
+            "floor: %d)",
             len(candidates), wanted or "all groups", pages,
             skipped_by_group or "none", sum(rejected.values()),
+            CONFIG.risk.min_liquidity_usd, below_volume,
         )
+        if not candidates and below_volume:
+            # The single most useful line when nothing is tradeable: it says
+            # whether the floor is slightly too high or wildly too high.
+            log.info(
+                "Every market that passed validation was under the liquidity "
+                "floor. Highest volume seen was %.0f against a floor of %.0f "
+                "— lower MIN_LIQUIDITY_USD if that gap looks wrong.",
+                highest_seen, CONFIG.risk.min_liquidity_usd,
+            )
         return candidates
 
     @staticmethod
