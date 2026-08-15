@@ -78,6 +78,30 @@ class LLMUnavailable(SystemicError):
     """No configured provider could produce a completion."""
 
 
+def first_text_block(response) -> str:
+    """The first text block of an Anthropic response, skipping the rest.
+
+    `response.content[0].text` is wrong and production proved it:
+
+        Checker failed on KXRAINSHARD2-26AUG15-SATX (systemic):
+        'ThinkingBlock' object has no attribute 'text'
+
+    A response's content is a *list of blocks*, and only some of them are
+    text. When the model thinks, block 0 is a ThinkingBlock and the answer is
+    further down the list; a tool call or a redacted-thinking block does the
+    same thing. Indexing position 0 and reaching for `.text` works right up
+    until the model does something entirely normal.
+
+    Returns "" when there is no text block at all, which callers already
+    treat as "no usable answer" — that is a refusal, not a crash.
+    """
+    for block in getattr(response, "content", None) or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text:
+            return text
+    return ""
+
+
 class MoonshotBackend:
     """OpenAI-compatible chat completions against Moonshot."""
 
@@ -268,7 +292,7 @@ class AnthropicBackend:
             temperature=temperature,
             messages=[{"role": "user", "content": user}],
         )
-        return resp.content[0].text if resp.content else ""
+        return first_text_block(resp)
 
 
 class MakerLLM:

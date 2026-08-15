@@ -372,3 +372,59 @@ def test_code_models_are_tried_after_general_ones():
 def test_known_good_names_outrank_everything():
     ranked = MoonshotBackend._ranked(["kimi-k3", "kimi-k2-turbo-preview"])
     assert ranked[0] == "kimi-k2-turbo-preview"
+
+
+# --------------------------------------------------------------------------
+# Anthropic response shape
+# --------------------------------------------------------------------------
+
+class _Block:
+    def __init__(self, text=None):
+        if text is not None:
+            self.text = text
+
+
+class _ThinkingBlock:
+    """No .text attribute at all — exactly what production hit."""
+
+    def __init__(self, thinking):
+        self.thinking = thinking
+
+
+class _Response:
+    def __init__(self, content):
+        self.content = content
+
+
+def test_first_text_block_skips_a_thinking_block():
+    """Production: 'ThinkingBlock' object has no attribute 'text'.
+
+    content[0] is a thinking block whenever the model reasons; the answer is
+    further down the list.
+    """
+    from core.llm_client import first_text_block
+
+    resp = _Response([_ThinkingBlock("let me consider"), _Block('{"verdict": "approve"}')])
+    assert first_text_block(resp) == '{"verdict": "approve"}'
+
+
+def test_first_text_block_returns_the_first_of_several():
+    from core.llm_client import first_text_block
+
+    resp = _Response([_Block("first"), _Block("second")])
+    assert first_text_block(resp) == "first"
+
+
+def test_first_text_block_is_empty_when_there_is_no_text():
+    """No text is 'no usable answer', which callers refuse — not a crash."""
+    from core.llm_client import first_text_block
+
+    assert first_text_block(_Response([_ThinkingBlock("only thinking")])) == ""
+    assert first_text_block(_Response([])) == ""
+    assert first_text_block(_Response(None)) == ""
+
+
+def test_first_text_block_skips_empty_text_blocks():
+    from core.llm_client import first_text_block
+
+    assert first_text_block(_Response([_Block(""), _Block("real")])) == "real"

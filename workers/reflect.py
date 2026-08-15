@@ -23,6 +23,8 @@ from pathlib import Path
 
 import anthropic
 
+from core.llm_client import first_text_block
+
 from config import CONFIG
 from memory.edge_store import EdgeStore
 
@@ -74,7 +76,7 @@ class Reflector:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": self._format_batch(edges)}],
         )
-        playbook_text = resp.content[0].text
+        playbook_text = first_text_block(resp)
 
         PLAYBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
         PLAYBOOK_PATH.write_text(

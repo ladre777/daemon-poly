@@ -86,6 +86,12 @@ class ModelConfig:
     # Checker: slower, higher-trust second opinion before capital moves.
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     checker_model: str = os.getenv("CHECKER_MODEL", "claude-sonnet-5")
+    # Token budget for a Checker verdict. 500 truncated real verdicts mid-JSON
+    # in production, which validation then correctly refused as unparseable —
+    # turning a well-reasoned approval into an abstention for no reason but
+    # the budget. Verdicts are small; the cost of headroom here is trivial
+    # next to the cost of silently discarding them.
+    checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 1500)
 
     # Which backend answers Maker calls. "auto" (default) uses Moonshot and
     # falls back to Anthropic when Moonshot is unreachable, unauthorised, or

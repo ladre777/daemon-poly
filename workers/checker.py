@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import anthropic
 
 from config import CONFIG
+from core.llm_client import first_text_block
 from core.validation import validate_checker_output
 from workers.maker import Proposal
 
@@ -64,11 +65,20 @@ class Checker:
         )
         resp = self._client.messages.create(
             model=CONFIG.models.checker_model,
-            max_tokens=500,
+            # Production truncated a verdict mid-string at 500 tokens:
+            # {"verdict": "approve", "confidence": 0.72, "reasoning": "Seattle
+            # mid-August climatology genuinely shows low precipitation ...
+            # and then nothing. Validation correctly refused the unparseable
+            # JSON and abstained — so a well-reasoned approval became a
+            # non-answer purely because the budget ran out mid-sentence.
+            max_tokens=CONFIG.models.checker_max_tokens,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
         )
-        raw = resp.content[0].text if resp.content else ""
+        # Not content[0]: a thinking block sits at position 0 whenever the
+        # model reasons, and reaching for .text on it raises. See
+        # core/llm_client.first_text_block.
+        raw = first_text_block(resp)
         # Strictly validated: an unparseable response, an unknown verdict
         # string, or a non-finite/out-of-range confidence all become an
         # abstention rather than an exception mid-pass or a value that
