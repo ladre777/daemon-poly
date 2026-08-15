@@ -61,11 +61,12 @@ def test_womens_march_madness_is_not_filed_as_the_mens_tournament():
 
 
 def test_specificity_ordering_is_stable_for_equal_length_patterns():
-    from core.kalshi_categories import _PATTERNS_BY_SPECIFICITY
+    from core.kalshi_categories import _OVERRIDES, _PATTERNS_BY_SPECIFICITY
 
     lengths = [len(row[0]) for row in _PATTERNS_BY_SPECIFICITY]
     assert lengths == sorted(lengths, reverse=True)
-    assert len(_PATTERNS_BY_SPECIFICITY) == len(SUBCATEGORY_PATTERNS)
+    # Overrides sit alongside the verbatim table rather than editing it.
+    assert len(_PATTERNS_BY_SPECIFICITY) == len(SUBCATEGORY_PATTERNS) + len(_OVERRIDES)
 
 
 # -- ticker classification --------------------------------------------------
@@ -331,3 +332,32 @@ def test_the_cap_can_be_disabled():
     client = TwoPageClient()
 
     assert len(Scout(client).scan()) == 2
+
+
+# -- production corrections -------------------------------------------------
+
+
+def test_mve_sports_markets_are_sports_not_esports():
+    """VERIFIED AGAINST PRODUCTION: Kalshi's MVE prefix marks a multi-value
+    event. Upstream reads it correctly for MVENFL and MVENBA (both Sports)
+    but maps MVESPORTSMULTIGAMEEXTENDED to Esports — parsing the prefix as
+    MV-ESPORTS rather than MVE-SPORTS.
+
+    Not a marginal error: a live scan of 80,000 open markets put 32,000 of
+    them, 40% of the whole catalog, into Esports and skipped them before
+    anything looked at a price."""
+    assert classify_group("KXMVESPORTSMULTIGAMEEXTENDED-S2026") == "Sports"
+    assert classify_group("KXMVESPORTSMULTIGAME-1") == "Sports"
+    assert classify_group("KXMVENFLMULTIGAME-25") == "Sports"
+    assert classify_group("KXMVENBASINGLEGAME-25") == "Sports"
+
+
+def test_the_upstream_table_still_says_esports():
+    """The override is deliberate and sits outside the verbatim table, so the
+    port can still be diffed against upstream."""
+    assert get_hierarchy("MVESPORTSMULTIGAMEEXTENDED")[0] == "Esports"
+
+
+def test_genuine_esports_are_untouched():
+    for ticker in ("KXLOLGAMES-25", "KXCSGOGAME-25", "KXLEAGUEWORLDS-26"):
+        assert classify_group(ticker) == "Esports", ticker

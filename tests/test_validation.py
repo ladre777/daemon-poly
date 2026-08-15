@@ -206,15 +206,31 @@ def test_non_finite_strike_is_rejected():
         validate_market(market(floor_strike=float("inf")))
 
 
-def test_a_stale_quote_is_rejected():
-    stale = time.time() - (CONFIG.risk.max_quote_age_seconds + 30)
-    with pytest.raises(MarketDataInvalid, match="old"):
-        validate_market(market(last_price_time=stale))
+def test_last_price_time_is_not_treated_as_quote_freshness():
+    """VERIFIED AGAINST PRODUCTION. last_price_time is the last *trade* time,
+    not the age of the order book. Using it as quote freshness rejected
+    47,000 of 80,000 open markets with ages like "1577s old, limit 60s" — a
+    market that last traded 26 minutes ago is perfectly tradeable, its bid
+    and ask are current, it is simply quiet."""
+    long_ago = time.time() - 3600
+
+    valid = validate_market(market(last_price_time=long_ago))
+
+    assert valid.quote.source == "scan"
+    assert not valid.quote.is_stale()
 
 
-def test_a_future_dated_quote_is_rejected():
-    with pytest.raises(MarketDataInvalid, match="future"):
-        validate_market(market(last_price_time=time.time() + 3600))
+def test_freshness_is_measured_from_our_own_read_time():
+    """We have no exchange-side quote timestamp, so MAX_QUOTE_AGE_SECONDS
+    bounds how long ago *we* fetched the price. That still stops a proposal
+    being acted on minutes after the read; it just cannot say how long the
+    book sat unchanged beforehand."""
+    valid = validate_market(market())
+    assert valid.quote.source == "scan"
+    assert valid.quote.age_seconds < 1
+
+    valid.quote.captured_at = time.time() - CONFIG.risk.max_quote_age_seconds - 5
+    assert valid.quote.is_stale()
 
 
 def test_a_missing_quote_timestamp_falls_back_to_read_time_with_a_warning():
@@ -225,10 +241,14 @@ def test_a_missing_quote_timestamp_falls_back_to_read_time_with_a_warning():
     assert any("no quote timestamp" in w for w in valid.warnings)
 
 
-def test_an_exchange_quote_timestamp_is_used_when_present():
+def test_there_is_no_exchange_quote_timestamp_to_use():
+    """Kalshi returns no field that means "the book was current as of X".
+    last_price_time is a trade time and is deliberately ignored, so every
+    quote is stamped with our read time and says so."""
     valid = validate_market(market(last_price_time=time.time() - 5))
-    assert valid.quote.source == "exchange"
-    assert valid.warnings == []
+
+    assert valid.quote.source == "scan"
+    assert any("no quote timestamp" in w for w in valid.warnings)
 
 
 # -- Maker output -----------------------------------------------------------

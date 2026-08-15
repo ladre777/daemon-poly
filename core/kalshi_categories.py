@@ -644,9 +644,31 @@ def get_hierarchy(category: str) -> tuple[str, str, str]:
     return ("Other", "Other", category)
 
 
-#: Same rows, ordered most-specific-first. `sorted` is stable, so patterns of
-#: equal length keep upstream's relative order.
-_PATTERNS_BY_SPECIFICITY = sorted(SUBCATEGORY_PATTERNS, key=lambda row: -len(row[0]))
+#: Corrections applied before the ported table. Kept separate so the table
+#: above stays a verbatim copy that can be diffed against upstream.
+#:
+#: VERIFIED AGAINST PRODUCTION, 2026-08-15. Kalshi's "MVE" prefix marks a
+#: multi-value event, and upstream's own table reads it correctly twice —
+#: MVENFLMULTIGAME and MVENBASINGLEGAME both map to Sports. But
+#: MVESPORTSMULTIGAMEEXTENDED is mapped to Esports, which parses the same
+#: prefix as "MV-ESPORTS" instead of "MVE-SPORTS". These are ordinary
+#: multi-game sports props, not competitive gaming.
+#:
+#: The cost of the misreading is not marginal: a live scan of 80,000 open
+#: markets classified 32,000 of them — 40% of Kalshi's entire catalog — as
+#: Esports, so they were skipped before anything looked at their prices.
+_OVERRIDES: tuple[tuple[str, str, str, str], ...] = (
+    ("MVESPORTSMULTIGAMEEXTENDED", "Sports", "Multi-Game", "Extended Props"),
+    ("MVESPORTSMULTIGAME", "Sports", "Multi-Game", "Multi-Game Props"),
+    ("MVESPORTS", "Sports", "Multi-Game", "Other Multi-Game"),
+)
+
+#: Same rows, ordered most-specific-first, with corrections in front.
+#: `sorted` is stable, so patterns of equal length keep upstream's relative
+#: order, and equal-length overrides win by being listed first.
+_PATTERNS_BY_SPECIFICITY = sorted(
+    _OVERRIDES + tuple(SUBCATEGORY_PATTERNS), key=lambda row: -len(row[0])
+)
 
 
 def match_hierarchy(prefix: str) -> tuple[str, str, str]:

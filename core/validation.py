@@ -156,11 +156,25 @@ def parse_timestamp(value: Any) -> Optional[float]:
 
 # -- Scout market data -----------------------------------------------------
 
-#: Field names Kalshi might carry a quote timestamp under. Not verified
-#: against a live response — see docs/SAFETY.md. If none is present we fall
-#: back to our own read time rather than assuming the quote is fresh.
-_QUOTE_TIME_FIELDS = ("last_price_time", "quote_time", "updated_time",
-                      "last_updated_time", "ts")
+#: Fields that would carry a genuine *quote* timestamp, if Kalshi returned
+#: one. It appears not to.
+#:
+#: VERIFIED AGAINST PRODUCTION, 2026-08-15: this list used to include
+#: ``last_price_time``, and that was a misreading with a large blast radius.
+#: ``last_price_time`` is the time of the market's last *trade*, not the age
+#: of its order book. Treating it as quote freshness rejected every market
+#: that had not traded within MAX_QUOTE_AGE_SECONDS — 47,000 of 80,000 open
+#: markets, with ages like "1577s old, limit 60s". A market that last traded
+#: 26 minutes ago is perfectly tradeable; its bid and ask are current, it is
+#: simply quiet.
+#:
+#: So the honest position is that we have no exchange-side quote timestamp.
+#: Freshness is bounded by our own read time, which is what
+#: MAX_QUOTE_AGE_SECONDS now measures: how long ago *we* fetched the price.
+#: That is a real and useful bound — it stops a proposal being acted on
+#: minutes after the price was read — it just cannot tell us how long the
+#: book had been sitting unchanged before we looked.
+_QUOTE_TIME_FIELDS: tuple[str, ...] = ()
 
 
 @dataclass

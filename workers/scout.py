@@ -240,10 +240,9 @@ class Scout:
             )
         if truncated:
             log.info(
-                "Scan stopped at the %d-page cap (~%d markets). Kalshi's open "
-                "catalog is far larger; scanning all of it takes minutes, by "
-                "which point the earliest quotes are already past "
-                "MAX_QUOTE_AGE_SECONDS and get rejected anyway.",
+                "Scan stopped at the %d-page cap (~%d markets) with more "
+                "catalog remaining. Raise SCOUT_MAX_PAGES if markets you "
+                "expect to trade are being missed.",
                 CONFIG.scout_max_pages, pages * 200,
             )
         log.info(
