@@ -277,6 +277,20 @@ class AppConfig:
     # to cap there. 0 = unlimited.
     max_llm_calls_per_pass: int = _int("MAX_LLM_CALLS_PER_PASS", 40)
     scout_poll_seconds: int = _int("SCOUT_POLL_SECONDS", 30)
+    # Hard cap on pages fetched per scan, 200 markets each.
+    #
+    # MEASURED IN PRODUCTION, 2026-08-15: Kalshi's open catalog is ~50,000
+    # markets, so an unbounded scan pages for 6+ minutes. That breaks the bot
+    # in a way that is easy to miss — the quote on a market read at the start
+    # of the pass is already six minutes old by the time risk evaluates it,
+    # and MAX_QUOTE_AGE_SECONDS (60s) then rejects it. An unbounded scan
+    # therefore does not just run slowly, it throws away almost everything it
+    # collected, and burns rate-limit budget doing so.
+    #
+    # 25 pages ~= 5,000 markets ~= a few seconds, which fits comfortably
+    # inside SCOUT_POLL_SECONDS and keeps every quote well inside its
+    # freshness window. Raise it only alongside MAX_QUOTE_AGE_SECONDS.
+    scout_max_pages: int = _int("SCOUT_MAX_PAGES", 25)
     ledger_db_path: str = os.getenv("LEDGER_DB_PATH", "/data/daemon_kalshi.db")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 

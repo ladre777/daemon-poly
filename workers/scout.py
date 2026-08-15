@@ -157,8 +157,14 @@ class Scout:
         # the events response was still providing was the raw category string
         # kept for auditing — and audit_taxonomy_against_kalshi() still reads
         # it directly when you want it.
+        pages = 0
+        truncated = False
         while True:
+            if CONFIG.scout_max_pages and pages >= CONFIG.scout_max_pages:
+                truncated = True
+                break
             page = self.client.list_markets(status="open", limit=200, cursor=cursor)
+            pages += 1
             for m in page.get("markets", []):
                 ticker = m.get("ticker")
                 if not ticker:
@@ -223,9 +229,18 @@ class Scout:
                 ", ".join(f"{n}x {reason}" for reason, n in
                           sorted(rejected.items(), key=lambda kv: -kv[1])[:8]),
             )
+        if truncated:
+            log.info(
+                "Scan stopped at the %d-page cap (~%d markets). Kalshi's open "
+                "catalog is far larger; scanning all of it takes minutes, by "
+                "which point the earliest quotes are already past "
+                "MAX_QUOTE_AGE_SECONDS and get rejected anyway.",
+                CONFIG.scout_max_pages, pages * 200,
+            )
         log.info(
-            "Scout found %d candidates across %s (skipped by group: %s, invalid: %d)",
-            len(candidates), wanted or "all groups",
+            "Scout found %d candidates across %s in %d page(s) "
+            "(skipped by group: %s, invalid: %d)",
+            len(candidates), wanted or "all groups", pages,
             skipped_by_group or "none", sum(rejected.values()),
         )
         return candidates

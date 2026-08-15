@@ -282,3 +282,52 @@ def test_audit_reports_agreement_with_kalshis_own_field():
     assert rows["KXBTCD-25AUG14-B"]["agrees"] is True
     assert rows["KXNFLGAME-25SEP07"]["agrees"] is False
     assert rows["KXNFLGAME-25SEP07"]["taxonomy_group"] == "Sports"
+
+
+# -- scan bounding ----------------------------------------------------------
+
+
+def test_the_scan_is_page_capped():
+    """MEASURED IN PRODUCTION: Kalshi's open catalog is ~50,000 markets, and
+    an unbounded scan pages for 6+ minutes. That is worse than slow — a quote
+    read at the start of the pass is minutes old by the time risk evaluates
+    it, and the freshness gate then throws it away. An unbounded scan does a
+    lot of work to collect data it will refuse to use."""
+    class EndlessClient(FakeKalshiClient):
+        def __init__(self):
+            super().__init__()
+            self.pages = 0
+
+        def list_markets(self, series_ticker=None, status="open", limit=200,
+                         cursor=None):
+            self.pages += 1
+            return {"markets": [_market(f"KXBTCD-{self.pages}")],
+                    "cursor": f"page-{self.pages}"}
+
+    CONFIG.scout_categories = ["Crypto"]
+    CONFIG.scout_max_pages = 5
+    client = EndlessClient()
+
+    candidates = Scout(client).scan()
+
+    assert client.pages == 5, "must stop at the cap, not page forever"
+    assert len(candidates) == 5
+
+
+def test_the_cap_can_be_disabled():
+    class TwoPageClient(FakeKalshiClient):
+        def __init__(self):
+            super().__init__()
+            self.pages = 0
+
+        def list_markets(self, series_ticker=None, status="open", limit=200,
+                         cursor=None):
+            self.pages += 1
+            return {"markets": [_market(f"KXBTCD-{self.pages}")],
+                    "cursor": "next" if self.pages < 2 else None}
+
+    CONFIG.scout_categories = ["Crypto"]
+    CONFIG.scout_max_pages = 0
+    client = TwoPageClient()
+
+    assert len(Scout(client).scan()) == 2

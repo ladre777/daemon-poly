@@ -33,6 +33,7 @@ _APP_FIELDS = (
     "priority_keywords",
     "max_llm_calls_per_pass",
     "scout_poll_seconds",
+    "scout_max_pages",
 )
 
 
