@@ -115,6 +115,11 @@ class Candidate:
     #: Finer-grained taxonomy levels, e.g. ("Golf", "PGA Tour").
     taxonomy_category: str = ""
     taxonomy_subcategory: str = ""
+    #: Kalshi's name for the YES outcome. On an outcome market this is the
+    #: thing being bet on — for golf, the player — and every market in the
+    #: event shares a title, so this is the only field that distinguishes
+    #: them.
+    yes_sub_title: str = ""
     strike_type: str = ""          # "greater" | "less" | "between"
     floor_strike: Optional[float] = None
     cap_strike: Optional[float] = None
@@ -394,6 +399,7 @@ class Scout:
                         event_ticker=market_event_ticker,
                         taxonomy_category=taxonomy_category,
                         taxonomy_subcategory=subcategory,
+                        yes_sub_title=valid.yes_sub_title,
                         strike_type=valid.strike_type,
                         floor_strike=valid.floor_strike,
                         cap_strike=valid.cap_strike,

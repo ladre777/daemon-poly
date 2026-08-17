@@ -290,6 +290,12 @@ class ValidatedMarket:
     strike_type: str = ""
     floor_strike: Optional[float] = None
     cap_strike: Optional[float] = None
+    #: Kalshi's name for the YES outcome. On a numeric market this restates
+    #: the strike; on an outcome market it names the *thing being bet on* —
+    #: for golf, the player. Every market in one golf event shares a title
+    #: ("PGA Championship winner"), so without this nothing downstream can
+    #: tell which player a market is about.
+    yes_sub_title: str = ""
     warnings: list = field(default_factory=list)
 
 
@@ -451,6 +457,8 @@ def validate_market(raw: dict, event: dict = None, now: float = None) -> Validat
         strike_type=strike_type,
         floor_strike=floor_strike,
         cap_strike=cap_strike,
+        yes_sub_title=clamp_text(raw.get("yes_sub_title"),
+                                 CONFIG.risk.max_title_chars) or "",
         warnings=warnings,
     )
 

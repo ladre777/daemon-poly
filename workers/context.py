@@ -111,6 +111,135 @@ def _guess_golf_tour(title: str) -> str:
     return "pga"  # default assumption — tune once you see real market titles
 
 
+#: Set once a process has logged ESPN's golf shape, so it is reported on the
+#: first golf market of a run rather than on every one.
+_golf_schema_logged = False
+
+
+def _log_golf_schema(event: dict, competition: dict, competitor: dict) -> None:
+    """Report ESPN's actual golf field names, once per process.
+
+    Three bugs in this codebase came from assuming a field name and silently
+    defaulting when it was absent, and Scout answers that by logging the live
+    schema at INFO every scan. The golf path has never executed in
+    production — the demo catalog contains no golf markets — so every field
+    below the ones already in use here is unconfirmed. Rather than guess in
+    silence, the shape is printed the first time a real golf market arrives.
+    """
+    global _golf_schema_logged
+    if _golf_schema_logged:
+        return
+    _golf_schema_logged = True
+    log.info(
+        "ESPN golf schema — event: %s | competition: %s | competitor: %s | "
+        "competitor.status: %s",
+        ", ".join(sorted(event)), ", ".join(sorted(competition)),
+        ", ".join(sorted(competitor)),
+        ", ".join(sorted(competitor.get("status") or {})),
+    )
+
+
+def _golf_line(competitor: dict) -> str:
+    name = (competitor.get("athlete") or {}).get("displayName", "?")
+    score = competitor.get("score", "?")
+    position = ((competitor.get("status") or {}).get("position") or {}).get(
+        "displayName", ""
+    )
+    thru = _golf_thru(competitor)
+    return f"{position} {name}: {score}{thru}".strip()
+
+
+def _golf_thru(competitor: dict) -> str:
+    """How far through the round this player is, when ESPN says.
+
+    Unconfirmed field names, read defensively: absent means it renders as
+    nothing rather than as a wrong number.
+    """
+    status = competitor.get("status") or {}
+    thru = status.get("thru")
+    if status.get("type", {}).get("completed") is True:
+        return " (round complete)"
+    if isinstance(thru, (int, float)):
+        return f" (thru {thru:g})"
+    return ""
+
+
+def _find_competitor(competitors: list, player: str) -> dict | None:
+    """Locate a player on the leaderboard by name.
+
+    Kalshi's ``yes_sub_title`` and ESPN's ``displayName`` are both
+    human-typed, so an exact match is too brittle — "Scottie Scheffler" vs
+    "S. Scheffler". Falls back to surname, which is what actually
+    distinguishes players in a field, and refuses an ambiguous surname rather
+    than picking one.
+    """
+    wanted = player.strip().lower()
+    if not wanted:
+        return None
+    names = [
+        ((c.get("athlete") or {}).get("displayName") or "").strip().lower()
+        for c in competitors
+    ]
+    for competitor, name in zip(competitors, names):
+        if name and name == wanted:
+            return competitor
+
+    surname = wanted.rsplit(" ", 1)[-1]
+    if len(surname) < 3:
+        return None
+    hits = [
+        competitor for competitor, name in zip(competitors, names)
+        if name.rsplit(" ", 1)[-1] == surname
+    ]
+    # Two Kims in the field is not a reason to guess which one.
+    return hits[0] if len(hits) == 1 else None
+
+
+def _shots_back(competitors: list, competitor: dict) -> str:
+    """How far off the lead, in strokes, when both scores are numeric."""
+    def to_number(c):
+        raw = c.get("score")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if isinstance(raw, str):
+            text = raw.strip().upper()
+            if text in ("E", "EVEN", "PAR"):
+                return 0.0
+            try:
+                return float(text.replace("+", ""))
+            except ValueError:
+                return None
+        return None
+
+    mine = to_number(competitor)
+    scores = [s for s in (to_number(c) for c in competitors) if s is not None]
+    if mine is None or not scores:
+        return ""
+    # Golf scores are relative to par: lower is better.
+    back = mine - min(scores)
+    if back <= 0:
+        return ", leading"
+    return f", {back:g} shot(s) back"
+
+
+def _golf_event_state(event: dict, competition: dict) -> str:
+    """Round and completion state, when ESPN reports it.
+
+    Everything here is unconfirmed against a live response, so each piece is
+    included only if present. An empty string means "ESPN did not say", which
+    is the honest rendering.
+    """
+    parts = []
+    status = (competition.get("status") or event.get("status") or {})
+    period = status.get("period")
+    if isinstance(period, (int, float)):
+        parts.append(f"round {period:g}")
+    detail = (status.get("type") or {}).get("shortDetail") or status.get("displayClock")
+    if isinstance(detail, str) and detail.strip():
+        parts.append(detail.strip())
+    return ", ".join(parts)
+
+
 def _guess_sport_league(title: str) -> tuple[str, str] | None:
     t = title.lower()
     for kw, sl in _SPORT_LEAGUE_KEYWORDS.items():
@@ -189,6 +318,21 @@ class ContextEnricher:
         )
 
     def _golf_context(self, candidate: Candidate) -> str | None:
+        """Leaderboard context, anchored on the player this market is about.
+
+        A golf market asks "does *this player* win", and every market in the
+        event carries the same title — "PGA Championship winner" — so the
+        player is only in ``yes_sub_title``. The previous version returned the
+        top ten and nothing else, which meant that for any player outside the
+        top ten (i.e. most of the field, and most of the markets with an
+        interesting price) the model was handed a leaderboard with no mention
+        of the contract it was pricing, and had to guess.
+
+        Now the named player's own line is always included, along with how
+        far off the lead they are and how much golf is left — a three-shot
+        deficit in round one and the same deficit with four holes to play are
+        not the same bet, and nothing in the old context distinguished them.
+        """
         sub = (candidate.taxonomy_subcategory or "").lower().strip()
         tour = _GOLF_SUBCATEGORY_TOURS.get(sub) or _guess_golf_tour(candidate.title)
         data = self.espn.golf_leaderboard(tour)
@@ -196,15 +340,40 @@ class ContextEnricher:
         if not events:
             return None
         event = events[0]
-        competitors = (
-            event.get("competitions", [{}])[0].get("competitors", [])
-        )
+        competition = (event.get("competitions") or [{}])[0]
+        competitors = competition.get("competitors") or []
+        if not competitors:
+            return None
+        _log_golf_schema(event, competition, competitors[0])
+
         lines = [f"ESPN {tour.upper()} leaderboard — {event.get('name', 'current event')}:"]
+        state = _golf_event_state(event, competition)
+        if state:
+            lines.append(f"  Tournament state: {state}")
+
         for c in competitors[:10]:
-            name = c.get("athlete", {}).get("displayName", "?")
-            score = c.get("score", "?")
-            status = c.get("status", {}).get("position", {}).get("displayName", "")
-            lines.append(f"  {status} {name}: {score}")
+            lines.append(f"  {_golf_line(c)}")
+
+        player = (candidate.yes_sub_title or "").strip()
+        if player:
+            match = _find_competitor(competitors, player)
+            if match is None:
+                # Said plainly rather than left as an absence. "This player is
+                # not on the leaderboard" is real information — withdrawn,
+                # missed the cut, or not in the field — and it is very
+                # different from "we did not look".
+                lines.append(
+                    f"  NOTE: {player} — the player this market is about — does "
+                    f"not appear in ESPN's field for this event. Treat any "
+                    f"leaderboard inference about them as unsupported."
+                )
+            else:
+                rank = competitors.index(match) + 1
+                lines.append(
+                    f"  THIS MARKET IS ABOUT {player}: {_golf_line(match)} "
+                    f"(position {rank} of {len(competitors)} in ESPN's field"
+                    f"{_shots_back(competitors, match)})"
+                )
         return "\n".join(lines)
 
     def _sports_context(self, candidate: Candidate) -> str | None:
