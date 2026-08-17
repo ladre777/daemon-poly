@@ -1,0 +1,273 @@
+"""
+Making the paper-trading period measurable.
+
+The schema always held fill prices, fees and realized PnL. But three queries
+filtered on ``action_taken = 'executed'``, and ``record_execution`` writes
+``'dry_run'`` whenever the run is paper — so a dry-run row was never settled
+and never scored. The entire paper period produced no calibration data at all,
+by construction, however long the bot ran.
+
+Worse on the live configuration: nothing is approved either. Every row is
+``skipped_risk``, so grading only paper fills would have produced an empty
+table for the same reason, one level down.
+
+So forecasts are graded whatever happened to them, kept in three modes that
+are never averaged together:
+
+    live     really traded; PnL is money
+    paper    approved and dry-run, or filled nothing; PnL is counterfactual
+    refused  the gate declined it; PnL is what it WOULD have made
+
+The third is the one that answers "is the Checker refusing winners".
+"""
+from __future__ import annotations
+
+import pytest
+
+from memory.edge_store import EdgeRecord, EdgeStore
+from workers.ledger import Ledger, _counterfactual_pnl
+
+
+@pytest.fixture
+def store(db_path):
+    return EdgeStore(db_path)
+
+
+def record(store, action="skipped_risk", probability=0.70, price=40.0,
+           side="yes", ticker="KXTEST-1", category="Crypto"):
+    return store.record_edge(EdgeRecord(
+        ticker=ticker, category=category, source="llm",
+        maker_probability=probability, market_implied_probability=0.40,
+        edge_size=0.30, checker_verdict="reject", checker_confidence=0.6,
+        action_taken=action, counterfactual_price_cents=price,
+        counterfactual_direction=side,
+    ))
+
+
+class ResolvedClient:
+    """Every market resolved YES unless told otherwise."""
+
+    def __init__(self, results=None):
+        self.results = results or {}
+        self.default = "yes"
+        self.lookups: list[str] = []
+
+    def get_market(self, ticker):
+        self.lookups.append(ticker)
+        return {"market": {"ticker": ticker,
+                           "result": self.results.get(ticker, self.default),
+                           "close_time": "2026-08-17T00:00:00Z"}}
+
+    def get_settlements(self, **kw):
+        return {"settlements": [], "cursor": None}
+
+
+# -- the rows that were previously invisible -------------------------------
+
+
+def test_a_dry_run_row_is_gradeable(store, order_store):
+    """The case that made the whole paper period unmeasurable."""
+    edge_id = record(store, action="dry_run")
+    ledger = Ledger(ResolvedClient(), store, order_store)
+
+    assert ledger.reconcile_forecasts() == 1
+
+    row = store.recent_edges()[0]
+    assert row["id"] == edge_id
+    assert row["settled"] == 1
+    assert row["outcome"] == "yes"
+
+
+def test_a_refused_row_is_gradeable(store, order_store):
+    """On the live configuration this is every row there is."""
+    record(store, action="skipped_risk")
+    ledger = Ledger(ResolvedClient(), store, order_store)
+
+    assert ledger.reconcile_forecasts() == 1
+
+
+def test_an_executed_row_is_left_to_the_fill_based_path(store, order_store):
+    """Real trades settle from real fills, with real fees. This must not
+    overwrite them with a counterfactual."""
+    record(store, action="executed")
+    ledger = Ledger(ResolvedClient(), store, order_store)
+
+    assert ledger.reconcile_forecasts() == 0
+
+
+def test_a_row_without_a_probability_is_not_graded(store, order_store):
+    store.record_edge(EdgeRecord(ticker="KXTEST-1", action_taken="skipped_risk"))
+    ledger = Ledger(ResolvedClient(), store, order_store)
+
+    assert ledger.reconcile_forecasts() == 0
+
+
+def test_an_unresolved_market_is_left_alone(store, order_store):
+    record(store, action="dry_run")
+
+    class Open(ResolvedClient):
+        def get_market(self, ticker):
+            return {"market": {"ticker": ticker, "result": ""}}
+
+    assert Ledger(Open(), store, order_store).reconcile_forecasts() == 0
+    assert store.recent_edges()[0]["settled"] == 0
+
+
+def test_grading_is_idempotent(store, order_store):
+    record(store, action="dry_run")
+    ledger = Ledger(ResolvedClient(), store, order_store)
+
+    assert ledger.reconcile_forecasts() == 1
+    assert ledger.reconcile_forecasts() == 0, "a settled row is not re-graded"
+
+
+# -- counterfactual PnL ----------------------------------------------------
+
+
+def test_a_winning_forecast_pays_the_rest_of_the_dollar():
+    pnl = _counterfactual_pnl(
+        {"counterfactual_price_cents": 40.0, "counterfactual_direction": "yes"}, "yes"
+    )
+
+    # 100c payout - 40c paid - fee, in dollars.
+    assert 0.55 < pnl < 0.60
+
+
+def test_a_losing_forecast_loses_the_stake_and_the_fee():
+    pnl = _counterfactual_pnl(
+        {"counterfactual_price_cents": 40.0, "counterfactual_direction": "yes"}, "no"
+    )
+
+    assert -0.43 < pnl < -0.40
+
+
+def test_the_no_side_is_scored_against_the_no_outcome():
+    win = _counterfactual_pnl(
+        {"counterfactual_price_cents": 60.0, "counterfactual_direction": "no"}, "no"
+    )
+    lose = _counterfactual_pnl(
+        {"counterfactual_price_cents": 60.0, "counterfactual_direction": "no"}, "yes"
+    )
+
+    assert win > 0 and lose < 0
+
+
+def test_fees_are_subtracted_using_the_live_formula():
+    """Paper results must not be flattered by pretending trading is free."""
+    from core.pricing import fee_cents_per_contract
+
+    gross = (100.0 - 50.0) / 100.0
+    net = _counterfactual_pnl(
+        {"counterfactual_price_cents": 50.0, "counterfactual_direction": "yes"}, "yes"
+    )
+
+    assert net == pytest.approx(gross - fee_cents_per_contract(50.0) / 100.0)
+
+
+def test_a_row_with_no_captured_price_yields_no_pnl():
+    """Calibration on the probability alone is still possible; inventing a
+    price to fill the column would be worse than leaving it empty."""
+    assert _counterfactual_pnl(
+        {"counterfactual_price_cents": None, "counterfactual_direction": "yes"}, "yes"
+    ) is None
+    assert _counterfactual_pnl(
+        {"counterfactual_price_cents": 40.0, "counterfactual_direction": ""}, "yes"
+    ) is None
+
+
+# -- the modes stay apart --------------------------------------------------
+
+
+def test_paper_and_refused_and_live_are_reported_separately(store, order_store):
+    for action in ("dry_run", "skipped_risk", "executed"):
+        record(store, action=action, ticker=f"KX{action}-1")
+    # Settle the executed one the way the fill path would.
+    live_id = [e["id"] for e in store.recent_edges()
+               if e["action_taken"] == "executed"][0]
+    store.settle(live_id, "yes", 0.55)
+    Ledger(ResolvedClient(), store, order_store).reconcile_forecasts()
+
+    modes = {r["mode"] for r in store.calibration_by_category()}
+
+    assert modes == {"live", "paper", "refused"}
+
+
+def test_a_paper_result_cannot_be_summed_into_a_live_one(store, order_store):
+    record(store, action="dry_run", ticker="KXA-1")
+    record(store, action="executed", ticker="KXB-1")
+    live_id = [e["id"] for e in store.recent_edges()
+               if e["action_taken"] == "executed"][0]
+    store.settle(live_id, "yes", 999.0)
+    Ledger(ResolvedClient(), store, order_store).reconcile_forecasts()
+
+    rows = {r["mode"]: r for r in store.calibration_by_category()}
+
+    assert rows["live"]["total_pnl"] == pytest.approx(999.0)
+    assert rows["paper"]["total_pnl"] != pytest.approx(999.0)
+
+
+def test_brier_is_computed_over_graded_forecasts(store, order_store):
+    """The number the whole change exists to make available."""
+    record(store, action="dry_run", probability=1.0, ticker="KXA-1")
+    Ledger(ResolvedClient(), store, order_store).reconcile_forecasts()
+
+    paper = [r for r in store.calibration_by_category() if r["mode"] == "paper"][0]
+
+    assert paper["n"] == 1
+    assert paper["brier_score"] == pytest.approx(0.0), "a confident correct call"
+
+
+def test_a_confidently_wrong_call_scores_badly(store, order_store):
+    record(store, action="dry_run", probability=1.0, ticker="KXA-1")
+    Ledger(ResolvedClient(results={"KXA-1": "no"}), store, order_store).reconcile_forecasts()
+
+    paper = [r for r in store.calibration_by_category() if r["mode"] == "paper"][0]
+
+    assert paper["brier_score"] == pytest.approx(1.0)
+
+
+# -- the work stays bounded ------------------------------------------------
+
+
+def test_lookups_are_capped_per_pass(store, order_store):
+    for i in range(40):
+        record(store, action="dry_run", ticker=f"KXT{i}-1")
+    client = ResolvedClient()
+
+    Ledger(client, store, order_store).reconcile_forecasts(max_tickers=5)
+
+    assert len(client.lookups) == 5
+
+
+def test_rows_sharing_a_ticker_cost_one_lookup(store, order_store):
+    for _ in range(6):
+        record(store, action="dry_run", ticker="KXSAME-1")
+    client = ResolvedClient()
+
+    settled = Ledger(client, store, order_store).reconcile_forecasts(max_tickers=5)
+
+    assert client.lookups == ["KXSAME-1"]
+    assert settled == 6, "one lookup grades every row on that market"
+
+
+def test_a_zero_cap_disables_grading(store, order_store):
+    record(store, action="dry_run")
+    client = ResolvedClient()
+
+    assert Ledger(client, store, order_store).reconcile_forecasts(max_tickers=0) == 0
+    assert client.lookups == []
+
+
+def test_an_unreachable_market_does_not_stop_the_rest(store, order_store):
+    from core.kalshi_client import KalshiAPIError
+
+    record(store, action="dry_run", ticker="KXBAD-1")
+    record(store, action="dry_run", ticker="KXGOOD-1")
+
+    class Flaky(ResolvedClient):
+        def get_market(self, ticker):
+            if ticker == "KXBAD-1":
+                raise KalshiAPIError(503, "down")
+            return super().get_market(ticker)
+
+    assert Ledger(Flaky(), store, order_store).reconcile_forecasts() == 1

@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS edges (
     checker_reasoning TEXT,
     action_taken TEXT,              -- "pending" | "executed" | "no_fill" | "rejected"
                                     -- | "skipped_risk" | "skipped_checker" | "dry_run"
+    -- What a forecast-only row would have cost. Recorded at decision time so
+    -- a dry-run pass can be scored later; NULL on rows that really traded,
+    -- which is what keeps paper and live results from being confused.
+    counterfactual_price_cents REAL,
+    counterfactual_direction TEXT,  -- "yes" | "no"
     entry_price REAL,               -- average price actually FILLED, not requested
     size_contracts INTEGER,         -- contracts actually filled, not requested
     client_order_id TEXT,           -- links this decision to orders/fills/settlements
@@ -77,6 +82,10 @@ class EdgeRecord:
     action_taken: Optional[str] = None
     entry_price: Optional[float] = None
     size_contracts: Optional[int] = None
+    #: Price a forecast-only row would have paid, and on which side. Set for
+    #: rows that never traded; left None on rows that did.
+    counterfactual_price_cents: Optional[float] = None
+    counterfactual_direction: Optional[str] = None
 
 
 class EdgeStore:
@@ -98,6 +107,10 @@ class EdgeStore:
         have = {r["name"] for r in conn.execute("PRAGMA table_info(edges)")}
         if "client_order_id" not in have:
             conn.execute("ALTER TABLE edges ADD COLUMN client_order_id TEXT")
+        if "counterfactual_price_cents" not in have:
+            conn.execute("ALTER TABLE edges ADD COLUMN counterfactual_price_cents REAL")
+        if "counterfactual_direction" not in have:
+            conn.execute("ALTER TABLE edges ADD COLUMN counterfactual_direction TEXT")
 
     @contextmanager
     def _conn(self):
@@ -113,13 +126,15 @@ class EdgeStore:
                 (ticker, category, source, created_at, maker_probability, maker_reasoning,
                  market_implied_probability, edge_size, checker_verdict,
                  checker_confidence, checker_reasoning, action_taken,
-                 entry_price, size_contracts)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 entry_price, size_contracts,
+                 counterfactual_price_cents, counterfactual_direction)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     edge.ticker, edge.category, edge.source, time.time(), edge.maker_probability,
                     edge.maker_reasoning, edge.market_implied_probability, edge.edge_size,
                     edge.checker_verdict, edge.checker_confidence, edge.checker_reasoning,
                     edge.action_taken, edge.entry_price, edge.size_contracts,
+                    edge.counterfactual_price_cents, edge.counterfactual_direction,
                 ),
             )
             return cur.lastrowid
@@ -174,6 +189,34 @@ class EdgeStore:
                 ).fetchall()
             return [dict(r) for r in rows]
 
+    def unsettled_forecast_edges(self, limit: int = 500) -> list[dict]:
+        """Rows that made a prediction but hold no position.
+
+        A forecast does not need a fill to be graded: the model committed to a
+        probability and the market later resolved, which is everything a Brier
+        score needs.
+
+        Without this the whole paper-trading period is unmeasurable. Settlement
+        and calibration both filtered on action_taken='executed', so a dry-run
+        row was never settled and never scored, however long the bot ran.
+
+        It deliberately includes REFUSED rows as well as paper ones. On the
+        current live configuration nothing is approved at all — every row is
+        skipped_risk — so grading only the paper fills would produce an empty
+        table for the same reason, one level down. Refused rows also answer
+        the more valuable question: is the Checker turning down trades that
+        would have won?
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM edges WHERE settled=0 "
+                "AND action_taken != 'executed' "
+                "AND maker_probability IS NOT NULL "
+                "ORDER BY created_at LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def calibration_by_category(self) -> list[dict]:
         """
         For each (category, source): how often did Maker's stated
@@ -186,6 +229,20 @@ class EdgeStore:
         will show up here as both a high Brier score and an inflated
         avg_maker_probability vs actual_yes_rate — either signal alone is
         useful, together they're hard to fake.
+
+        Rows are grouped by `mode` as well as category and source, and the
+        three are NOT comparable:
+
+          live     — really traded. PnL is money.
+          paper    — approved and dry-run, or filled nothing. PnL is
+                     counterfactual: what the quote at decision time would
+                     have returned, net of the modelled fee.
+          refused  — the Checker or risk declined it. PnL is what the trade
+                     WOULD have made, which is how you find a gate that is
+                     refusing winners.
+
+        Averaging them would let paper results dress up as realized ones, so
+        they are kept apart rather than summed.
         """
         with self._conn() as c:
             rows = c.execute(
@@ -197,10 +254,15 @@ class EdgeStore:
                               * (maker_probability - CASE WHEN outcome='yes' THEN 1.0 ELSE 0.0 END)
                           ) as brier_score,
                           SUM(pnl) as total_pnl,
-                          AVG(pnl) as avg_pnl
+                          AVG(pnl) as avg_pnl,
+                          CASE
+                              WHEN action_taken = 'executed' THEN 'live'
+                              WHEN action_taken IN ('dry_run','no_fill') THEN 'paper'
+                              ELSE 'refused'
+                          END as mode
                    FROM edges
-                   WHERE settled = 1 AND action_taken = 'executed'
-                   GROUP BY category, source"""
+                   WHERE settled = 1 AND maker_probability IS NOT NULL
+                   GROUP BY category, source, mode"""
             ).fetchall()
             return [dict(r) for r in rows]
 

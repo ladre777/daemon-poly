@@ -266,6 +266,14 @@ class RiskConfig:
     # the process runs. At 5s spacing the same buffer covers ~40 minutes and
     # clears the 600-second bar ten minutes after start. 0 stores every tick.
     rti_tick_sample_seconds: float = _float("RTI_TICK_SAMPLE_SECONDS", 5.0)
+    # Distinct markets looked up per pass when grading forecast-only rows.
+    #
+    # Rows accumulate at roughly a hundred an hour and most resolve days
+    # later, so an unbounded sweep would spend the rate-limit budget re-asking
+    # about markets that are still open. Capped per call, oldest first, so
+    # every row is reached eventually without any one pass being expensive.
+    # 0 disables forecast grading entirely.
+    forecast_reconcile_max_tickers: int = _int("FORECAST_RECONCILE_MAX_TICKERS", 25)
     # A print this many times away from the recent median is treated as a
     # feed glitch. Volatility sits in the denominator of the probability
     # calculation, so one bad tick distorts every market on that symbol for

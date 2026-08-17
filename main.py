@@ -787,6 +787,10 @@ def main():
                          alert_store=alert_store, arb_scanner=arb_scanner,
                          coherence_gate=coherence_gate)
                 ledger.reconcile_settlements()
+                # Grade predictions that never became positions. In dry-run
+                # that is every prediction the bot makes, so without this the
+                # whole paper period produces no calibration data at all.
+                ledger.reconcile_forecasts()
                 pass_count += 1
                 if args.reflect_every and pass_count % args.reflect_every == 0:
                     reflector.reflect()

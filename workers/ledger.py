@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from config import CONFIG
 from core.kalshi_client import KalshiAPIError, KalshiClient, KalshiTimeoutError
 from core.order_state import OrderRecord, OrderState
 from memory.edge_store import EdgeStore, EdgeRecord
@@ -64,6 +65,7 @@ class Ledger:
         p = verdict.proposal
         c = p.candidate
         action = "pending" if decision.approved else "skipped_risk"
+        price, side = _counterfactual_entry(p)
         edge_id = self.store.record_edge(
             EdgeRecord(
                 ticker=c.ticker,
@@ -79,6 +81,8 @@ class Ledger:
                 action_taken=action,
                 entry_price=None,
                 size_contracts=0,
+                counterfactual_price_cents=price,
+                counterfactual_direction=side,
             )
         )
         log.info("Logged edge #%d for %s (%s: %s)", edge_id, c.ticker, action, decision.reason)
@@ -97,6 +101,7 @@ class Ledger:
         Checker was never asked.
         """
         c = proposal.candidate
+        price, side = _counterfactual_entry(proposal)
         edge_id = self.store.record_edge(
             EdgeRecord(
                 ticker=c.ticker,
@@ -112,6 +117,8 @@ class Ledger:
                 action_taken=action,
                 entry_price=None,
                 size_contracts=0,
+                counterfactual_price_cents=price,
+                counterfactual_direction=side,
             )
         )
         log.info("Logged edge #%d for %s (%s: %s)", edge_id, c.ticker, action, reason)
@@ -193,6 +200,51 @@ class Ledger:
         if written:
             self._writeback_edges()
         return written
+
+    def reconcile_forecasts(self, max_tickers: int = None) -> int:
+        """Grade predictions that never became positions.
+
+        Returns the number of edge rows newly settled.
+
+        Bounded on purpose. Rows accumulate at roughly a hundred an hour and
+        most resolve days later, so an unbounded sweep would spend the whole
+        rate-limit budget re-asking about markets that are still open. Work is
+        deduplicated by ticker — many rows share one market — and capped per
+        call, oldest first, so every row is reached eventually without any
+        single pass being expensive.
+
+        PnL written here is COUNTERFACTUAL: what one contract at the quote
+        available when the decision was made would have returned, net of the
+        modelled fee. It is stored on rows whose action_taken is not
+        'executed', which is what keeps it out of the live figures.
+        """
+        cap = (max_tickers if max_tickers is not None
+               else CONFIG.risk.forecast_reconcile_max_tickers)
+        if cap <= 0:
+            return 0
+        pending = self.store.unsettled_forecast_edges()
+        if not pending:
+            return 0
+
+        by_ticker: dict[str, list[dict]] = {}
+        for row in pending:
+            by_ticker.setdefault(row["ticker"], []).append(row)
+            if len(by_ticker) >= cap:
+                break
+
+        settled = 0
+        for ticker in by_ticker:
+            result = self._market_result(ticker)
+            if not result:
+                continue
+            for row in by_ticker[ticker]:
+                pnl = _counterfactual_pnl(row, result["result"])
+                self.store.settle(row["id"], result["result"], pnl)
+                settled += 1
+        if settled:
+            log.info("Graded %d forecast row(s) across %d resolved market(s)",
+                     settled, len(by_ticker))
+        return settled
 
     def _settle_fill(self, ticker: str, fill: dict, result: dict) -> bool:
         side = (fill["side"] or "").lower()
@@ -315,6 +367,50 @@ class Ledger:
                 "Edge #%d settled from %d fill-level settlement(s): outcome=%s pnl=$%.2f",
                 edge["id"], len(rows), outcome, pnl,
             )
+
+
+def _counterfactual_entry(proposal) -> tuple[Optional[float], Optional[str]]:
+    """The price and side this proposal would have traded at, right now.
+
+    Captured at decision time because it cannot be recovered afterwards: the
+    book moves, and by settlement the quote that was actually available is
+    gone. Without it a forecast row can be graded for accuracy but not for
+    profitability, and "the model was well calibrated but the price was never
+    there" is exactly the failure worth catching.
+
+    Returns (None, None) rather than guessing when the quote is unusable —
+    a fabricated entry price would make paper PnL look real.
+    """
+    try:
+        side = proposal.direction
+        price = proposal.candidate.executable_price_cents(side)
+    except Exception:                        # noqa: BLE001 - never break logging
+        return None, None
+    if price is None or not (0.0 < float(price) < CONTRACT_PAYOUT_CENTS):
+        return None, None
+    return float(price), side
+
+
+def _counterfactual_pnl(row: dict, outcome: str) -> Optional[float]:
+    """Per-contract PnL the recorded quote would have produced.
+
+    Returns None when no usable entry price was captured — a row can still be
+    graded for calibration on its probability alone, and inventing a price to
+    fill the column would be worse than leaving it empty.
+
+    Uses the same fee function the live path subtracts, so a paper result is
+    not flattered by pretending trading is free.
+    """
+    from core.pricing import fee_cents_per_contract
+
+    price = row.get("counterfactual_price_cents")
+    side = (row.get("counterfactual_direction") or "").lower()
+    if price is None or side not in ("yes", "no"):
+        return None
+    price = float(price)
+    won = side == outcome
+    gross = (CONTRACT_PAYOUT_CENTS - price) if won else -price
+    return (gross - fee_cents_per_contract(price)) / 100.0
 
 
 def _ts(value) -> Optional[float]:
