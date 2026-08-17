@@ -46,6 +46,16 @@ and stop. `#24` was briefly suspected and cleared — the Dockerfile copies only
 deployment has no build to copy"), and re-setting a variable to a value it
 already holds triggers nothing. Redeploy from the Railway dashboard.
 
+**The dashboard "Redeploy" button does NOT ship latest `main`.** It rebuilds
+the commit that deployment carried. Verified: a dashboard redeploy at 14:38
+came back `reason: "redeploy"`, `commitHash: 71bc67e7` — i.e. `#24`, leaving
+`#28` and `#30` behind while looking like a healthy successful deploy.
+
+To ship latest `main`, push a commit to `main` and let auto-deploy run. To
+confirm which commit is actually live, read `meta.commitHash` from
+list-deployments, or check for a log line only the newest code emits — do not
+infer it from a green SUCCESS.
+
 ---
 
 ## What is DONE
