@@ -130,9 +130,25 @@ class Maker:
         if self.enricher:
             extra = self.enricher.enrich(candidate)
             if extra:
+                # Source-neutral, because this block is NOT always ESPN.
+                #
+                # It used to read "Live ESPN context (may or may not be the
+                # exact event — verify it matches before trusting it)" for
+                # every source. So an NWS forecast — the instrument Kalshi's
+                # own weather rules settle against — was handed to the model
+                # labelled as sports data it had just been told not to trust.
+                #
+                # Live weather markets showed exactly the damage that does:
+                # the model returned 48% on a same-day NYC high-temp market
+                # priced at 85.5%, and 72% against a Chicago market at 25%.
+                # The Checker rejected both at 0.88-0.90 confidence and was
+                # right to. Each source now states its own reliability, which
+                # differs: ESPN event matching is genuinely uncertain, an NWS
+                # forecast for the settling station is not.
                 user_msg += (
-                    "\n\nLive ESPN context (may or may not be the exact event — "
-                    "verify it matches before trusting it):\n"
+                    "\n\nLive grounding data. Each source states its own "
+                    "provenance and how far it should be trusted — read that "
+                    "before weighing it:\n"
                     + clamp_text(extra, CONFIG.risk.max_context_chars)
                 )
 

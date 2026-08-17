@@ -329,9 +329,14 @@ class ContextEnricher:
         if not data:
             return None
 
-        lines = [f"NWS data for {city.title()} (station {data['station']}) — this is the "
-                 f"same station Kalshi's market rules should name for settlement, verify against "
-                 f"the specific market's rules:"]
+        lines = [
+            f"SOURCE: US National Weather Service, station {data['station']} "
+            f"({city.title()}). This is the OFFICIAL forecast from the same "
+            f"observing station Kalshi's temperature rules settle against — "
+            f"not a third-party proxy. Treat it as the best available estimate "
+            f"of the settling value, while confirming the station against this "
+            f"specific market's rules:",
+        ]
         if target:
             lines.append(f"  This market settles on {target}.")
         if data.get("forecast_high_f") is None:
@@ -361,7 +366,8 @@ class ContextEnricher:
         if not result:
             return None
         return (
-            f"FRED official data — series {result['series_id']}: "
+            f"SOURCE: FRED (Federal Reserve Economic Data), official series "
+            f"{result['series_id']}: "
             f"latest reading {result['value']} as of {result['date']} "
             f"(this is the last *published* figure, not a forecast of an unreleased number)."
         )
@@ -395,7 +401,11 @@ class ContextEnricher:
             return None
         _log_golf_schema(event, competition, competitors[0])
 
-        lines = [f"ESPN {tour.upper()} leaderboard — {event.get('name', 'current event')}:"]
+        lines = [
+            f"SOURCE: ESPN {tour.upper()} leaderboard — {event.get('name', 'current event')}. "
+            f"ESPN may not be reporting the same event this market settles on; "
+            f"check the event name matches before weighting this heavily.",
+        ]
         state = _golf_event_state(event, competition)
         if state:
             lines.append(f"  Tournament state: {state}")
@@ -437,7 +447,11 @@ class ContextEnricher:
         events = data.get("events", [])
         if not events:
             return None
-        lines = [f"ESPN {league.upper()} scoreboard:"]
+        lines = [
+            f"SOURCE: ESPN {league.upper()} scoreboard. ESPN may not be "
+            f"reporting the same fixture this market settles on; check before "
+            f"weighting this heavily.",
+        ]
         for e in events[:8]:
             comp = e.get("competitions", [{}])[0]
             competitors = comp.get("competitors", [])
