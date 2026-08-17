@@ -43,10 +43,30 @@ Consequences, all of which need verifying rather than assuming:
 
 - **Live trading was NOT active.** No real money had been placed at risk.
 - **`#24` was merged but never ran.** No forecast row has ever been graded.
-- This was the second transient Railway build failure of the day
-  (`b630a81e` failed identically at 12:00; the next deploy succeeded with the
-  same code). A build that fails twice deserves the build log read, not
-  another retry.
+- **Three consecutive builder failures**, not a code fault. Compare logs: a
+  successful build (`c64c0f42`) prints every Docker step —
+  `[3/8] COPY requirements.txt`, `[4/8] RUN pip install`, ...,
+  `exporting to docker image format`, `image push`. The failed ones print
+  exactly one line, `scheduling build on Metal builder "..."`, and then stop.
+  No pip error, no COPY error, no Python traceback. The builder never ran.
+- `#24` was briefly suspected of breaking the build and **did not**. The
+  Dockerfile copies only `main.py config.py core/ workers/ memory/`; `#24`
+  touched exactly those plus `tests/` and added no new top-level package.
+
+### Recovering it — must be done from the Railway dashboard
+
+This cannot be fixed through the API. The MCP `redeploy` tool refuses:
+
+> Cannot redeploy yet ... that deployment has no build to copy. A service must
+> deploy once before it can be redeployed ... attach a source and deploy it
+> from the Railway dashboard.
+
+Setting a variable to a value it already holds is also a no-op and triggers
+nothing — `DRY_RUN` was already `false`, so re-setting it did not produce a
+build.
+
+**Do this:** open the Railway dashboard → `daemon-kalshi-v2` → Deployments →
+redeploy the latest commit. Then read the boot banner.
 
 **First action: read the boot banner and believe it over this file.**
 
