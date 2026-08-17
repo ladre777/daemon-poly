@@ -39,6 +39,11 @@ from config import CONFIG
 
 log = logging.getLogger("daemon_kalshi.scout")
 
+#: Page cap for one targeted series fetch. Generous against any real series —
+#: the largest crypto family observed held under a thousand markets — and
+#: present only so a pathological response cannot spin forever.
+_MAX_SERIES_PAGES = 20
+
 
 @dataclass
 class FamilyCensus:
@@ -300,6 +305,108 @@ class Scout:
         # the events response was still providing was the raw category string
         # kept for auditing — and audit_taxonomy_against_kalshi() still reads
         # it directly when you want it.
+        seen_tickers: set[str] = set()
+
+        def _consider(m: dict) -> None:
+            """Turn one raw market into a Candidate, or account for why not.
+
+            Shared by the paginated sweep and the targeted per-series fetch so
+            the two cannot drift: the liquidity floor, validation and category
+            filter apply identically to both. The targeted fetch finds markets
+            the sweep missed; it is not a way around the filters.
+            """
+            nonlocal below_volume, highest_seen, no_liquidity_data
+            ticker = m.get("ticker")
+            if not ticker:
+                rejected["missing ticker"] = rejected.get("missing ticker", 0) + 1
+                return
+            if ticker in seen_tickers:
+                # The sweep and the targeted fetch overlap by design. Recorded
+                # for EVERY market considered, not just accepted ones —
+                # otherwise a thin or invalid market found by both passes is
+                # counted twice in the census, and the family totals stop
+                # matching the catalog.
+                return
+            seen_tickers.add(ticker)
+            market_event_ticker = m.get("event_ticker", "")
+            group, taxonomy_category, subcategory = classify_ticker(
+                ticker, market_event_ticker
+            )
+            # Counted before the group filter: a watched family being excluded
+            # by SCOUT_CATEGORIES is one of the answers this is here to give,
+            # and filtering first would hide it.
+            tally = census.get(family_of(ticker))
+            if tally is not None:
+                tally.seen += 1
+            if wanted and group.lower() not in wanted:
+                skipped_by_group[group] = skipped_by_group.get(group, 0) + 1
+                if tally is not None:
+                    tally.skipped_group += 1
+                return
+
+            # Everything past here is external data being turned into numbers
+            # the trading logic will act on, so it is validated first. One
+            # malformed market is skipped, not allowed to abort the scan.
+            try:
+                valid = validate_market(m)
+            except MarketDataInvalid as e:
+                reason = str(e).split(":", 1)[-1].strip()
+                rejected[reason] = rejected.get(reason, 0) + 1
+                if tally is not None:
+                    tally.invalid += 1
+                log.debug("Rejected market: %s", e)
+                return
+            for warning in valid.warnings:
+                log.debug("%s: %s", valid.ticker, warning)
+
+            if valid.volume is None:
+                # Kalshi told us nothing about this market's liquidity.
+                # Filtering on an absent field is how the previous two bugs
+                # happened, so this is counted and surfaced rather than
+                # silently treated as zero.
+                no_liquidity_data += 1
+                if tally is not None:
+                    tally.no_liquidity_data += 1
+            elif valid.volume < CONFIG.risk.min_liquidity_usd:
+                # Counted, not silent. "0 candidates" with no further detail is
+                # indistinguishable from a broken scan; knowing that 1,800
+                # markets were classified and validated but sat under the
+                # liquidity floor points straight at MIN_LIQUIDITY_USD rather
+                # than at the parser.
+                below_volume += 1
+                highest_seen = max(highest_seen, valid.volume)
+                if tally is not None:
+                    tally.below_liquidity += 1
+                    tally.best_rejected_liquidity = max(
+                        tally.best_rejected_liquidity, valid.volume
+                    )
+                return
+            if tally is not None:
+                tally.accepted += 1
+            group_families = by_group.setdefault(group, {})
+            fam = family_of(ticker)
+            group_families[fam] = group_families.get(fam, 0) + 1
+            candidates.append(
+                Candidate(
+                    ticker=valid.ticker,
+                    title=valid.title,
+                    category=group,
+                    yes_bid=valid.quote.yes_bid,
+                    yes_ask=valid.quote.yes_ask,
+                    volume=valid.volume,
+                    close_time=valid.close_time,
+                    quote=valid.quote,
+                    series_ticker=m.get("series_ticker", ""),
+                    event_ticker=market_event_ticker,
+                    taxonomy_category=taxonomy_category,
+                    taxonomy_subcategory=subcategory,
+                    yes_sub_title=valid.yes_sub_title,
+                    strike_type=valid.strike_type,
+                    floor_strike=valid.floor_strike,
+                    cap_strike=valid.cap_strike,
+                )
+            )
+
         pages = 0
         truncated = False
         while True:
@@ -322,93 +429,33 @@ class Scout:
                     ", ".join(sorted(markets[0].keys())),
                 )
             for m in markets:
-                ticker = m.get("ticker")
-                if not ticker:
-                    rejected["missing ticker"] = rejected.get("missing ticker", 0) + 1
-                    continue
-                market_event_ticker = m.get("event_ticker", "")
-                group, taxonomy_category, subcategory = classify_ticker(
-                    ticker, market_event_ticker
-                )
-                # Counted before the group filter: a watched family being
-                # excluded by SCOUT_CATEGORIES is one of the answers this is
-                # here to give, and filtering first would hide it.
-                tally = census.get(family_of(ticker))
-                if tally is not None:
-                    tally.seen += 1
-                if wanted and group.lower() not in wanted:
-                    skipped_by_group[group] = skipped_by_group.get(group, 0) + 1
-                    if tally is not None:
-                        tally.skipped_group += 1
-                    continue
-
-                # Everything past here is external data being turned into
-                # numbers the trading logic will act on, so it is validated
-                # first. One malformed market is skipped, not allowed to
-                # abort the scan.
-                try:
-                    valid = validate_market(m)
-                except MarketDataInvalid as e:
-                    reason = str(e).split(":", 1)[-1].strip()
-                    rejected[reason] = rejected.get(reason, 0) + 1
-                    if tally is not None:
-                        tally.invalid += 1
-                    log.debug("Rejected market: %s", e)
-                    continue
-                for warning in valid.warnings:
-                    log.debug("%s: %s", valid.ticker, warning)
-
-                if valid.volume is None:
-                    # Kalshi told us nothing about this market's liquidity.
-                    # Filtering on an absent field is how the previous two
-                    # bugs happened, so this is counted and surfaced rather
-                    # than silently treated as zero.
-                    no_liquidity_data += 1
-                    if tally is not None:
-                        tally.no_liquidity_data += 1
-                elif valid.volume < CONFIG.risk.min_liquidity_usd:
-                    # Counted, not silent. "0 candidates" with no further
-                    # detail is indistinguishable from a broken scan; knowing
-                    # that 1,800 markets were classified and validated but sat
-                    # under the liquidity floor points straight at
-                    # MIN_LIQUIDITY_USD rather than at the parser.
-                    below_volume += 1
-                    highest_seen = max(highest_seen, valid.volume)
-                    if tally is not None:
-                        tally.below_liquidity += 1
-                        tally.best_rejected_liquidity = max(
-                            tally.best_rejected_liquidity, valid.volume
-                        )
-                    continue
-                if tally is not None:
-                    tally.accepted += 1
-                group_families = by_group.setdefault(group, {})
-                fam = family_of(ticker)
-                group_families[fam] = group_families.get(fam, 0) + 1
-                candidates.append(
-                    Candidate(
-                        ticker=valid.ticker,
-                        title=valid.title,
-                        category=group,
-                        yes_bid=valid.quote.yes_bid,
-                        yes_ask=valid.quote.yes_ask,
-                        volume=valid.volume,
-                        close_time=valid.close_time,
-                        quote=valid.quote,
-                        series_ticker=m.get("series_ticker", ""),
-                        event_ticker=market_event_ticker,
-                        taxonomy_category=taxonomy_category,
-                        taxonomy_subcategory=subcategory,
-                        yes_sub_title=valid.yes_sub_title,
-                        strike_type=valid.strike_type,
-                        floor_strike=valid.floor_strike,
-                        cap_strike=valid.cap_strike,
-                    )
-                )
+                _consider(m)
 
             cursor = page.get("cursor")
             if not cursor:
                 break
+
+        # Ask for the priority families by name, rather than hoping pagination
+        # reaches them.
+        #
+        # VERIFIED AGAINST PRODUCTION, 2026-08-17. The sweep is ordered by
+        # Kalshi, not by us, and production's catalog is dominated by
+        # multi-value event shards — one scan reported KXMVECROSSCATEGORY
+        # x1425 and KXMVESPORTSMULTIGAMEEXTENDED x859. The 400-page cap
+        # (80,000 markets) was exhausted before a single priority family
+        # appeared, so every one of them reported "0 seen" and the quant path
+        # attempted nothing at all.
+        #
+        # Raising the cap does not fix that, it only moves it: the catalog is
+        # larger still, every extra page is a rate-limited request, and the
+        # ordering stays outside our control. Asking for a series by name is
+        # bounded, cheap and deterministic.
+        for family in sorted(watched):
+            try:
+                pages += self._fetch_series(family, _consider)
+            except (KalshiAPIError, KalshiTimeoutError) as e:
+                # One unreachable series must not cost the rest of the scan.
+                log.warning("Targeted fetch for series %s failed: %s", family, e)
 
         self._log_unclassified(candidates)
         if rejected:
@@ -465,6 +512,31 @@ class Scout:
                 highest_seen, CONFIG.risk.min_liquidity_usd,
             )
         return candidates
+
+    def _fetch_series(self, series_ticker: str, consider) -> int:
+        """Pull every open market in one series, handing each to `consider`.
+
+        Returns pages fetched, so the scan's page count stays honest.
+
+        Bounded independently of SCOUT_MAX_PAGES: a single series is small
+        (the largest crypto family observed was under a thousand markets), and
+        the point of this call is that it cannot be crowded out by the rest of
+        the catalog. It is still capped so a pathological series cannot spin.
+        """
+        cursor = None
+        pages = 0
+        while pages < _MAX_SERIES_PAGES:
+            page = self.client.list_markets(
+                series_ticker=series_ticker, status="open", limit=200, cursor=cursor
+            )
+            pages += 1
+            markets = page.get("markets", []) or []
+            for m in markets:
+                consider(m)
+            cursor = page.get("cursor")
+            if not cursor:
+                break
+        return pages
 
     @staticmethod
     def unknown_configured_categories() -> set[str]:

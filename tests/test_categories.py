@@ -182,6 +182,17 @@ class CategoryClient(FakeKalshiClient):
 
     def list_markets(self, series_ticker=None, status="open", limit=200,
                      cursor=None):
+        # Honours series_ticker the way the real endpoint does. Scout now
+        # fetches priority families by series as well as sweeping, and a fake
+        # that ignored the filter would return the whole catalog for every
+        # targeted call — which is not what production does.
+        if series_ticker:
+            return {
+                "markets": [m for m in self._markets
+                            if (m.get("ticker") or "").upper().split("-", 1)[0]
+                            == series_ticker.upper()],
+                "cursor": None,
+            }
         return {"markets": self._markets, "cursor": None}
 
     def list_events(self, status="open", limit=200, cursor=None,
@@ -307,6 +318,9 @@ def test_the_scan_is_page_capped():
 
     CONFIG.scout_categories = ["Crypto"]
     CONFIG.scout_max_pages = 5
+    # Isolates the sweep. Targeted per-series fetches are a separate mechanism
+    # with its own bound — see tests/test_targeted_series_fetch.py.
+    CONFIG.scout_census_families = []
     client = EndlessClient()
 
     candidates = Scout(client).scan()
@@ -329,6 +343,7 @@ def test_the_cap_can_be_disabled():
 
     CONFIG.scout_categories = ["Crypto"]
     CONFIG.scout_max_pages = 0
+    CONFIG.scout_census_families = []
     client = TwoPageClient()
 
     assert len(Scout(client).scan()) == 2
