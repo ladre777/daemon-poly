@@ -19,7 +19,12 @@ approval is not.
 """
 from __future__ import annotations
 
+import pytest
+
+from config import CONFIG
 from core.validation import repair_truncated_json, validate_checker_output
+
+from tests.conftest import make_verdict
 
 #: The shape production actually emits — cut off inside `reasoning`.
 TRUNCATED_REJECT = (
@@ -190,3 +195,79 @@ def test_a_complete_response_is_not_marked_as_recovered():
 
     assert out.verdict == "approve"
     assert "truncated" not in out.reasoning.lower()
+
+
+# -- the Checker must know what year it is ---------------------------------
+
+
+def test_the_prompt_states_todays_date(monkeypatch):
+    """A false rejection traced to the Checker not knowing the date.
+
+    On KXHIGHNY-26AUG17-T84 — a weather market, where our grounding is an
+    official NWS forecast from the same station Kalshi settles against — the
+    Checker rejected with:
+
+        NWS forecasts don't extend 2+ years out, so the Maker's claimed
+        'official forecast' for Aug 2026 is almost certainly a hallucination
+
+    The forecast was real and had been pulled that morning. The Checker was
+    reasoning from its training cutoff and concluded a correctly dated market
+    was fabricated. That is a factual input error, not a judgement call, and
+    it pushes the gate toward refusing exactly the trades we have the best
+    case for.
+    """
+    from datetime import datetime, timezone
+
+    from workers.checker import Checker
+
+    captured = {}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("stop here — the prompt is what is under test")
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    checker = Checker.__new__(Checker)
+    checker._client = FakeClient()
+
+    verdict = make_verdict()
+    with pytest.raises(RuntimeError):
+        checker.check(verdict.proposal)
+
+    prompt = captured["messages"][0]["content"]
+    today = f"{datetime.now(timezone.utc):%Y-%m-%d}"
+    assert today in prompt, "the Checker must be told the current date"
+    assert "authoritative" in prompt
+
+
+def test_the_prompt_carries_the_market_close_time(monkeypatch):
+    """Knowing today is only half of it — the Checker also has to see when
+    the market resolves to judge whether a forecast horizon is plausible."""
+    from workers.checker import Checker
+
+    captured = {}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("stop")
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    checker = Checker.__new__(Checker)
+    checker._client = FakeClient()
+
+    verdict = make_verdict()
+    with pytest.raises(RuntimeError):
+        checker.check(verdict.proposal)
+
+    assert "Market closes:" in captured["messages"][0]["content"]
+
+
+def test_no_threshold_moved_with_it():
+    """This change informs the gate; it does not weaken it."""
+    assert CONFIG.risk.checker_min_confidence >= 0.6

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import anthropic
 
@@ -58,8 +59,29 @@ class Checker:
 
     def check(self, proposal: Proposal) -> Verdict:
         c = proposal.candidate
+        # Today's date, stated plainly and first.
+        #
+        # Without it the Checker reasons from its training cutoff, and that
+        # produced a false rejection on the best-grounded market in the
+        # system. On KXHIGHNY-26AUG17-T84 it wrote: "NWS forecasts don't
+        # extend 2+ years out, so the Maker's claimed 'official forecast' for
+        # Aug 2026 is almost certainly a hallucination". The forecast was
+        # real, pulled that morning from the same NWS station Kalshi settles
+        # against. The Checker simply did not know what year it was, so a
+        # correctly dated market looked like a fabrication — and the markets
+        # this hits hardest are the weather ones, where our grounding is
+        # strongest and the case for a real edge is best.
+        #
+        # This is not a loosening. Every threshold the gate had, it keeps. It
+        # is being told a fact it was previously guessing at, and guessing
+        # wrong in the direction of refusing good trades.
+        now = datetime.now(timezone.utc)
         user_msg = (
+            f"Today's date is {now:%Y-%m-%d} (UTC). This is current and "
+            f"authoritative: market and forecast dates near it are real, not "
+            f"errors, even if they fall after your training data ends.\n"
             f"Market: {c.title} ({c.ticker})\n"
+            f"Market closes: {c.close_time}\n"
             f"Market implied probability: {c.implied_yes_probability:.2%} "
             f"(bid/ask {c.yes_bid}/{c.yes_ask})\n"
             f"Maker's estimate: {proposal.maker_probability:.2%} "
