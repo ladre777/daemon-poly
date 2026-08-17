@@ -663,14 +663,21 @@ def main():
     # the first pass so it has a chance to receive a frame; the quant path
     # declines cleanly in the meantime rather than falling back to spot.
     rti_runner = RTIFeedRunner() if CONFIG.risk.rti_feed_enabled else None
+    spot_client = SpotPriceClient(
+        rti_feed=rti_runner.feed if rti_runner else None
+    )
     if rti_runner is not None:
+        # Every frame also feeds the volatility history. Without this the
+        # estimate is built from one sample per scan pass, which needs the
+        # better part of an hour of uptime to reach the 600-second span it
+        # requires — while the feed is delivering two observations a second
+        # of the same instrument. Wired before start() so no frame is lost.
+        rti_runner.on_quote = spot_client.record_tick
         rti_runner.start()
     else:
         log.warning("RTI_FEED_ENABLED is off — crypto families will not be "
                     "priced. This suppresses trades; it does not risk any.")
-    quant_maker = QuantMaker(
-        SpotPriceClient(rti_feed=rti_runner.feed if rti_runner else None)
-    )
+    quant_maker = QuantMaker(spot_client)
     # Model-free structural-arb detection. Constructed unconditionally;
     # the scanner itself is a no-op unless ARB_ENABLED.
     arb_scanner = ArbitrageScanner(notifier=notifier)

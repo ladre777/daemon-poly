@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -98,13 +99,19 @@ class PriceHistory:
 
     def __init__(self, maxlen: int = 500):
         self._buf: deque[tuple[float, float]] = deque(maxlen=maxlen)
+        # The RTI feed writes from its own thread while the scan loop reads.
+        # A single deque append is atomic under CPython, but `add` inspects
+        # the buffer for ordering and outliers before appending and
+        # `realized_vol` walks the whole thing — neither is atomic.
+        self._lock = threading.RLock()
 
     def __len__(self) -> int:
         return len(self._buf)
 
     @property
     def points(self) -> list[tuple[float, float]]:
-        return list(self._buf)
+        with self._lock:
+            return list(self._buf)
 
     def add(self, price: float, at: float = None) -> bool:
         """Append an observation. Returns False if it was rejected.
@@ -117,6 +124,10 @@ class PriceHistory:
         at = at if at is not None else time.time()
         if price is None or not math.isfinite(price) or price <= 0:
             return False
+        with self._lock:
+            return self._add_locked(price, at)
+
+    def _add_locked(self, price: float, at: float) -> bool:
         if self._buf and at <= self._buf[-1][0]:
             # Same-instant or out-of-order: several candidates in one pass
             # asking for the same symbol must not each append a point.
@@ -131,9 +142,10 @@ class PriceHistory:
         return True
 
     def median(self, window: int = 20) -> Optional[float]:
-        if not self._buf:
-            return None
-        recent = sorted(p for _, p in list(self._buf)[-window:])
+        with self._lock:
+            if not self._buf:
+                return None
+            recent = sorted(p for _, p in list(self._buf)[-window:])
         mid = len(recent) // 2
         if len(recent) % 2:
             return recent[mid]
@@ -146,8 +158,9 @@ class PriceHistory:
         every price is accepted, which is correct — there is nothing to
         compare against.
         """
-        if len(self._buf) < 5:
-            return False
+        with self._lock:
+            if len(self._buf) < 5:
+                return False
         med = self.median()
         if not med or med <= 0:
             return False
@@ -167,7 +180,8 @@ class PriceHistory:
         and makes the units explicit.
         """
         cutoff = time.time() - lookback_seconds
-        points = [(t, p) for t, p in self._buf if t >= cutoff and p > 0]
+        with self._lock:
+            points = [(t, p) for t, p in self._buf if t >= cutoff and p > 0]
         if len(points) < CONFIG.risk.min_vol_observations:
             return None
 
@@ -190,9 +204,10 @@ class PriceHistory:
         return vol if vol > 0 else None
 
     def span_seconds(self) -> float:
-        if len(self._buf) < 2:
-            return 0.0
-        return self._buf[-1][0] - self._buf[0][0]
+        with self._lock:
+            if len(self._buf) < 2:
+                return 0.0
+            return self._buf[-1][0] - self._buf[0][0]
 
 
 class SpotPriceClient:
@@ -213,9 +228,54 @@ class SpotPriceClient:
         #: Per-source backoff state: (blocked_until, consecutive_failures).
         self._backoff: dict[str, tuple[float, int]] = {}
         self.fetch_counts: dict[str, int] = {}
+        #: Last stored streaming observation per symbol, for downsampling.
+        self._last_tick_at: dict[str, float] = {}
 
     def close(self):
         self._http.close()
+
+    # -- streaming observations --------------------------------------------
+
+    def record_tick(self, symbol: str, price: float, at: float = None) -> bool:
+        """Record an index observation that arrived without being asked for.
+
+        The volatility estimate used to be fed only by :meth:`get_quote`, once
+        per symbol per scan pass. At a five-minute poll interval, reaching the
+        600-second span the estimator requires took the better part of an hour
+        of uninterrupted uptime — and the buffer is in memory, so every
+        redeploy set it back to zero. Production spent a whole session
+        reporting::
+
+            Only 0s of price history for eth (need 600s) — declining rather
+            than pricing off noise
+
+        with the CF Benchmarks feed simultaneously delivering roughly two
+        observations a second of exactly the right instrument, all discarded.
+
+        Ticks are downsampled to ``RTI_TICK_SAMPLE_SECONDS`` before being
+        stored. That is not a performance concern: the buffer holds 500
+        points, so recording every frame would give it a span of about four
+        minutes — well under the 600 seconds required — and the estimator
+        would never be satisfied no matter how long the process ran. Sampling
+        every 5 seconds gives roughly 40 minutes of span in the same buffer,
+        and clears the 600-second bar after ten minutes of uptime.
+
+        Returns whether the tick was stored, so callers can count.
+        """
+        key = (symbol or "").lower()
+        if not key:
+            return False
+        at = at if at is not None else time.time()
+        interval = CONFIG.risk.rti_tick_sample_seconds
+        if interval > 0:
+            last = self._last_tick_at.get(key)
+            if last is not None and at - last < interval:
+                return False
+        history = self.history.setdefault(key, PriceHistory())
+        if not history.add(price, at):
+            return False
+        self._last_tick_at[key] = at
+        return True
 
     # -- scan-pass caching -------------------------------------------------
 

@@ -257,6 +257,15 @@ class RiskConfig:
     # feed never came up. Long enough for a connect and first frame; short
     # enough that a silent crypto outage is not discovered a day later.
     rti_startup_grace_seconds: float = _float("RTI_STARTUP_GRACE_SECONDS", 90.0)
+    # Minimum spacing between index observations kept for the volatility
+    # estimate.
+    #
+    # The feed delivers roughly two frames a second. The history buffer holds
+    # 500 points, so storing every frame would give it about four minutes of
+    # span — permanently short of MIN_VOL_SPAN_SECONDS, no matter how long
+    # the process runs. At 5s spacing the same buffer covers ~40 minutes and
+    # clears the 600-second bar ten minutes after start. 0 stores every tick.
+    rti_tick_sample_seconds: float = _float("RTI_TICK_SAMPLE_SECONDS", 5.0)
     # A print this many times away from the recent median is treated as a
     # feed glitch. Volatility sits in the denominator of the probability
     # calculation, so one bad tick distorts every market on that symbol for

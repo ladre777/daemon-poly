@@ -39,6 +39,10 @@ from core.rti_client import CHANNEL, INDEX_FOR_SYMBOL, RTIFeed, subscribe_comman
 
 log = logging.getLogger("daemon_kalshi.rti_runner")
 
+#: Reverse of INDEX_FOR_SYMBOL, so an arriving frame can be attributed to the
+#: symbol whose volatility history it belongs in.
+SYMBOL_FOR_INDEX: dict[str, str] = {v: k for k, v in INDEX_FOR_SYMBOL.items()}
+
 #: Envelope types Kalshi replies with that are not index values.
 _ACK_TYPES = ("subscribed", "ok")
 _ERROR_TYPES = ("error", "unsubscribed")
@@ -53,8 +57,14 @@ class RTIFeedRunner:
     """
 
     def __init__(self, feed: RTIFeed = None, cfg=None, index_ids: list[str] = None,
-                 ws_factory=None):
+                 ws_factory=None, on_quote=None):
         self.feed = feed or RTIFeed()
+        #: Called with (symbol, price, observed_at) for every accepted frame.
+        #: Wired to SpotPriceClient.record_tick so the volatility estimate is
+        #: built from the index's own tick stream rather than from one sample
+        #: per scan pass — see that method for why that mattered.
+        self.on_quote = on_quote
+        self.ticks_recorded = 0
         self.cfg = cfg or CONFIG.kalshi
         #: Every index any configured family settles against. Subscribing to
         #: all of them once is cheaper than tracking which are in play, and
@@ -217,6 +227,24 @@ class RTIFeedRunner:
             return
         self.last_frame_at = time.time()
         self.last_error = None
+        self._record(quote)
         log.debug("RTI %s = %.2f%s", quote.index_id, quote.value,
                   "" if quote.windowed_15min is None
                   else f" (15m window {quote.windowed_15min:.2f})")
+
+    def _record(self, quote) -> None:
+        """Hand the observation to the volatility history, if one is wired.
+
+        Contained: a failure here is a lost data point, not a lost feed. The
+        socket must keep running whatever the consumer does with a tick.
+        """
+        if self.on_quote is None:
+            return
+        symbol = SYMBOL_FOR_INDEX.get(quote.index_id)
+        if symbol is None:
+            return
+        try:
+            if self.on_quote(symbol, quote.value, quote.received_at):
+                self.ticks_recorded += 1
+        except Exception:
+            log.exception("Recording an RTI tick failed — the feed continues")
