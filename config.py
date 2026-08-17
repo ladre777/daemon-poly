@@ -142,6 +142,27 @@ class RiskConfig:
     # PF-04/PF-09/PF-10 numbers — these are conservative placeholders.
     max_position_pct: float = _float("MAX_POSITION_PCT", 0.05)       # 5% of bankroll per position
     max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 0.10)    # kill switch trigger
+
+    # -- model coherence gates (see workers/coherence.py) -------------------
+    # Both gates can only REFUSE a proposal; neither can approve one. On by
+    # default because production produced arithmetically impossible model
+    # output — P(WTI>84.99)=32% alongside P(WTI>86.49)=45% — and the only
+    # thing that caught it was the Checker's judgement on each trade.
+    coherence_checks_enabled: bool = _bool("COHERENCE_CHECKS_ENABLED", True)
+    # Slack allowed before two strikes on the same event count as
+    # contradictory. Small: this is a model's own output, not an order book,
+    # so it has no tick-rounding excuse. 0.01 = one percentage point.
+    coherence_tolerance: float = _float("COHERENCE_TOLERANCE", 0.01)
+    # Maximum distance, in log-odds, between the model and the market before
+    # the disagreement is treated as model error.
+    #
+    # Log-odds rather than percentage points on purpose. A flat 30pp cap would
+    # also reject the weather thesis — model 15% against a market at 50% is a
+    # real disagreement, and only 1.73 apart in log-odds. Claiming 45% against
+    # a market at 1.5% is 3.99 apart: not disagreeing with the market, but
+    # asserting it is wrong by a factor of fifty. 3.0 separates the two.
+    # Set 0 to disable this gate alone.
+    max_log_odds_disagreement: float = _float("MAX_LOG_ODDS_DISAGREEMENT", 3.0)
     # Whether unrealized *gains* may offset realized losses in the daily-loss
     # control. Unrealized losses always count — that is the point of marking
     # to market. Gains are excluded by default, because letting paper profit

@@ -84,6 +84,39 @@ class Ledger:
         log.info("Logged edge #%d for %s (%s: %s)", edge_id, c.ticker, action, decision.reason)
         return edge_id
 
+    def log_refused_proposal(self, proposal, action: str, reason: str) -> int:
+        """Record a proposal killed before it reached the Checker.
+
+        The coherence gates run between Maker and Checker, so there is no
+        verdict to attach — but the row still belongs on disk. A proposal
+        refused for being arithmetically impossible is the most diagnostic
+        thing the model produces, and dropping it would leave the ledger
+        showing a quiet pass rather than a model that needs fixing.
+
+        ``checker_*`` stay null, which is what distinguishes these rows: the
+        Checker was never asked.
+        """
+        c = proposal.candidate
+        edge_id = self.store.record_edge(
+            EdgeRecord(
+                ticker=c.ticker,
+                category=c.category,
+                source=proposal.source,
+                maker_probability=proposal.maker_probability,
+                maker_reasoning=proposal.reasoning,
+                market_implied_probability=c.implied_yes_probability,
+                edge_size=proposal.edge_size,
+                checker_verdict=None,
+                checker_confidence=None,
+                checker_reasoning=None,
+                action_taken=action,
+                entry_price=None,
+                size_contracts=0,
+            )
+        )
+        log.info("Logged edge #%d for %s (%s: %s)", edge_id, c.ticker, action, reason)
+        return edge_id
+
     def record_execution(self, edge_id: int, record: OrderRecord) -> None:
         """Attach the reconciled order outcome to its decision row.
 
