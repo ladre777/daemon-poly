@@ -3,7 +3,7 @@
 Handoff for the next session. **Read this, not chat history** — chat contains
 stale PR numbers and at least two claims I had to correct later.
 
-Last updated: 2026-08-17 17:20 UTC, end of the prod-cutover session.
+Last updated: 2026-08-17 17:35 UTC, end of the prod-cutover session.
 
 ---
 
@@ -13,13 +13,13 @@ Verify these rather than trusting them; they were true when written.
 
 | | |
 |---|---|
-| `main` | `#34` merged. Check `git log --oneline -8`. |
-| Tests | 876 passing locally, `ruff` clean. **CI was NOT read** — see below. |
+| `main` | `1b431a5`, `#34` merged plus four follow-ups. Check `git log --oneline -8`. |
+| Tests | 880 passing locally, `ruff` clean. **CI was NOT read** — see below. |
 | Railway | `env=prod`, `DRY_RUN=false` — **LIVE, REAL MONEY**, confirmed from the boot banner at 16:50. |
-| Live commit | `ddadc43`, deployment `65e6e4ea`, booted 16:50 UTC. Read `meta.commitHash`, never a green SUCCESS. |
+| Live commit | `1b431a5`, deployment `0c8eae18`, booted 17:31 UTC. Read `meta.commitHash`, never a green SUCCESS. |
 | Account | funded ~$49.98 |
 | RTI feed | live on prod, subscribed to BRTI + ETHUSD_RTI |
-| Volatility clock | **starts warm now.** Boot logged `Restored volatility history: btc 612 point(s), eth 614 point(s)` — well past the 600s the quant path needs |
+| Volatility clock | **starts warm now** (`Restored volatility history: btc 430 point(s), eth 431`). Sigma is measured across a sampling ladder and logged both at boot and per family per pass — the two agree, 52% vs 52.2% at 17:33. |
 | ESPN | **blocked for bots. Do not touch the ESPN client.** |
 | Web access from the agent sandbox | direct `curl` is blocked, but the proxy-backed WebSearch/WebFetch tools DO work — usable for research, not for testing whether an endpoint works from Railway |
 | NOAA | wired, never yet executed against a live weather market |
@@ -110,9 +110,12 @@ reliable trigger.
   across a ladder of sampling intervals, taking the largest, and the quant path
   refuses outright when the estimate implies an implausible annualized vol.
 
-What is left on item 3 is confirming `#34` against the live feed (see below),
-and then genuinely latency-aware behaviour — reacting inside the settlement
-window rather than merely being warm enough to price.
+`#34` is confirmed against the live feed — the signature climbs and the
+coherence gate now passes crypto proposals. What is left is that the estimate
+is a *trailing realized* volatility used as a *forward* one, which overshoots
+after a move (52% measured against a market implying ~28%). See "The single
+next action". After that, genuinely latency-aware behaviour — reacting inside
+the settlement window rather than merely being warm enough to price.
 
 **Order pricing.** `#33` fixed a silent defect worth knowing about even though
 it is closed. Kalshi quotes some markets in tenths of a cent
