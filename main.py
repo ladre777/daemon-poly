@@ -46,6 +46,7 @@ from core.spot_price_client import SpotPriceClient
 from core.telegram_client import TelegramClient
 from workers.quant_maker import QuantMaker
 from workers.arbitrage import ArbitrageScanner
+from workers.coherence import CoherenceGate
 
 logging.basicConfig(
     level=CONFIG.log_level,
@@ -187,7 +188,8 @@ def install_shutdown_handlers() -> dict:
 
 
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
-             notifier=None, health=None, alert_store=None, arb_scanner=None):
+             notifier=None, health=None, alert_store=None, arb_scanner=None,
+             coherence_gate=None):
     """One scan pass. Returns the number of orders that actually filled.
 
     Reconciliation happens first: if it fails, the pass places no orders at
@@ -235,6 +237,10 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # different problems that all look identical in the log. Every candidate
     # leaves via exactly one of these buckets.
     stats: dict[str, int] = defaultdict(int)
+    # Built here when absent so existing callers keep working; it is per-pass
+    # state with no persistence, so constructing one costs nothing.
+    coherence_gate = coherence_gate or CoherenceGate()
+    coherence_gate.begin_pass()
 
     # Structural arbs are model-free and cost nothing to look for, so they are
     # checked across the whole scan before any LLM budget is spent. Off unless
@@ -318,6 +324,18 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             candidate.ticker, proposal.maker_probability * 100,
             candidate.implied_yes_probability * 100, proposal.edge_size * 100,
         )
+
+        # Before spending a Checker call on it. Production produced model
+        # output that was arithmetically impossible — P(WTI>84.99)=32%
+        # alongside P(WTI>86.49)=45% on the same contract — and the Checker's
+        # per-trade judgement was the only thing catching it. These gates can
+        # only refuse; see workers/coherence.py.
+        coherence = coherence_gate.check(proposal)
+        if not coherence.ok:
+            stats["incoherent"] += 1
+            ledger.log_refused_proposal(proposal, action="skipped_incoherent",
+                                        reason=coherence.reason)
+            continue
 
         # Same containment for the Checker. A Checker that cannot answer means
         # this proposal is unreviewed, and an unreviewed proposal is never
@@ -588,6 +606,7 @@ def main():
     # Model-free structural-arb detection. Constructed unconditionally;
     # the scanner itself is a no-op unless ARB_ENABLED.
     arb_scanner = ArbitrageScanner(notifier=notifier)
+    coherence_gate = CoherenceGate()
     checker = Checker()
     risk = RiskGuardrail(bankroll_usd=args.bankroll, store=store,
                          order_store=order_store, notifier=notifier)
@@ -665,7 +684,8 @@ def main():
             try:
                 run_once(scout, maker, quant_maker, checker, risk, execution,
                          ledger, account, notifier=notifier, health=health,
-                         alert_store=alert_store, arb_scanner=arb_scanner)
+                         alert_store=alert_store, arb_scanner=arb_scanner,
+                         coherence_gate=coherence_gate)
                 ledger.reconcile_settlements()
                 pass_count += 1
                 if args.reflect_every and pass_count % args.reflect_every == 0:

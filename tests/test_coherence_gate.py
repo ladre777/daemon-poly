@@ -1,0 +1,302 @@
+"""
+Model coherence gates.
+
+The production pass that motivated these, verbatim from the logs — ten WTI
+strikes on one contract, one pass:
+
+    strike   model   market
+    83.49    48.0%   22.5%
+    84.49    45.0%   10.5%
+    84.99    32.0%    8.5%
+    86.49    45.0%    3.5%
+    87.99    45.0%    1.5%
+
+P(WTI > 84.99) = 32% and P(WTI > 86.49) = 45% cannot both be true. Sixteen of
+forty-five strike pairs violated it, some by 13 percentage points, while the
+market's own prices fell cleanly from 22.5% to 1.5%. The model was not reading
+the strike; it emitted roughly 45% for everything, and the whole apparent
+edge — 35 percentage points on average — was that artifact.
+
+All ten were caught by the Checker. That is the margin these gates exist to
+widen: one LLM's per-trade judgement was the only thing between the bot and
+buying deep out-of-the-money contracts at twenty to thirty times fair value.
+"""
+from __future__ import annotations
+
+import pytest
+
+from config import CONFIG
+from workers.coherence import CoherenceGate, log_odds_distance
+from workers.maker import Proposal
+
+from tests.conftest import make_candidate
+
+
+#: The real pass: (floor_strike, model probability, market probability).
+WTI_PASS = [
+    (83.49, 0.48, 0.225), (83.99, 0.52, 0.165), (84.49, 0.45, 0.105),
+    (84.99, 0.32, 0.085), (85.49, 0.35, 0.045), (85.99, 0.42, 0.035),
+    (86.49, 0.45, 0.035), (86.99, 0.35, 0.015), (87.49, 0.45, 0.025),
+    (87.99, 0.45, 0.015),
+]
+
+
+def proposal(strike, model_p, market_p=0.30, event="KXWTI-26AUG1714",
+             strike_type="greater", ticker=None):
+    """A Maker proposal on one strike of a ladder.
+
+    market_p is expressed through the book, since that is where
+    implied_yes_probability reads it from.
+    """
+    mid = market_p * 100
+    candidate = make_candidate(
+        ticker=ticker or f"{event}-T{strike}",
+        yes_bid=max(mid - 0.5, 1.0), yes_ask=min(mid + 0.5, 99.0),
+        event_ticker=event,
+    )
+    candidate.strike_type = strike_type
+    candidate.floor_strike = strike
+    return Proposal(candidate=candidate, maker_probability=model_p,
+                    maker_confidence=0.8, reasoning="stub")
+
+
+@pytest.fixture
+def gate():
+    g = CoherenceGate()
+    g.begin_pass()
+    return g
+
+
+# --------------------------------------------------------------------------
+# gate 1: monotonicity across strikes
+# --------------------------------------------------------------------------
+
+def test_the_production_pass_is_caught(gate):
+    """The whole point. Replayed exactly as it happened."""
+    accepted, refused = [], []
+    for strike, model_p, market_p in WTI_PASS:
+        report = gate.check(proposal(strike, model_p, market_p))
+        (accepted if report.ok else refused).append(strike)
+
+    assert refused, "this pass must not sail through"
+    assert len(refused) >= 8, (
+        f"only {len(refused)} of 10 refused — the model was incoherent across "
+        f"the whole ladder"
+    )
+    assert gate.rejected_monotonicity or gate.rejected_implausible
+
+
+def test_a_higher_strike_cannot_be_more_likely(gate):
+    """The exact contradiction, isolated."""
+    assert gate.check(proposal(84.99, 0.32)).ok, "first one has nothing to contradict"
+
+    report = gate.check(proposal(86.49, 0.45))
+    assert not report.ok
+    assert "higher strike cannot be more likely" in report.reason
+    assert "84.99" in report.reason and "86.49" in report.reason
+
+
+def test_a_coherent_ladder_passes_untouched(gate):
+    """A model that reads the strike must not be obstructed."""
+    for strike, p in [(83.0, 0.60), (84.0, 0.45), (85.0, 0.30), (86.0, 0.18)]:
+        assert gate.check(proposal(strike, p, market_p=0.30)).ok, strike
+    assert gate.rejected_monotonicity == 0
+
+
+def test_order_of_arrival_does_not_matter(gate):
+    """Candidates arrive in scan order, not strike order."""
+    assert gate.check(proposal(87.0, 0.20)).ok
+    assert gate.check(proposal(83.0, 0.60)).ok, "lower strike, higher prob: fine"
+    assert not gate.check(proposal(85.0, 0.70)).ok, (
+        "70% at 85 contradicts 60% at 83"
+    )
+
+
+def test_a_tainted_event_is_refused_for_the_rest_of_the_pass(gate):
+    """Once the model has shown it is not reading the strike, its other
+    answers on the same ladder are not trustworthy either."""
+    gate.check(proposal(84.99, 0.32))
+    assert not gate.check(proposal(86.49, 0.45)).ok      # taints the event
+
+    report = gate.check(proposal(83.49, 0.48))
+    assert not report.ok
+    assert "already produced contradictory" in report.reason
+
+
+def test_events_are_independent(gate):
+    """One bad ladder must not suppress a different contract."""
+    gate.check(proposal(84.99, 0.32, event="KXWTI-A"))
+    assert not gate.check(proposal(86.49, 0.45, event="KXWTI-A")).ok
+
+    assert gate.check(proposal(84.99, 0.32, event="KXWTI-B")).ok
+
+
+def test_less_than_strikes_run_the_other_way(gate):
+    """P(X < K) must RISE with the strike."""
+    assert gate.check(proposal(83.0, 0.20, strike_type="less")).ok
+    assert gate.check(proposal(85.0, 0.40, strike_type="less")).ok
+    assert not gate.check(proposal(87.0, 0.30, strike_type="less")).ok
+
+
+def test_tolerance_absorbs_a_rounding_wobble(gate):
+    """A one-point wobble is not evidence of incoherence."""
+    CONFIG.risk.coherence_tolerance = 0.01
+    assert gate.check(proposal(84.0, 0.400)).ok
+    assert gate.check(proposal(85.0, 0.405)).ok, "0.5pp inversion, within tolerance"
+    assert not gate.check(proposal(86.0, 0.50)).ok, "10pp is not a wobble"
+
+
+def test_two_sided_and_unknown_strikes_are_not_ordered(gate):
+    """'between' markets have no single ordering against one another."""
+    assert gate.check(proposal(84.0, 0.40, strike_type="between")).ok
+    assert gate.check(proposal(85.0, 0.55, strike_type="between")).ok
+
+
+def test_a_market_without_a_strike_is_not_ordered(gate):
+    """Weather markets are single-outcome — this gate cannot judge them, and
+    must not pretend to."""
+    p1 = proposal(84.0, 0.40)
+    p1.candidate.floor_strike = None
+    p2 = proposal(85.0, 0.55)
+    p2.candidate.floor_strike = None
+    assert gate.check(p1).ok
+    assert gate.check(p2).ok
+
+
+def test_state_resets_between_passes(gate):
+    gate.check(proposal(84.99, 0.32))
+    assert not gate.check(proposal(86.49, 0.45)).ok
+
+    gate.begin_pass()
+    assert gate.check(proposal(86.49, 0.45)).ok, "a new pass starts clean"
+
+
+# --------------------------------------------------------------------------
+# gate 2: implausible disagreement, measured in log-odds
+# --------------------------------------------------------------------------
+
+def test_log_odds_separates_a_real_edge_from_an_absurd_one():
+    """Why this is not a flat percentage-point cap.
+
+    Both are ~30-35pp. Only one asserts the market is wrong by a factor of
+    fifty, and a points-based cap could not tell them apart.
+    """
+    weather = log_odds_distance(0.15, 0.50)     # model 15% vs market 50%
+    wti = log_odds_distance(0.45, 0.015)        # model 45% vs market 1.5%
+
+    assert weather == pytest.approx(1.73, abs=0.02)
+    assert wti == pytest.approx(3.99, abs=0.02)
+    assert wti > weather * 2
+
+
+def test_the_weather_thesis_survives(gate):
+    """The user's priority market. A 35pp disagreement against a market at
+    50% is a real, defensible view and must not be gated away."""
+    CONFIG.risk.max_log_odds_disagreement = 3.0
+    p = proposal(None, 0.15, market_p=0.50)
+    p.candidate.floor_strike = None
+    assert gate.check(p).ok
+
+
+def test_claiming_a_market_is_wrong_fiftyfold_is_refused(gate):
+    CONFIG.risk.max_log_odds_disagreement = 3.0
+    p = proposal(None, 0.45, market_p=0.015)
+    p.candidate.floor_strike = None
+
+    report = gate.check(p)
+    assert not report.ok
+    assert "more likely a model error than an edge" in report.reason
+    assert gate.rejected_implausible == 1
+
+
+def test_the_gate_is_symmetric(gate):
+    """A model claiming 1.5% against a market at 45% is equally suspect."""
+    CONFIG.risk.max_log_odds_disagreement = 3.0
+    p = proposal(None, 0.015, market_p=0.45)
+    p.candidate.floor_strike = None
+    assert not gate.check(p).ok
+
+
+def test_the_implausibility_gate_can_be_disabled_alone(gate):
+    CONFIG.risk.max_log_odds_disagreement = 0.0
+    p = proposal(None, 0.45, market_p=0.015)
+    p.candidate.floor_strike = None
+    assert gate.check(p).ok
+
+
+def test_logit_is_clamped_not_infinite():
+    """A 0 or 1 probability must not produce inf and poison every comparison."""
+    import math
+
+    for value in (log_odds_distance(0.0, 0.5), log_odds_distance(1.0, 0.5),
+                  log_odds_distance(0.0, 1.0)):
+        assert math.isfinite(value)
+
+
+# --------------------------------------------------------------------------
+# the gates can only refuse
+# --------------------------------------------------------------------------
+
+def test_disabling_the_checks_restores_previous_behaviour(gate):
+    CONFIG.risk.coherence_checks_enabled = False
+    for strike, model_p, market_p in WTI_PASS:
+        assert gate.check(proposal(strike, model_p, market_p)).ok
+
+
+def test_the_gate_never_approves_anything_it_was_not_given(gate):
+    """Structural: check() returns ok/not-ok on one proposal and has no way to
+    introduce, resize, or upgrade a trade."""
+    report = gate.check(proposal(84.0, 0.45, market_p=0.40))
+    assert report.ok is True
+    assert not hasattr(report, "size")
+    assert not hasattr(report, "probability")
+
+
+# --------------------------------------------------------------------------
+# wiring
+# --------------------------------------------------------------------------
+
+def test_run_once_refuses_an_incoherent_ladder_before_the_checker(
+    client, order_store, edge_store, account, execution, risk, ledger
+):
+    """Caught before a Checker call is spent, and recorded in the ledger with
+    no verdict — which is what marks it as never having been asked."""
+    import main
+    from tests.test_pass_loop import (
+        StubChecker, StubMaker, StubQuantMaker, StubScout, _positions_follow_fills,
+    )
+
+    CONFIG.risk.dry_run = False
+    CONFIG.risk.coherence_checks_enabled = True
+
+    low = make_candidate(ticker="KXWTI-A-T84", event_ticker="KXWTI-A")
+    low.strike_type, low.floor_strike = "greater", 84.0
+    high = make_candidate(ticker="KXWTI-A-T86", event_ticker="KXWTI-A")
+    high.strike_type, high.floor_strike = "greater", 86.0
+    candidates = [low, high]
+    _positions_follow_fills(client, candidates)
+
+    class LadderMaker(StubMaker):
+        """Emits the production failure: the higher strike scored higher.
+
+        Exactly the shape of P(WTI>84.99)=32% alongside P(WTI>86.49)=45%.
+        """
+
+        def propose(self, candidate):
+            p = super().propose(candidate)
+            if p is not None:
+                p.maker_probability = (
+                    0.65 if candidate.floor_strike >= 86.0 else 0.45
+                )
+            return p
+
+    checker = StubChecker()
+    main.run_once(StubScout(candidates), LadderMaker(), StubQuantMaker(),
+                  checker, risk, execution, ledger, account)
+
+    rows = edge_store.recent_edges(limit=10)
+    refused = [r for r in rows if r["action_taken"] == "skipped_incoherent"]
+    assert refused, "the contradiction must be recorded, not silently dropped"
+    assert refused[0]["checker_verdict"] is None, (
+        "no verdict — the Checker was never asked, and the row must say so"
+    )
