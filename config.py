@@ -350,6 +350,16 @@ class RiskConfig:
     # on markets quoting 7-94%. Bitcoin has never sustained 10% realized vol.
     min_plausible_annual_vol: float = _float("MIN_PLAUSIBLE_ANNUAL_VOL", 0.10)
     max_plausible_annual_vol: float = _float("MAX_PLAUSIBLE_ANNUAL_VOL", 5.0)
+    # How far past its own observation window a volatility estimate may be
+    # carried. Volatility mean-reverts, so a trailing hour is a good estimate
+    # of the next few minutes and a bad one of the next four days — measured
+    # 52% annualized against a market implying 28% on a four-day contract,
+    # which manufactured 15 points of phantom edge on out-of-the-money tails.
+    # At 4x, one hour of history reaches four hours of horizon. The priority
+    # families need far less: a 15-minute contract is 0.2x and an hourly one
+    # 1.0x, which is why this refuses the multi-day contracts without touching
+    # them.
+    max_horizon_vol_span_ratio: float = _float("MAX_HORIZON_VOL_SPAN_RATIO", 4.0)
     spot_backoff_base_seconds: float = _float("SPOT_BACKOFF_BASE_SECONDS", 30.0)
     spot_backoff_max_seconds: float = _float("SPOT_BACKOFF_MAX_SECONDS", 900.0)
     # Contract specs in core/contract_specs.py all ship verified=False,

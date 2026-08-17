@@ -404,3 +404,120 @@ def test_thinning_is_a_no_op_without_a_spacing():
 
     assert _thin(points, 0.0) == points
     assert _thin([], 30.0) == []
+
+
+# -- horizon guard ---------------------------------------------------------
+#
+# The last piece of the 2026-08-17 story. After the smoothing fix the estimate
+# read 52% annualized while the market implied 28% on a four-day contract, and
+# the reflex was to call the estimate wrong again. It was not. 52% realized
+# over the trailing hour and 28% implied over the coming four days are
+# different quantities and both were true — volatility mean-reverts, so an
+# hour-long spike does not last four days.
+#
+# What was wrong was carrying a one-hour measurement 96x out to a four-day
+# contract, which manufactured 15 points of phantom edge on out-of-the-money
+# tails. The priority families need no extrapolation at all.
+
+
+def quant_with_span(span_seconds, annual_vol=0.40):
+    """A QuantMaker holding exactly `span_seconds` of history."""
+    import time
+
+    from core.spot_price_client import SpotPriceClient, SpotQuote
+    from workers.quant_maker import QuantMaker
+
+    from tests.test_quant_path import FakeHTTP
+
+    CONFIG.risk.quant_allow_unverified = True
+    CONFIG.risk.spot_outlier_ratio = 100.0
+
+    client = SpotPriceClient(http=FakeHTTP())
+    history = PriceHistory(maxlen=100_000)
+    now = time.time()
+    points = diffusion(n=int(span_seconds), annual_vol=annual_vol, seed=4)
+    end = points[-1][0]
+    for at, price in points[::30]:
+        history.add(price, at=now - (end - at))
+    client.history["btc"] = history
+    last = points[-1][1]
+    client._quotes["btc"] = SpotQuote(symbol="btc", price=last,
+                                      observed_at=now, source="crypto")
+    quant = QuantMaker(client)
+    return quant, last
+
+
+def candidate_expiring_in(seconds, strike):
+    """A candidate whose close_time is `seconds` from now."""
+    from datetime import datetime, timedelta, timezone
+
+    from tests.test_quant_path import candidate
+
+    close = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    c = candidate(strike=strike)
+    c.close_time = close.isoformat().replace("+00:00", "Z")
+    return c
+
+
+def test_a_four_day_contract_is_refused_on_an_hour_of_history(caplog):
+    """96x extrapolation. This is the case that produced phantom tail edge."""
+    quant, spot = quant_with_span(3600)
+
+    with caplog.at_level("INFO"):
+        result = quant.propose(candidate_expiring_in(4 * 86400, spot * 1.001))
+
+    assert result is None
+    assert "over the" in caplog.text and "limit" in caplog.text
+
+
+def test_the_fifteen_minute_family_is_untouched():
+    """0.2x the observation span — the horizon the estimate is actually good
+    for, and the family this bot is pointed at."""
+    quant, spot = quant_with_span(3600)
+
+    result = quant.propose(candidate_expiring_in(900, spot * 1.001))
+
+    assert result is not None
+    assert 0.0 < result.probability_yes < 1.0
+
+
+def test_the_hourly_family_is_untouched():
+    """1.0x. Also a priority family, also no extrapolation."""
+    quant, spot = quant_with_span(3600)
+
+    result = quant.propose(candidate_expiring_in(3600, spot * 1.001))
+
+    assert result is not None
+
+
+def test_the_guard_scales_with_the_history_actually_held():
+    """It is a ratio, not a fixed horizon: a barely-warm bot prices only very
+    short contracts, and reaches further as it accumulates history."""
+    cold, spot = quant_with_span(700)
+
+    assert cold.propose(candidate_expiring_in(3600, spot * 1.001)) is None
+
+    warm, spot = quant_with_span(3600)
+    assert warm.propose(candidate_expiring_in(3600, spot * 1.001)) is not None
+
+
+def test_the_limit_admits_the_priority_families_and_excludes_multi_day():
+    """The boundary, stated in the units that decide it."""
+    span = CONFIG.risk.vol_history_retention_seconds
+    ratio = CONFIG.risk.max_horizon_vol_span_ratio
+
+    assert 900 / span <= ratio, "15-minute contracts must be priceable"
+    assert 3600 / span <= ratio, "hourly contracts must be priceable"
+    assert 86400 / span > ratio, "daily contracts must not be"
+
+
+def test_the_refusal_is_logged_once_per_family_not_per_strike(caplog):
+    """A daily ladder is dozens of strikes; it must not be dozens of lines."""
+    quant, spot = quant_with_span(3600)
+
+    with caplog.at_level("INFO"):
+        for i in range(20):
+            quant.propose(candidate_expiring_in(4 * 86400, spot * (1 + i / 1000)))
+
+    assert caplog.text.count("is the wrong quantity") <= 1
+    assert caplog.text.count("over the") <= 1

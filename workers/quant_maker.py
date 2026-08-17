@@ -264,6 +264,45 @@ class QuantMaker:
             )
             return None
 
+        # A volatility measured over one window may be carried a few multiples
+        # beyond it, not two orders of magnitude.
+        #
+        # This is the lesson from 2026-08-17. The estimate read 52% annualized
+        # for bitcoin while the market implied 28% on a four-day contract, and
+        # the reflex was to call the estimate wrong. It was not: 52% realized
+        # over the trailing hour and 28% implied over the coming four days are
+        # different quantities, and both were true. Volatility mean-reverts, so
+        # an hour-long spike does not persist for four days.
+        #
+        # What was wrong was carrying a one-hour measurement 96x out to a
+        # four-day contract. That is what produced "model 24.65% against a
+        # market at 9.00%" on far out-of-the-money strikes — apparent edge that
+        # is nothing but a recent move extrapolated, and exactly the kind a
+        # taker pays for and loses on.
+        #
+        # The short-dated families this bot is pointed at need no extrapolation
+        # at all: a 15-minute contract is 0.2x the observation span and an
+        # hourly one is 1.0x. At those horizons the estimate has matched the
+        # market closely — 17% measured against 18.4% implied on a ten-minute
+        # contract. So this refuses the multi-day contracts the estimate cannot
+        # honestly reach, and leaves the priority families untouched.
+        span = history.span_seconds()
+        horizon_ratio = seconds_to_expiry / span if span > 0 else float("inf")
+        if horizon_ratio > CONFIG.risk.max_horizon_vol_span_ratio:
+            key = f"{spec.prefix}:horizon"
+            if key not in self._declined:
+                self._declined[key] = "horizon"
+                log.info(
+                    "Quant path declining %s: %.0fs to expiry is %.0fx the "
+                    "%.0fs of volatility history, over the %.0fx limit. A "
+                    "trailing estimate does not reach that far — mean "
+                    "reversion makes it the wrong quantity, not just a noisy "
+                    "one.",
+                    spec.prefix, seconds_to_expiry, horizon_ratio, span,
+                    CONFIG.risk.max_horizon_vol_span_ratio,
+                )
+            return None
+
         # Measured across a ladder of sampling intervals rather than at the
         # raw tick spacing. BRTI is a smoothed aggregate, and sampling it
         # every 5 seconds sits inside that smoothing — which understated
