@@ -218,35 +218,109 @@ no market to refute it. **Do not treat this as "the market disagrees with us"
 counted `below edge` in that funnel were scored with the same broken sigma, so
 that number means nothing yet either.
 
+(The 23.5% figure above comes from the four-day ladder, which assumed spot
+~$64,100. The spot-free derivation in the next section puts the market at
+18.4% on a ten-minute market. Both are in the same place; the ten-minute one
+is the stronger evidence because it assumes nothing.)
+
+### It is a level error, not a scaling error
+
+The sharpest measurement comes from `KXBTCD-26AUG1713`, expiring 17:00Z and
+logged at 16:52Z — about **ten minutes** to expiry — on two *adjacent* strikes
+$100 apart:
+
+```
+T63999.99   market 84.5%   model 100%
+T64099.99   market 17.5%   model   1%
+```
+
+Using the gap between two adjacent strikes cancels spot entirely: only the
+log-spacing and the two prices are needed, so this derivation assumes nothing.
+
+```
+market per-second sigma  3.27e-5   (18.4% annualized)
+model  per-second sigma  1.18e-5   ( 6.6% annualized)
+understatement           2.78x
+```
+
+Now put that beside the four-day ladder:
+
+| horizon | model per-second sigma | understatement |
+|---|---|---|
+| 10 minutes | 1.18e-5 | 2.78x |
+| 4 days | <=1.19e-5 | 3.5x |
+
+**The model's per-second sigma is the same number at both horizons.** The
+sqrt(t) scaling is working correctly and the model is internally consistent —
+what is wrong is the level of the per-second estimate itself, by a roughly
+constant ~3x (about 8x in variance).
+
+That rules out the explanation to reach for first. sqrt(t)-scaling a
+5-second sigma out to four days *is* a ~70,000x extrapolation and would
+normally be the prime suspect, but the error is already 2.78x at ten minutes,
+where there is no extrapolation at all — the estimator's own window is longer
+than the horizon it is pricing. Horizon effects explain the 2.78 -> 3.5 drift
+and nothing more.
+
 ### Where to look
 
 `PriceHistory.realized_vol` (`core/spot_price_client.py:171`) is correct as
 written — it normalises each log return by its own elapsed time, so uneven
-spacing is handled properly. The defect is upstream of it, in what lands in
-the buffer. In rough order of likelihood:
+spacing is handled properly. So is the sqrt(t) scaling, per the table above.
 
-1. **Repeated ticks.** `record_tick` downsamples to
-   `RTI_TICK_SAMPLE_SECONDS=5`. If BRTI republishes an unchanged value between
-   updates, the stored series carries runs of identical prices, every one of
-   which contributes a zero return and drags sigma down. Check first: pull the
-   `price_history` table and count how many consecutive pairs are equal.
-   ```sql
-   SELECT symbol, COUNT(*) FROM price_history GROUP BY symbol;
-   ```
-   then diff successive prices and see what fraction are exactly zero.
-2. **BRTI is itself a smoothed index**, not a raw print. Its 5-second returns
-   are damped relative to the underlying, so the level may be genuinely low
-   even with clean data.
-3. **Horizon extrapolation.** sqrt(t)-scaling a 5-second sigma to four days is
-   a ~70,000x extrapolation and misses drift and jumps entirely. Note the
-   understatement is ~2.7x at 45 minutes and ~3.5x at four days — it worsens
-   with horizon, but the base level is already wrong, so this is a second
-   effect and not the main one.
+**Leading explanation: BRTI is a smoothed index, and we sample it at 5
+seconds.** CF Benchmarks' Real-Time Index is a deliberately smoothed
+aggregation across venues, built to resist manipulation rather than to
+reproduce tick-level variance. Smoothing suppresses high-frequency variance
+while leaving low-frequency moves intact, so realized vol measured at a
+sampling interval near or below the smoothing window is damped — by a
+roughly constant factor, at every horizon. That is exactly the signature
+observed.
+
+**The diagnostic that settles it**, from the buffer already on the production
+volume — no new data collection needed. Compute realized vol from the same
+stored series at several sampling intervals:
+
+```python
+from memory.price_store import PriceStore
+from core.spot_price_client import PriceHistory
+
+points = PriceStore().load("btc", max_age_seconds=3600)
+for step in (5, 15, 30, 60, 120, 300):
+    h = PriceHistory()
+    for at, p in points[::max(1, step // 5)]:
+        h.add(p, at)
+    v = h.realized_vol(lookback_seconds=3600)
+    print(step, v, v and f"{v * (365*24*3600)**0.5:.1%} annualized")
+```
+
+This is a volatility-signature plot, the standard test for microstructure
+damping. Read it as:
+
+- **sigma rises with sampling interval, then plateaus** -> smoothing confirmed.
+  The plateau is the honest sigma; estimate at or beyond that interval. Expect
+  the plateau near 18-23% annualized if this diagnosis is right.
+- **sigma flat across all intervals** -> smoothing is not the cause. Then check
+  whether the stored series carries runs of identical prices (nothing in
+  `record_tick` or `PriceHistory.add` rejects a repeated value). Note that
+  repeated ticks alone are *not* obviously biasing: a zero return followed by
+  one large return contributes the same sum of squares as the moves spread
+  evenly, so this inflates the estimator's variance rather than shifting its
+  level. It would have to be combined with something else to produce a
+  constant 3x.
+
+Sampling less often costs span — at a 300-second interval the same 500-point
+buffer covers many hours rather than 40 minutes — so `MIN_VOL_SPAN_SECONDS`
+and the retention window have to move together with any change here. That is
+a real design trade, not a one-line edit.
 
 Whatever the cause, the fix must keep the fail-closed property: a sigma that
-cannot be trusted means no trade, not a fudge factor. A defensible interim
-step is to refuse to price when the estimate implies an annualized vol outside
-a sanity band for the asset — that is a new refusal, not a loosened one.
+cannot be trusted means no trade, not a fudge factor. **Do not apply a
+calibration multiplier to make the numbers agree with the market** — that
+fits one observation and hides the mechanism. A defensible interim step is
+the opposite direction: refuse to price when the estimate implies an
+annualized vol outside a sanity band for the asset. That is a new refusal,
+not a loosened one, and it would have caught this on the first pass.
 
 ### Meanwhile, nothing is at risk
 
