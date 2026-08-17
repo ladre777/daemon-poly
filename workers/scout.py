@@ -273,6 +273,14 @@ class Scout:
         watched = {f.strip().upper() for f in CONFIG.scout_census_families
                    if f.strip()}
         census: dict[str, FamilyCensus] = {f: FamilyCensus() for f in watched}
+        # Which families actually produced candidates, per taxonomy group.
+        # The watch list above is a guess about ticker prefixes and the first
+        # one shipped was wrong: KXHIGHNY and PGATOUR both reported "0 seen"
+        # because Kalshi does not name those families that way. A watch list
+        # can only report on names someone thought of; this reports the names
+        # that are really there, so the next wrong guess corrects itself
+        # instead of reading as an empty catalog.
+        by_group: dict[str, dict[str, int]] = {}
 
         # GET /markets, not GET /events?with_nested_markets=true.
         #
@@ -369,6 +377,9 @@ class Scout:
                     continue
                 if tally is not None:
                     tally.accepted += 1
+                group_families = by_group.setdefault(group, {})
+                fam = family_of(ticker)
+                group_families[fam] = group_families.get(fam, 0) + 1
                 candidates.append(
                     Candidate(
                         ticker=valid.ticker,
@@ -432,6 +443,12 @@ class Scout:
             # there nothing from them" should never again need a code change
             # to answer.
             log.info("Family census %s: %s", family, census[family].summary())
+        for group in sorted(by_group):
+            top = sorted(by_group[group].items(), key=lambda kv: -kv[1])[:8]
+            log.info(
+                "Tradeable families in %s: %s",
+                group, ", ".join(f"{fam} x{n}" for fam, n in top),
+            )
         if not candidates and below_volume:
             # The single most useful line when nothing is tradeable: it says
             # whether the floor is slightly too high or wildly too high.

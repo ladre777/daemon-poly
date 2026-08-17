@@ -205,3 +205,62 @@ def test_summary_omits_dispositions_that_did_not_happen():
 
     assert summary == "3 seen -> 3 candidate(s)"
     assert "invalid" not in summary
+
+
+# -- self-discovery: what is actually there --------------------------------
+#
+# The watch list is a guess about ticker prefixes, and the first one shipped
+# was wrong twice: KXHIGHNY and PGATOUR both reported "0 seen" because Kalshi
+# does not name those families that way. A watch list can only report on names
+# someone thought of.
+
+
+def test_the_families_that_produced_candidates_are_named(caplog):
+    CONFIG.scout_categories = ["Crypto"]
+    client = CategoryClient([
+        _event("KXETH-26AUG", [_market("KXETH-26AUG-T1"),
+                               _market("KXETH-26AUG-T2")]),
+        _event("KXBTCD-26AUG", [_market("KXBTCD-26AUG-B1")]),
+    ])
+
+    _, text = scan(client, caplog)
+
+    assert "Tradeable families in Crypto:" in text
+    assert "KXETH x2" in text
+    assert "KXBTCD x1" in text
+
+
+def test_discovery_needs_no_watch_list_entry(caplog):
+    """The whole point: a family nobody configured still gets named."""
+    CONFIG.scout_census_families = []
+    CONFIG.scout_categories = ["Crypto"]
+    client = CategoryClient([_event("KXBTCD-26AUG", [_market("KXBTCD-26AUG-B1")])])
+
+    _, text = scan(client, caplog)
+
+    assert "Family census" not in text
+    assert "KXBTCD x1" in text
+
+
+def test_families_are_ordered_by_how_many_candidates_they_produced(caplog):
+    CONFIG.scout_categories = ["Crypto"]
+    client = CategoryClient([
+        _event("KXBTCD-26AUG", [_market("KXBTCD-26AUG-B1")]),
+        _event("KXETH-26AUG", [_market(f"KXETH-26AUG-T{i}") for i in range(3)]),
+    ])
+
+    _, text = scan(client, caplog)
+
+    line = [ln for ln in text.splitlines() if "Tradeable families" in ln][0]
+    assert line.index("KXETH x3") < line.index("KXBTCD x1")
+
+
+def test_a_family_with_no_tradeable_market_is_not_listed_as_tradeable(caplog):
+    CONFIG.scout_categories = ["Crypto"]
+    client = CategoryClient([
+        _event("KXETH-26AUG", [_market("KXETH-26AUG-T1", volume=1.0)]),
+    ])
+
+    _, text = scan(client, caplog)
+
+    assert "Tradeable families" not in text
