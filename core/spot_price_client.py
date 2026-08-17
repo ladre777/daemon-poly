@@ -114,10 +114,10 @@ class PriceHistory:
     """
 
     #: Enough points to hold the whole retention window at the tick sample
-    #: rate (3600s / 5s = 720) with headroom. It was 500, which capped the
+    #: rate (14400s / 5s = 2880) with headroom. It was 500, which capped the
     #: usable span at ~2500s and put the longer sampling intervals that
     #: `realized_vol_robust` needs out of reach — see that method.
-    DEFAULT_MAXLEN = 1000
+    DEFAULT_MAXLEN = 3600
 
     def __init__(self, maxlen: int = None):
         self._buf: deque[tuple[float, float]] = deque(
@@ -267,15 +267,40 @@ class PriceHistory:
         same simulation with no smoothing returns ~20% at every interval,
         which is what says the estimator itself was never wrong.
 
-        Averaging can only ever destroy variance, never create it, so across
+        Averaging can only destroy variance, never create it, so across
         sampling intervals the *largest* estimate is the least damped one.
-        That is what this returns. Where the signature has flattened out, the
-        maximum is the plateau — the honest sigma; where it has not, the
-        maximum is still the closest available approach to it.
+        That is what this returns.
+
+        A plateau detector was tried instead — walk the rungs and take the
+        first that stops climbing — on the reasoning that the rungs past the
+        knee rest on fewer observations and drift upward, and that a maximum
+        can only ever be dragged up by that drift, never down. It sounds
+        right, and on a single simulated path it was right.
+
+        It does not survive being measured. Thirty paths at a true 70% under
+        60-second smoothing, sampled at 5 seconds over four hours:
+
+            max, ladder capped at 120s   mean 64.6%   bias -7.7%   sd 3.9%
+            max, ladder out to 600s      mean 71.6%   bias +2.2%   sd 6.7%
+            plateau detector             mean 63.7%   bias -9.0%   sd 6.8%
+
+        The plateau detector is the worst of the three: biased low *and* high
+        variance, because a single noisy small step trips it early and it
+        then stops short of the real knee. Taking the maximum over the full
+        ladder is very nearly unbiased.
+
+        It does carry more variance than the truncated ladder, and that is
+        the trade being made deliberately. A 3.9% spread around a number that
+        is 7.7% too low is worse than a 6.7% spread around a number that is
+        right, because understated volatility is the direction that produces
+        overconfident probabilities — the failure that started all of this,
+        at 6.6% annualized against a market implying 18.4%.
 
         Intervals that cannot muster MIN_VOL_OBSERVATIONS are skipped rather
         than filled in, so a long interval never contributes a sigma computed
-        off four points.
+        off four points. That is what makes the long rungs safe to include:
+        VOL_HISTORY_RETENTION_SECONDS is four hours, which leaves the 300s
+        rung 48 observations and the 600s rung 24.
         """
         estimates = [v for _, v in self.vol_signature(lookback_seconds) if v]
         return max(estimates) if estimates else None

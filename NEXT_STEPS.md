@@ -163,7 +163,48 @@ upstream of execution, so nothing has reached the exchange.
 
 ---
 
-## The single next action
+## The single next action — READ THIS FIRST
+
+**Read the Checker's reasons. Do not loosen it before you have.**
+
+`#36` made them visible. Every pass still ends `approved 0 -> filled 0`, and
+the Checker has now rejected **100% of everything it has ever seen** — 24 for
+24 on one pass, across weather and crypto, from both the LLM and the quant
+path, at confidences from 0.55 to 0.90.
+
+```
+railway logs | grep "Checker verdict" | grep reject
+```
+
+Until `#36` that line read only `reject (conf 0.65)`, which cannot distinguish
+a correct gate standing in front of bad proposals from a gate biased toward
+reject. It now carries the model's reasoning.
+
+Read twenty of them and the answer will be obvious in one of two directions:
+
+- **The reasons are specific and correct** ("the market already prices this
+  forecast", "the Maker's estimate rests on a stale reading") — then the gate
+  is right, the proposals are weak, and the work is upstream in proposal
+  quality. Do not touch `CHECKER_MIN_CONFIDENCE`.
+- **The reasons are generic hedging** ("cannot verify", "insufficient
+  information") on every market regardless of content — then the Checker is
+  refusing by disposition rather than on the merits, and the fix is its prompt,
+  not its threshold.
+
+The counterfactual data from `#24` answers the same question with outcomes
+rather than prose, and weather markets settle daily so it can exist within a
+day. `refused` is the mode that matters: it grades the trades the gates turned
+down. If those would have won, the gate is too tight — and that is a
+measurement, not a guess.
+
+**Do not raise `CHECKER_MIN_CONFIDENCE`, widen `COHERENCE_MAX_LOG_ODDS`, or
+lower `MIN_EDGE_THRESHOLD` to produce fills.** A gate that blocks everything
+invites exactly that, and it is the wrong move if the gate is right. Fills
+bought by loosening a correct gate are losses with extra steps.
+
+---
+
+## Previously the single next action (now done)
 
 **Confirm the volatility fix in production, then read the calibration table.**
 

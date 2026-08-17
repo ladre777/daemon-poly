@@ -86,7 +86,11 @@ def test_points_are_returned_oldest_first(store):
 
 
 def test_points_older_than_the_retention_window_are_not_saved(store):
-    old = [(time.time() - 7200, 64000.0)]
+    """Derived from the configured window rather than a hardcoded age — this
+    test used to assume two hours was old, and silently became a no-op check
+    the moment the retention window grew past it."""
+    beyond = CONFIG.risk.vol_history_retention_seconds * 2
+    old = [(time.time() - beyond, 64000.0)]
 
     assert store.save("btc", old) == 0
 

@@ -300,10 +300,36 @@ class RiskConfig:
     # priced once, in any run. This keeps the SAME 600 seconds of real ticks
     # rather than lowering the bar.
     persist_vol_history: bool = _bool("PERSIST_VOL_HISTORY", True)
-    # How far back stored observations stay useful. Older points are dropped
-    # on save and ignored on load: a container down for an hour must not come
-    # back and compute a "600-second span" across a 60-minute hole.
-    vol_history_retention_seconds: float = _float("VOL_HISTORY_RETENTION_SECONDS", 3600.0)
+    # How far back stored observations stay useful.
+    #
+    # Was one hour, on the reasoning that a container down for an hour must
+    # not come back and compute a "600-second span" across a 60-minute hole.
+    # That worry turned out to be unfounded and is now disproven by test:
+    # realized_vol normalises every return by its own elapsed time, so an hour
+    # of 5-second ticks with five outages punched through it returns the same
+    # estimate as an unbroken hour. Gaps are handled; they were never the risk.
+    #
+    # Meanwhile one hour was actively costing accuracy, because it is what
+    # bounds how far out the sampling ladder can reach. BRTI is smoothed, so
+    # the estimate has to be measured at intervals outside that smoothing —
+    # and at one hour of retention the 300s and 600s rungs cannot muster
+    # enough observations to be trusted, so the ladder stopped at 120s. Live,
+    # neither asset had flattened by then:
+    #
+    #   btc  tick 17%  15s 28%  30s 37%  60s 51%  120s 60%
+    #   eth  tick 12%  15s 20%  30s 26%  60s 36%  120s 45%
+    #
+    # Still climbing at the last rung means the plateau is past the end of the
+    # ladder and the true volatility is higher than anything measured — which
+    # is the understating direction, the one that produces overconfident
+    # probabilities. The Checker caught it independently on a live ETH
+    # contract: "vol-to-expiry of 0.008 seems low for ~3hr ETH horizon,
+    # understating tail risk near the strike" — 43% annualized, where ETH
+    # normally runs 50-90%.
+    #
+    # Four hours gives the 300s rung 48 observations and the 600s rung 24, so
+    # the ladder can reach the plateau instead of being truncated short of it.
+    vol_history_retention_seconds: float = _float("VOL_HISTORY_RETENTION_SECONDS", 14400.0)
     # A print this many times away from the recent median is treated as a
     # feed glitch. Volatility sits in the denominator of the probability
     # calculation, so one bad tick distorts every market on that symbol for
@@ -321,28 +347,20 @@ class RiskConfig:
     # vol by ~3x in production. Averaging destroys variance and cannot create
     # it, so the largest estimate across the ladder is the least damped one.
     #
-    # The ladder stops at 120s, and the reason is the retention window rather
-    # than the physics. Two containers 90 seconds apart, reading the same
-    # feed on 2026-08-17:
+    # The ladder once stopped at 120s because one hour of retention left the
+    # 300s rung only 9-12 observations, and two containers 90 seconds apart
+    # read 12% and 19-21% off it — sampling error, not signal. Since the
+    # estimate is a MAXIMUM across rungs, a low reading is discarded and a
+    # spuriously high one is adopted, so a rung that noisy can only hurt.
     #
-    #   17:14  btc  tick 6%  15s 10%  30s 13%  60s 15%  120s 16%  300s 12%
-    #   17:15  btc  tick 6%  15s 10%  30s 13%  60s 15%  120s 16%  300s 19%
-    #          eth  ...                                  120s 17%  300s 21%
-    #
-    # Every rung agrees between the two runs except the last, which moved from
-    # 12% to 19-21%. That is not the signature — it has already flattened by
-    # 120s — it is sampling error: one hour of retention at the 5s tick rate
-    # leaves the 300s rung 9-12 observations, where the standard error on a
-    # standard deviation is ~20%.
-    #
-    # A noisy top rung is not harmless here, because the estimate is a MAXIMUM
-    # across rungs. A low reading is discarded and a spuriously high one is
-    # taken, so the 19-21% reading would have been adopted over the stable 16%
-    # — above even the market's implied vol. Extending the ladder needs a
-    # longer VOL_HISTORY_RETENTION_SECONDS first, which is a separate trade
-    # against reconstructing an estimate across a gap in the data.
+    # The answer was never to truncate the ladder, though, because both assets
+    # were still climbing at 120s — meaning the plateau lay past the end of it
+    # and the estimate was understating. VOL_HISTORY_RETENTION_SECONDS is now
+    # four hours, which gives the 300s rung 48 observations and the 600s rung
+    # 24: enough to be trusted, so the ladder can reach the plateau instead of
+    # stopping short of it.
     vol_sample_intervals: tuple = _floats(
-        "VOL_SAMPLE_INTERVALS", (0.0, 15.0, 30.0, 60.0, 120.0))
+        "VOL_SAMPLE_INTERVALS", (0.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0))
     # Fail-closed sanity band on the annualized volatility the estimate
     # implies. This is a REFUSAL, never a clamp — an estimate outside the band
     # means the feed or the estimator is wrong, and pricing off it is how the

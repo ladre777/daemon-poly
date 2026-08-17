@@ -189,6 +189,40 @@ def test_the_robust_estimate_never_reads_lower_than_the_raw_one():
         assert h.realized_vol_robust(3600) >= h.realized_vol(3600)
 
 
+def test_the_ladder_reaches_past_the_knee_rather_than_stopping_at_it():
+    """Why the ladder runs to 600s and the estimate is a maximum.
+
+    A plateau detector was tried here — walk the rungs, take the first that
+    stops climbing — and it loses to the maximum when measured rather than
+    reasoned about. Thirty paths at a true 70% under 60-second smoothing:
+
+        max, ladder capped at 120s   mean 64.6%   bias -7.7%   sd 3.9%
+        max, ladder out to 600s      mean 71.6%   bias +2.2%   sd 6.7%
+        plateau detector             mean 63.7%   bias -9.0%   sd 6.8%
+
+    The plateau detector is biased low AND high variance, because one noisy
+    small step trips it before the real knee. This pins the direction that
+    matters: a truncated ladder understates, and understated volatility is
+    what produces overconfident probabilities.
+    """
+    truncated, full = [], []
+    for seed in range(101, 116):
+        h = history_from(smoothed(diffusion(n=14400, annual_vol=0.70, seed=seed),
+                                  window=60))
+        signature = [(i, v) for i, v in h.vol_signature(14400) if v]
+        short = [v for i, v in signature if i <= 120]
+        truncated.append(max(short))
+        full.append(max(v for _, v in signature))
+
+    mean_truncated = annualize(sum(truncated) / len(truncated))
+    mean_full = annualize(sum(full) / len(full))
+
+    assert mean_truncated < 0.70, "a 120s-capped ladder should understate"
+    assert abs(mean_full - 0.70) < abs(mean_truncated - 0.70), (
+        "the full ladder should be closer to the truth on average"
+    )
+
+
 def test_the_recovered_sigma_would_no_longer_trip_the_coherence_gate():
     """End of the causal chain. With the true sigma restored, the model's
     probability on the ten-minute strike that produced 'model says 100%
