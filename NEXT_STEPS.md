@@ -15,7 +15,7 @@ Verify these rather than trusting them; they were true when written.
 |---|---|
 | `main` | `#24` merged (paper calibration). Check `git log --oneline -5`. |
 | Tests | 813 passing locally, `ruff` clean. **CI was NOT read** — see below. |
-| Railway | `env=prod`. **NOT LIVE.** See "deploy state" below — verify before trusting. |
+| Railway | `env=prod`, `DRY_RUN=false` — **LIVE, REAL MONEY**, confirmed from the boot banner at 14:13. |
 | Account | funded ~$49.98 |
 | RTI feed | live on prod, ~200 frames/2min across BRTI + ETHUSD_RTI |
 | ESPN | **blocked for bots. Do not touch the ESPN client.** |
@@ -25,57 +25,25 @@ Effective bankroll is `min(--bankroll, exchange balance)`, so sizing is capped
 by the real $49.98, not the $1000 CLI default. At `MAX_POSITION_PCT=0.05`
 that is ~$2.50/position — roughly 6 contracts at 40c.
 
-### Deploy state — READ THIS FIRST
+### Deploy state
 
-At the end of the session the picture was:
-
-```
-latest deployment:  596a4f00  FAILED  (13:48, carrying the #24 merge)
-running container:  c64c0f42  SUCCESS (13:24) — #23 code, DRY_RUN=true
-```
-
-`DRY_RUN=false` **was set as a Railway variable**, but variables only take
-effect at container start and the deploy carrying it failed. Railway kept the
-previous container alive, so the process is still running #23 with
-`DRY_RUN=true`.
-
-Consequences, all of which need verifying rather than assuming:
-
-- **Live trading was NOT active.** No real money had been placed at risk.
-- **`#24` was merged but never ran.** No forecast row has ever been graded.
-- **Three consecutive builder failures**, not a code fault. Compare logs: a
-  successful build (`c64c0f42`) prints every Docker step —
-  `[3/8] COPY requirements.txt`, `[4/8] RUN pip install`, ...,
-  `exporting to docker image format`, `image push`. The failed ones print
-  exactly one line, `scheduling build on Metal builder "..."`, and then stop.
-  No pip error, no COPY error, no Python traceback. The builder never ran.
-- `#24` was briefly suspected of breaking the build and **did not**. The
-  Dockerfile copies only `main.py config.py core/ workers/ memory/`; `#24`
-  touched exactly those plus `tests/` and added no new top-level package.
-
-### Recovering it — must be done from the Railway dashboard
-
-This cannot be fixed through the API. The MCP `redeploy` tool refuses:
-
-> Cannot redeploy yet ... that deployment has no build to copy. A service must
-> deploy once before it can be redeployed ... attach a source and deploy it
-> from the Railway dashboard.
-
-Setting a variable to a value it already holds is also a no-op and triggers
-nothing — `DRY_RUN` was already `false`, so re-setting it did not produce a
-build.
-
-**Do this:** open the Railway dashboard → `daemon-kalshi-v2` → Deployments →
-redeploy the latest commit. Then read the boot banner.
-
-**First action: read the boot banner and believe it over this file.**
+Live cutover completed at 14:13 on deployment `803656a8`, confirmed from the
+banner rather than assumed:
 
 ```
-DÆMON-KALSHI starting | env=prod dry_run=??? strategy=taker
+DÆMON-KALSHI starting | env=prod dry_run=False strategy=taker
+Startup state: $49.98 balance, 0 open position(s), 0 live order(s)
 ```
 
-`dry_run=False` means live and the cutover completed. `dry_run=True` means it
-did not, and the variable still has not reached a running container.
+Getting there took four failed builds. They were Railway builder failures, not
+code: a successful build logs every Docker step (`[4/8] RUN pip install`, ...,
+`image push`), the failed ones log only `scheduling build on Metal builder`
+and stop. `#24` was briefly suspected and cleared — the Dockerfile copies only
+`main.py config.py core/ workers/ memory/`, which is exactly what it touched.
+
+**If it fails again:** the API cannot fix it. `redeploy` refuses ("that
+deployment has no build to copy"), and re-setting a variable to a value it
+already holds triggers nothing. Redeploy from the Railway dashboard.
 
 ---
 
