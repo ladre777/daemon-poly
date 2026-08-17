@@ -292,6 +292,34 @@ def test_the_band_refuses_rather_than_clamping():
 # -- the buffer has to be able to hold the longer intervals -----------------
 
 
+def test_every_rung_can_clear_the_observation_bar_within_retention():
+    """A maximum across rungs is only as trustworthy as its noisiest rung: a
+    low reading is discarded, a spuriously high one is taken. So every
+    interval on the ladder must be able to muster comfortably more than
+    MIN_VOL_OBSERVATIONS inside the retention window.
+
+    This is why the ladder stops at 120s. On the live feed the 300s rung read
+    12% against 120s's 16% — noise, from the 9-12 observations an hour of
+    retention leaves it.
+    """
+    retention = CONFIG.risk.vol_history_retention_seconds
+
+    for interval in CONFIG.risk.vol_sample_intervals:
+        if not interval:
+            continue
+        observations = retention / interval
+        assert observations >= 2 * CONFIG.risk.min_vol_observations, (
+            f"{interval}s rung gets only {observations:.0f} observations "
+            f"in a {retention:.0f}s window"
+        )
+
+
+def test_the_ladder_reaches_past_the_feeds_smoothing():
+    """It must still climb far enough out to leave the smoothing window, or
+    the whole exercise measures damped vol at every rung."""
+    assert max(CONFIG.risk.vol_sample_intervals) >= 120.0
+
+
 def test_the_buffer_spans_the_whole_retention_window():
     """A 300-second sampling rung needs ~3000s of span to clear
     MIN_VOL_OBSERVATIONS. At the 5s tick rate the old 500-point buffer capped

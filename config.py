@@ -320,10 +320,23 @@ class RiskConfig:
     # spacing sits well inside its smoothing window and understated bitcoin
     # vol by ~3x in production. Averaging destroys variance and cannot create
     # it, so the largest estimate across the ladder is the least damped one.
-    # The top rung is bounded by the retention window: 300s sampling needs
-    # ~3000s of span to clear MIN_VOL_OBSERVATIONS.
+    #
+    # The ladder stops at 120s, and the reason is the retention window rather
+    # than the physics. Measured on the live feed at 17:14 on 2026-08-17:
+    #
+    #   btc  tick 6%  15s 10%  30s 13%  60s 15%  120s 16%  300s 12%
+    #   eth  tick 5%  15s  9%  30s 12%  60s 14%  120s 16%  300s 12%
+    #
+    # The signature has flattened by 120s, so the plateau is already reached.
+    # The 300s rung reads *lower* because it is noise, not signal: one hour of
+    # retention at the 5s tick rate leaves it 9-12 observations, where the
+    # sampling error on a standard deviation is ~20%. Because the estimate is
+    # a maximum across rungs, a rung that noisy can only ever hurt — a low
+    # reading is discarded, a spuriously high one is taken. Extending it needs
+    # a longer VOL_HISTORY_RETENTION_SECONDS, which is a separate trade
+    # against reconstructing an estimate across a gap in the data.
     vol_sample_intervals: tuple = _floats(
-        "VOL_SAMPLE_INTERVALS", (0.0, 15.0, 30.0, 60.0, 120.0, 300.0))
+        "VOL_SAMPLE_INTERVALS", (0.0, 15.0, 30.0, 60.0, 120.0))
     # Fail-closed sanity band on the annualized volatility the estimate
     # implies. This is a REFUSAL, never a clamp — an estimate outside the band
     # means the feed or the estimator is wrong, and pricing off it is how the
