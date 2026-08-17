@@ -19,6 +19,7 @@ Verify these rather than trusting them; they were true when written.
 | Account | funded ~$49.98 |
 | RTI feed | live on prod, ~200 frames/2min across BRTI + ETHUSD_RTI |
 | ESPN | **blocked for bots. Do not touch the ESPN client.** |
+| Web access from the agent sandbox | direct `curl` is blocked, but the proxy-backed WebSearch/WebFetch tools DO work — usable for research, not for testing whether an endpoint works from Railway |
 | NOAA | wired, never yet executed against a live weather market |
 
 Effective bankroll is `min(--bankroll, exchange balance)`, so sizing is capped
@@ -127,6 +128,27 @@ eliminating.
 
 Golf is the only sports priority. ESPN is blocked at the IP level from
 Railway — **not a header problem, do not revisit the ESPN client.**
+
+**Source research is done — do not redo it.** Every viable golf feed needs an
+API key:
+
+| source | key | notes |
+|---|---|---|
+| SportsDataIO | yes, free trial | real-time PGA leaderboards, JSON |
+| Sportradar | yes | hole-by-hole, most thorough |
+| Slash Golf (RapidAPI) | yes, free tier | PGA + LIV leaderboards |
+| DataGolf | yes, paid | strong predictive models, not just scores |
+| GolfProjectAPI (GitHub) | no | **scrapes ESPN — inherits the same IP block. Useless here.** |
+
+So item 2 needs the operator to obtain a key before any code is worth
+writing. Recommend Slash Golf or SportsDataIO for the free tier. Set it as
+`GOLF_API_KEY` and build behind an interface with schema logging on first
+contact, the way `_log_golf_schema` already does.
+
+**Do not build this before there are golf markets to validate against.**
+`PGATOUR: 0 seen` is a true reading — Kalshi currently lists no golf markets
+at all, so a new integration could not be verified end to end even with a key.
+Weather is live and liquid today; golf is not.
 
 Groundwork already done: `#20` made the golf context player-aware.
 `yes_sub_title` (the player name) now survives validation onto `Candidate`,
