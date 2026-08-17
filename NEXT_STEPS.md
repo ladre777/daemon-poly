@@ -226,13 +226,104 @@ The 300s rung was dropped on this evidence: it read 12% on one container and
 point. Nine to twelve observations is not enough, and because the estimate is
 a *maximum* a noisy rung can only hurt.
 
-**Residual gap.** 16% against a market implying 18.4% — still ~13% low, in the
-direction that overstates confidence. Not the 3x it was, but not finished
-either. The lever is `VOL_HISTORY_RETENTION_SECONDS`: more span makes longer
-sampling intervals trustworthy, which is where the remaining damping lives.
-That trades against the rule that a long outage must not reconstruct an
-estimate across a hole in the data, so it needs thought rather than a bigger
-number.
+### What the fix bought, and what it did not
+
+The gate went from refusing every crypto proposal to refusing one far-tail
+strike, and the probability curve became coherent for the first time. Same
+event, `KXBTCD-26AUG2117`, before and after:
+
+| strike | before | after | market |
+|---|---|---|---|
+| T66499.99 | 0% | 24.65% | 9.00% |
+| T65999.99 | 0% | 29.68% | 13.50% |
+| T65499.99 | 0% | 35.17% | 23.00% |
+| T64999.99 | — | 41.04% | 32.50% |
+| T63499.99 | — | 59.61% | 70.00% |
+| T62999.99 | 99% | 65.62% | 78.50% |
+| T62499.99 | 100% | 71.31% | 85.50% |
+| T61999.99 | 100% | 76.55% | 90.50% |
+
+Monotone decreasing in strike, as an "above strike" ladder must be. Those are
+now refused by the *Checker*, a much later stage, not by coherence.
+
+**But it overshot, and this is not finished.** Back-solving that ladder pair by
+pair — spot-free, so it assumes nothing — gives a flat **47.5% annualized for
+the model against ~28.3% for the market**. Every deviation has the same sign:
+too much probability in both tails, too little in the middle.
+
+That direction is not the harmless one. It manufactures apparent edge on
+out-of-the-money strikes — `Maker edge: T66499.99 -> 24.65% (market 9.00%,
+edge 14.65%)` is the model inventing 15 points of edge on a tail it is
+overpricing. Buying those is how a too-wide sigma loses money. Nothing traded,
+because the Checker rejected all of it, but do not read `approved 0` as safety
+here.
+
+**Why 47.5% when startup logged 17% — and the answer is not what I first
+wrote.** My first explanation was that the quant path uses a horizon-dependent
+lookback (`max(3600, min(seconds_to_expiry * 20, 86400))`) while the startup
+signature used the default, so a four-day contract measured over 24 hours
+against one. That is **wrong**, and the logging added to test it falsified it
+immediately:
+
+```
+Volatility used btc by lookback (annualized): 3600s -> 51%  86400s -> 51%
+Volatility used eth by lookback (annualized): 3600s -> 39%  86400s -> 39%
+```
+
+Identical. The lookback makes no difference, because the buffer never holds
+more than the retention hour anyway.
+
+The real answer is **staleness**. The 17% was measured at boot at 17:19; the
+ladder was priced at 17:22; and by the 17:29 boot the same measurement read
+51%. Realized volatility genuinely tripled inside ten minutes:
+
+```
+17:19  btc  tick  6%  15s 10%  30s 13%  60s 16%  120s 17%
+17:29  btc  tick 14%  15s 23%  30s 30%  60s 43%  120s 51%
+```
+
+The tick-to-120s ratio held (2.8x, then 3.6x), so the smoothing correction is
+still doing its job — the whole level moved with the market. The model was
+never inconsistent with its own diagnostic; the diagnostic was three minutes
+old.
+
+### So the remaining problem is a different one
+
+The estimator is no longer broken. What it now is, is a **trailing realized**
+volatility being used as a **forward** volatility. Right after a move, trailing
+realized spikes and forward implied does not, so the model reads 47.5% while
+the market reads 28.3% — and every out-of-the-money strike acquires apparent
+edge that is really just a recent move being extrapolated.
+
+That is a genuinely harder problem than the smoothing bug, and it is a
+modelling decision rather than a defect to patch. Two honest directions:
+
+1. **Damp the response.** Blend trailing realized toward a longer-run anchor,
+   or cap how far one pass can move sigma. Standard, but every parameter is a
+   free choice that wants justifying.
+2. **Refuse instead.** When trailing realized has moved sharply against its own
+   recent history, decline to price rather than trade a spike. Fits the
+   fail-closed posture already in this repo, and costs nothing but volume.
+
+There is also a real argument that `max()` across rungs is too aggressive in
+trending conditions. At 17:19 the signature flattened (16% -> 17%, plateau
+reached); at 17:29 it was still climbing at the top rung (43% -> 51%). A
+signature that keeps rising is the signature of a *trend*, not of smoothing,
+and taking the maximum picks up the trend along with the undamped vol. A
+plateau detector — take the value the signature flattens to, and refuse when
+it has not flattened — would handle both cases and is probably the right shape
+for this. Do **not** just revert to the tick rung: that is the 6.6% bug.
+
+**Ruled out — do not re-derive.** Gaps in the stored history from container
+restarts do *not* inflate the estimate. An hour of 5-second ticks with five
+outages returns max-across-rungs 22% against a true 20%, identical to no
+outages, because `realized_vol` normalises each return by its own elapsed
+time.
+
+Until this is resolved the crypto quant path produces edge estimates that are
+too generous on tails after a move. The Checker is currently the only thing
+between them and an order, and `approved 0` is not evidence that the numbers
+are safe.
 
 Read these next:
 
