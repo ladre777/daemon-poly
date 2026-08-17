@@ -32,6 +32,23 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _floats(name: str, default: tuple) -> tuple:
+    """Comma-separated floats.
+
+    A malformed value falls back to the default wholesale rather than
+    silently dropping the bad entries — a vol sampling ladder with one rung
+    quietly missing is worse than one that was never changed.
+    """
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        parsed = tuple(float(p) for p in raw.split(",") if p.strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed or default
+
+
 @dataclass
 class KalshiConfig:
     env: str = os.getenv("KALSHI_ENV", "demo")  # "demo" or "prod"
@@ -298,6 +315,22 @@ class RiskConfig:
     # Minimum wall-clock span the observation window must cover. Ten points
     # gathered in ten seconds say nothing about hourly volatility.
     min_vol_span_seconds: float = _float("MIN_VOL_SPAN_SECONDS", 600.0)
+    # Sampling intervals the volatility estimate is measured at, in seconds.
+    # BRTI is a smoothed cross-venue aggregate, so measuring it at 5-second
+    # spacing sits well inside its smoothing window and understated bitcoin
+    # vol by ~3x in production. Averaging destroys variance and cannot create
+    # it, so the largest estimate across the ladder is the least damped one.
+    # The top rung is bounded by the retention window: 300s sampling needs
+    # ~3000s of span to clear MIN_VOL_OBSERVATIONS.
+    vol_sample_intervals: tuple = _floats(
+        "VOL_SAMPLE_INTERVALS", (0.0, 15.0, 30.0, 60.0, 120.0, 300.0))
+    # Fail-closed sanity band on the annualized volatility the estimate
+    # implies. This is a REFUSAL, never a clamp — an estimate outside the band
+    # means the feed or the estimator is wrong, and pricing off it is how the
+    # quant path came to value bitcoin at 6.6% annualized and propose 0%/100%
+    # on markets quoting 7-94%. Bitcoin has never sustained 10% realized vol.
+    min_plausible_annual_vol: float = _float("MIN_PLAUSIBLE_ANNUAL_VOL", 0.10)
+    max_plausible_annual_vol: float = _float("MAX_PLAUSIBLE_ANNUAL_VOL", 5.0)
     spot_backoff_base_seconds: float = _float("SPOT_BACKOFF_BASE_SECONDS", 30.0)
     spot_backoff_max_seconds: float = _float("SPOT_BACKOFF_MAX_SECONDS", 900.0)
     # Contract specs in core/contract_specs.py all ship verified=False,

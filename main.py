@@ -87,6 +87,31 @@ logging.getLogger("httpcore").setLevel("WARNING")
 
 log = logging.getLogger("daemon_kalshi.main")
 
+_SECONDS_PER_YEAR = 365.0 * 24.0 * 3600.0
+
+
+def _log_vol_signature(spot_client, symbols) -> None:
+    """Print realized vol at each sampling interval, in annualized terms.
+
+    The one number an operator can sanity-check at a glance. A feed that is
+    being sampled inside its own smoothing window reads low at the short
+    intervals and climbs; a clean one is flat. Production measured 6.6%
+    annualized for bitcoin against a market pricing 18.4%, and nothing in the
+    logs said so — the estimate was only ever visible as a probability, by
+    which point it looked like a disagreement rather than a broken input.
+    """
+    for symbol in symbols:
+        history = spot_client.history.get(symbol)
+        if history is None:
+            continue
+        rungs = []
+        for interval, vol in history.vol_signature():
+            label = "tick" if not interval else f"{interval:.0f}s"
+            rungs.append(f"{label} {vol * _SECONDS_PER_YEAR ** 0.5:.0%}"
+                         if vol else f"{label} n/a")
+        log.info("Volatility signature %s (annualized): %s",
+                 symbol, "  ".join(rungs))
+
 
 def _alert(notifier, method: str, *args, **kwargs) -> None:
     """Call a notifier method, swallowing anything it throws.
@@ -691,6 +716,7 @@ def main():
     if restored:
         log.info("Restored volatility history: %s",
                  ", ".join(f"{sym} {n} point(s)" for sym, n in sorted(restored.items())))
+        _log_vol_signature(spot_client, sorted(restored))
     else:
         log.info("No stored volatility history — the quant path starts cold "
                  "and needs ~%.0fs of feed before it can price crypto.",

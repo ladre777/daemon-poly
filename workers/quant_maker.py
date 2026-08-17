@@ -84,6 +84,10 @@ def _diffusion_horizon_seconds(spec, seconds_to_expiry: float) -> float:
     return max(horizon, 1.0)
 
 
+#: For expressing a per-second sigma in the units people can sanity-check.
+_SECONDS_PER_YEAR = 365.0 * 24.0 * 3600.0
+
+
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
@@ -258,13 +262,40 @@ class QuantMaker:
             )
             return None
 
-        vol_per_second = history.realized_vol(lookback)
+        # Measured across a ladder of sampling intervals rather than at the
+        # raw tick spacing. BRTI is a smoothed aggregate, and sampling it
+        # every 5 seconds sits inside that smoothing — which understated
+        # bitcoin vol by ~3x in production and is what produced 0%/100%
+        # proposals against a market quoting 7-94%. See
+        # PriceHistory.realized_vol_robust.
+        vol_per_second = history.realized_vol_robust(lookback)
         if not vol_per_second or vol_per_second <= 0:
             # Not enough history to trust a vol estimate. Improves as the bot
             # keeps polling; until then decline rather than invent a number
             # that would produce a false-confidence probability.
             log.info("Insufficient price history for %s — skipping quant proposal",
                      spec.symbol)
+            return None
+
+        # Fail closed on an implausible estimate. This is deliberately a
+        # refusal and not a clamp: a sigma this far from reality means the
+        # feed or the estimator is wrong, and the honest response to "I do not
+        # know the volatility" is not to trade. Wide enough never to bind in
+        # normal conditions, tight enough to have caught the 6.6%-annualized
+        # bitcoin reading on the very first pass.
+        annualized = vol_per_second * _SECONDS_PER_YEAR ** 0.5
+        if not (CONFIG.risk.min_plausible_annual_vol
+                <= annualized
+                <= CONFIG.risk.max_plausible_annual_vol):
+            log.warning(
+                "Refusing to price %s: volatility estimate implies %.1f%% "
+                "annualized, outside the plausible band %.1f%%-%.1f%%. The "
+                "estimate is wrong, not the market — declining rather than "
+                "pricing off it.",
+                spec.symbol, annualized * 100,
+                CONFIG.risk.min_plausible_annual_vol * 100,
+                CONFIG.risk.max_plausible_annual_vol * 100,
+            )
             return None
 
         strike = candidate.floor_strike

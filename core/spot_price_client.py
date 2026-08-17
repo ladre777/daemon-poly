@@ -55,6 +55,22 @@ from config import CONFIG
 
 log = logging.getLogger("daemon_kalshi.spot")
 
+
+def _thin(points: list, min_spacing: float) -> list:
+    """Keep points at least ``min_spacing`` seconds apart, oldest first.
+
+    Walks forward from the first point rather than slicing every Nth, so
+    irregular spacing — which is what the RTI feed actually delivers — still
+    yields a series with the requested minimum interval.
+    """
+    if min_spacing <= 0 or not points:
+        return points
+    kept = [points[0]]
+    for point in points[1:]:
+        if point[0] - kept[-1][0] >= min_spacing:
+            kept.append(point)
+    return kept
+
 COINGECKO_IDS = {
     "btc": "bitcoin", "bitcoin": "bitcoin",
     "eth": "ethereum", "ethereum": "ethereum",
@@ -97,8 +113,16 @@ class PriceHistory:
     the real elapsed time between observations, not an assumed poll interval.
     """
 
-    def __init__(self, maxlen: int = 500):
-        self._buf: deque[tuple[float, float]] = deque(maxlen=maxlen)
+    #: Enough points to hold the whole retention window at the tick sample
+    #: rate (3600s / 5s = 720) with headroom. It was 500, which capped the
+    #: usable span at ~2500s and put the longer sampling intervals that
+    #: `realized_vol_robust` needs out of reach — see that method.
+    DEFAULT_MAXLEN = 1000
+
+    def __init__(self, maxlen: int = None):
+        self._buf: deque[tuple[float, float]] = deque(
+            maxlen=maxlen if maxlen is not None else self.DEFAULT_MAXLEN
+        )
         # The RTI feed writes from its own thread while the scan loop reads.
         # A single deque append is atomic under CPython, but `add` inspects
         # the buffer for ordering and outliers before appending and
@@ -168,7 +192,8 @@ class PriceHistory:
         limit = CONFIG.risk.spot_outlier_ratio
         return ratio > limit or ratio < 1.0 / limit
 
-    def realized_vol(self, lookback_seconds: float = 3600) -> Optional[float]:
+    def realized_vol(self, lookback_seconds: float = 3600,
+                     sample_seconds: float = 0.0) -> Optional[float]:
         """Per-second stdev of log returns over the lookback window.
 
         Returns a *per-second* figure, not "per observation". The old version
@@ -178,10 +203,16 @@ class PriceHistory:
         take variable time, fetches fail, and duplicates used to be recorded.
         Normalising each return by its own elapsed time removes the assumption
         and makes the units explicit.
+
+        ``sample_seconds`` thins the series to points at least that far apart
+        before measuring. For an unsmoothed price series the answer is the
+        same either way, which is the point — see ``realized_vol_robust`` for
+        why it is not the same for the series we actually get.
         """
         cutoff = time.time() - lookback_seconds
         with self._lock:
             points = [(t, p) for t, p in self._buf if t >= cutoff and p > 0]
+        points = _thin(points, sample_seconds)
         if len(points) < CONFIG.risk.min_vol_observations:
             return None
 
@@ -202,6 +233,52 @@ class PriceHistory:
         variance = sum((r - mean) ** 2 for r in per_second) / (len(per_second) - 1)
         vol = math.sqrt(max(variance, 0.0))
         return vol if vol > 0 else None
+
+    def vol_signature(self, lookback_seconds: float = 3600,
+                      intervals: tuple = None) -> list[tuple[float, Optional[float]]]:
+        """Realized vol measured at several sampling intervals.
+
+        The standard diagnostic for microstructure damping. On a clean series
+        every interval agrees; on a damped one the estimate climbs with the
+        interval and then flattens out.
+        """
+        intervals = intervals or CONFIG.risk.vol_sample_intervals
+        return [(i, self.realized_vol(lookback_seconds, sample_seconds=i))
+                for i in intervals]
+
+    def realized_vol_robust(self, lookback_seconds: float = 3600
+                            ) -> Optional[float]:
+        """Realized vol, measured so a smoothed feed cannot understate it.
+
+        The problem this exists for, measured in production on 2026-08-17:
+        the quant path priced every crypto market at 0% or 100% against a
+        market quoting 7-94%, and back-solving two adjacent strikes on a
+        ten-minute contract put our per-second sigma at 1.18e-5 against the
+        market's 3.27e-5 — 6.6% annualized for bitcoin, against 18.4%. The
+        same 2.8-3.5x understatement appeared at every horizon, so it was a
+        level error, not a scaling one.
+
+        The cause is that BRTI is not a raw print. It is a deliberately
+        smoothed cross-venue aggregate, and we sampled it every 5 seconds —
+        far inside its smoothing window, where an average of the last N
+        seconds barely moves between reads. Simulating a 60-second trailing
+        average of a true 20%-vol path and sampling it at 5 seconds
+        reproduces the number almost exactly: 6.2% measured, 20% true. The
+        same simulation with no smoothing returns ~20% at every interval,
+        which is what says the estimator itself was never wrong.
+
+        Averaging can only ever destroy variance, never create it, so across
+        sampling intervals the *largest* estimate is the least damped one.
+        That is what this returns. Where the signature has flattened out, the
+        maximum is the plateau — the honest sigma; where it has not, the
+        maximum is still the closest available approach to it.
+
+        Intervals that cannot muster MIN_VOL_OBSERVATIONS are skipped rather
+        than filled in, so a long interval never contributes a sigma computed
+        off four points.
+        """
+        estimates = [v for _, v in self.vol_signature(lookback_seconds) if v]
+        return max(estimates) if estimates else None
 
     def span_seconds(self) -> float:
         with self._lock:
