@@ -20,13 +20,22 @@ from tests.conftest import make_candidate
 
 
 class StubScout:
-    def __init__(self, candidates):
+    def __init__(self, candidates, refresh_ok=True):
         self.candidates = candidates
         self.scans = 0
+        #: Set False to simulate an unreadable book at refresh time.
+        self.refresh_ok = refresh_ok
+        self.refreshed: list[str] = []
 
     def scan(self):
         self.scans += 1
         return list(self.candidates)
+
+    def refresh_quote(self, candidate):
+        """Real Scout re-reads the book here; the stub records that it was
+        asked and leaves the already-fresh test quote alone."""
+        self.refreshed.append(candidate.ticker)
+        return self.refresh_ok
 
 
 class StubQuantMaker:
@@ -401,6 +410,9 @@ def test_stale_snapshot_does_not_block_the_trade(client, order_store, edge_store
     class AgeingScout:
         def __init__(self):
             self.scans = 0
+
+        def refresh_quote(self, candidate):
+            return True
 
         def scan(self):
             self.scans += 1
