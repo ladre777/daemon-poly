@@ -657,10 +657,35 @@ def get_hierarchy(category: str) -> tuple[str, str, str]:
 #: The cost of the misreading is not marginal: a live scan of 80,000 open
 #: markets classified 32,000 of them — 40% of Kalshi's entire catalog — as
 #: Esports, so they were skipped before anything looked at their prices.
+#: VERIFIED AGAINST PRODUCTION, 2026-08-17. Matching is a substring test, so
+#: a short pattern can be found inside an unrelated English word spelled out
+#: in a ticker. Sorting by specificity fixed patterns shadowing *each other*;
+#: it cannot help when the only match is accidental. Two live examples:
+#:
+#:     KXDRAINTHESWAMP              -> "RAIN"  -> Weather / Precipitation
+#:     KXTVSEASONRELEASETHELASTOFUS -> "ETH"   -> Crypto / Ethereum
+#:
+#: A political market filed as rain and a television market filed as ether.
+#: This is worse than an unclassified market: "Other" is reported and
+#: reviewed, while a confident wrong answer routes the market to the wrong
+#: grounding source — the first of these was the *only* market in the Weather
+#: group on a live pass, and Weather sorts to the front of the model-call
+#: queue.
+#:
+#: Anchoring the match to the start of the ticker was tried and rejected: it
+#: fixes these two and breaks four others, because legitimate patterns do
+#: appear mid-ticker (KXFRENCHPRES, KXVPRESNOMR), and anchoring hands
+#: KXECONSTATCPIYOY to the two-letter Electoral College pattern "EC".
+#:
+#: So these are corrected individually, from observed tickers rather than
+#: from imagination. The patterns are chosen to cover the family rather than
+#: the single market that exposed it.
 _OVERRIDES: tuple[tuple[str, str, str, str], ...] = (
     ("MVESPORTSMULTIGAMEEXTENDED", "Sports", "Multi-Game", "Extended Props"),
     ("MVESPORTSMULTIGAME", "Sports", "Multi-Game", "Multi-Game Props"),
     ("MVESPORTS", "Sports", "Multi-Game", "Other Multi-Game"),
+    ("DRAINTHESWAMP", "Politics", "Trump Admin", "Drain the Swamp"),
+    ("TVSEASONRELEASE", "Entertainment", "Television", "Season Release"),
 )
 
 #: Same rows, ordered most-specific-first, with corrections in front.

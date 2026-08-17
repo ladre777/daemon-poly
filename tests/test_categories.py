@@ -361,3 +361,63 @@ def test_the_upstream_table_still_says_esports():
 def test_genuine_esports_are_untouched():
     for ticker in ("KXLOLGAMES-25", "KXCSGOGAME-25", "KXLEAGUEWORLDS-26"):
         assert classify_group(ticker) == "Esports", ticker
+
+
+# -- accidental substring matches -------------------------------------------
+#
+# VERIFIED AGAINST PRODUCTION, 2026-08-17. Matching is a substring test, so a
+# short pattern can be found inside an unrelated English word spelled out in a
+# ticker. Sorting by specificity stopped patterns shadowing each other; it
+# cannot help when the only match is accidental.
+
+
+def test_a_political_market_is_not_filed_as_rain():
+    """KXDRAINTHESWAMP contains "RAIN". On a live pass it was the ONLY market
+    in the Weather group — and Weather sorts to the front of the model-call
+    queue, so the misfile was actively spending budget."""
+    assert classify_ticker("KXDRAINTHESWAMP-26", "")[0] == "Politics"
+
+
+def test_a_television_market_is_not_filed_as_ether():
+    """KXTVSEASONRELEASETHELASTOFUS contains "ETH", inside "RELEASETHE"."""
+    assert classify_ticker("KXTVSEASONRELEASETHELASTOFUS-26", "")[0] == "Entertainment"
+
+
+def test_the_correction_covers_the_family_not_just_the_one_market():
+    """The pattern is chosen to catch the next show too, rather than the
+    single ticker that exposed the problem."""
+    group, _, sub = classify_ticker("KXTVSEASONRELEASESTRANGER-26", "")
+
+    assert group == "Entertainment"
+    assert sub == "Season Release"
+
+
+def test_a_confident_wrong_answer_is_worse_than_no_answer():
+    """Why these are worth correcting individually: "Other" gets reported and
+    reviewed, a wrong group routes the market to the wrong grounding source
+    and is silent."""
+    assert classify_ticker("KXBRANDNEWTHING-26", "")[0] == "Other"
+
+
+def test_genuine_mid_ticker_matches_still_work():
+    """Anchoring the match to the start of the ticker was tried and rejected
+    because it breaks these — the pattern legitimately appears mid-ticker."""
+    assert classify_ticker("KXFRENCHPRES-27", "")[0] == "Politics"
+    assert classify_ticker("KXVPRESNOMR-28", "")[0] == "Politics"
+
+
+def test_anchoring_would_have_handed_cpi_to_the_electoral_college():
+    """The other reason anchoring was rejected: "ECONSTATCPIYOY" starts with
+    "EC", which is the two-letter Electoral College pattern."""
+    assert classify_ticker("KXECONSTATCPIYOY-26", "")[0] == "Finance"
+
+
+def test_the_real_weather_families_are_unaffected():
+    assert classify_ticker("KXHIGHNY-26", "")[0] == "Weather"
+    assert classify_ticker("KXHIGHCHI-26", "")[0] == "Weather"
+
+
+def test_the_real_crypto_families_are_unaffected():
+    assert classify_ticker("KXETHY-26", "")[0] == "Crypto"
+    assert classify_ticker("KXBTCY-26", "")[0] == "Crypto"
+    assert classify_ticker("KXBTC15M-26AUG", "")[0] == "Crypto"
