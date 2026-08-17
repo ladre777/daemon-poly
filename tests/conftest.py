@@ -30,6 +30,7 @@ _APP_FIELDS = (
     "telegram",
     "arbitrage",
     "scout_categories",
+    "scout_census_families",
     "llm_reasoning_categories",
     "priority_keywords",
     "max_llm_calls_per_pass",

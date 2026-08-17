@@ -41,6 +41,57 @@ log = logging.getLogger("daemon_kalshi.scout")
 
 
 @dataclass
+class FamilyCensus:
+    """What happened to every market in one ticker family during a scan.
+
+    The aggregate scan line says 37,144 markets fell under the liquidity
+    floor. It does not say whether KXBTC15M was among them, or whether that
+    family appeared at all — and those are different problems with different
+    fixes. A production pass showed the quant path attempting exactly zero
+    candidates while the scan reported crypto among its groups; nothing in
+    the logs could distinguish "the 15-minute markets are too thin" from
+    "the 15-minute markets were never in the catalog we pulled".
+
+    So each family the operator cares about is counted separately, including
+    when the count is zero — an absent family is an answer, and the aggregate
+    line cannot express it.
+    """
+
+    seen: int = 0
+    accepted: int = 0
+    below_liquidity: int = 0
+    invalid: int = 0
+    no_liquidity_data: int = 0
+    skipped_group: int = 0
+    #: Best liquidity seen on a market this family had rejected for being too
+    #: thin. Says whether the floor is marginally or wildly too high.
+    best_rejected_liquidity: float = 0.0
+
+    def summary(self) -> str:
+        if not self.seen:
+            return "0 seen (family absent from the scanned catalog)"
+        parts = [f"{self.seen} seen -> {self.accepted} candidate(s)"]
+        if self.below_liquidity:
+            parts.append(
+                f"{self.below_liquidity} below the $"
+                f"{CONFIG.risk.min_liquidity_usd:.0f} floor "
+                f"(best ${self.best_rejected_liquidity:.0f})"
+            )
+        if self.invalid:
+            parts.append(f"{self.invalid} invalid")
+        if self.no_liquidity_data:
+            parts.append(f"{self.no_liquidity_data} with no liquidity field")
+        if self.skipped_group:
+            parts.append(f"{self.skipped_group} outside SCOUT_CATEGORIES")
+        return ", ".join(parts)
+
+
+def family_of(ticker: str) -> str:
+    """The series segment of a ticker — ``KXBTC15M-26AUG1707-B1`` -> ``KXBTC15M``."""
+    return (ticker or "").split("-", 1)[0].upper()
+
+
+@dataclass
 class Candidate:
     ticker: str
     title: str
@@ -216,6 +267,12 @@ class Scout:
         highest_seen = 0.0
         no_liquidity_data = 0
         sampled_fields = False
+        # Per-family accounting for the families the operator named. Created
+        # up front so a family that never appears still reports, which is the
+        # case the aggregate counters cannot express.
+        watched = {f.strip().upper() for f in CONFIG.scout_census_families
+                   if f.strip()}
+        census: dict[str, FamilyCensus] = {f: FamilyCensus() for f in watched}
 
         # GET /markets, not GET /events?with_nested_markets=true.
         #
@@ -260,8 +317,16 @@ class Scout:
                 group, taxonomy_category, subcategory = classify_ticker(
                     ticker, market_event_ticker
                 )
+                # Counted before the group filter: a watched family being
+                # excluded by SCOUT_CATEGORIES is one of the answers this is
+                # here to give, and filtering first would hide it.
+                tally = census.get(family_of(ticker))
+                if tally is not None:
+                    tally.seen += 1
                 if wanted and group.lower() not in wanted:
                     skipped_by_group[group] = skipped_by_group.get(group, 0) + 1
+                    if tally is not None:
+                        tally.skipped_group += 1
                     continue
 
                 # Everything past here is external data being turned into
@@ -273,6 +338,8 @@ class Scout:
                 except MarketDataInvalid as e:
                     reason = str(e).split(":", 1)[-1].strip()
                     rejected[reason] = rejected.get(reason, 0) + 1
+                    if tally is not None:
+                        tally.invalid += 1
                     log.debug("Rejected market: %s", e)
                     continue
                 for warning in valid.warnings:
@@ -284,6 +351,8 @@ class Scout:
                     # bugs happened, so this is counted and surfaced rather
                     # than silently treated as zero.
                     no_liquidity_data += 1
+                    if tally is not None:
+                        tally.no_liquidity_data += 1
                 elif valid.volume < CONFIG.risk.min_liquidity_usd:
                     # Counted, not silent. "0 candidates" with no further
                     # detail is indistinguishable from a broken scan; knowing
@@ -292,7 +361,14 @@ class Scout:
                     # MIN_LIQUIDITY_USD rather than at the parser.
                     below_volume += 1
                     highest_seen = max(highest_seen, valid.volume)
+                    if tally is not None:
+                        tally.below_liquidity += 1
+                        tally.best_rejected_liquidity = max(
+                            tally.best_rejected_liquidity, valid.volume
+                        )
                     continue
+                if tally is not None:
+                    tally.accepted += 1
                 candidates.append(
                     Candidate(
                         ticker=valid.ticker,
@@ -350,6 +426,12 @@ class Scout:
                 "same as an illiquid market.",
                 no_liquidity_data, ", ".join(LIQUIDITY_FIELDS),
             )
+        for family in sorted(census):
+            # INFO, every pass, one line per watched family. These are the
+            # markets the operator has said the bot exists to trade; "why is
+            # there nothing from them" should never again need a code change
+            # to answer.
+            log.info("Family census %s: %s", family, census[family].summary())
         if not candidates and below_volume:
             # The single most useful line when nothing is tradeable: it says
             # whether the floor is slightly too high or wildly too high.

@@ -397,6 +397,21 @@ class AppConfig:
             "SCOUT_CATEGORIES", "Sports,Crypto,Politics,Finance,Weather"
         ).split(",")
     )
+    # Ticker families Scout reports on individually, every pass, even when it
+    # finds none of them.
+    #
+    # The aggregate scan line said 37,144 markets fell under the liquidity
+    # floor and crypto was among the groups scanned — and could not say
+    # whether KXBTC15M was in that pile or absent from the catalog entirely.
+    # Those need different fixes, and the difference took a code change to
+    # see. These are the families the operator named as the point of the bot,
+    # so each gets its own line and a zero count is a reportable answer.
+    scout_census_families: list = field(
+        default_factory=lambda: os.getenv(
+            "SCOUT_CENSUS_FAMILIES",
+            "KXBTC15M,KXETH,KXBTCD,KXBTC,KXETHD,PGATOUR,KXHIGHNY,KXHIGHCHI",
+        ).split(",")
+    )
     # Categories where the LLM Maker is allowed to reason with no live spot
     # feed — because either you have real grounding data wired (ESPN for
     # sports, NOAA for weather, FRED for economics) or it's a genuinely
