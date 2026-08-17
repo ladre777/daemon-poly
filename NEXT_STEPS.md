@@ -3,7 +3,7 @@
 Handoff for the next session. **Read this, not chat history** — chat contains
 stale PR numbers and at least two claims I had to correct later.
 
-Last updated: 2026-08-17, end of the prod-cutover session.
+Last updated: 2026-08-17 17:00 UTC, end of the prod-cutover session.
 
 ---
 
@@ -13,14 +13,20 @@ Verify these rather than trusting them; they were true when written.
 
 | | |
 |---|---|
-| `main` | `#24` merged (paper calibration). Check `git log --oneline -5`. |
-| Tests | 813 passing locally, `ruff` clean. **CI was NOT read** — see below. |
-| Railway | `env=prod`, `DRY_RUN=false` — **LIVE, REAL MONEY**, confirmed from the boot banner at 14:13. |
+| `main` | `#33` merged. Check `git log --oneline -8`. |
+| Tests | 859 passing locally, `ruff` clean. **CI was NOT read** — see below. |
+| Railway | `env=prod`, `DRY_RUN=false` — **LIVE, REAL MONEY**, confirmed from the boot banner at 16:50. |
+| Live commit | `ddadc43`, deployment `65e6e4ea`, booted 16:50 UTC. Read `meta.commitHash`, never a green SUCCESS. |
 | Account | funded ~$49.98 |
-| RTI feed | live on prod, ~200 frames/2min across BRTI + ETHUSD_RTI |
+| RTI feed | live on prod, subscribed to BRTI + ETHUSD_RTI |
+| Volatility clock | **starts warm now.** Boot logged `Restored volatility history: btc 612 point(s), eth 614 point(s)` — well past the 600s the quant path needs |
 | ESPN | **blocked for bots. Do not touch the ESPN client.** |
 | Web access from the agent sandbox | direct `curl` is blocked, but the proxy-backed WebSearch/WebFetch tools DO work — usable for research, not for testing whether an endpoint works from Railway |
 | NOAA | wired, never yet executed against a live weather market |
+
+**Fetch before you read `origin/main`.** A stale remote ref in this session
+made `#31` look unmerged when it was already on main, and produced `#32` — an
+empty squash commit. Harmless, but `git fetch origin main` first.
 
 Effective bankroll is `min(--bankroll, exchange balance)`, so sizing is capped
 by the real $49.98, not the $1000 CLI default. At `MAX_POSITION_PCT=0.05`
@@ -28,10 +34,12 @@ that is ~$2.50/position — roughly 6 contracts at 40c.
 
 ### Deploy state
 
-Live cutover completed at 14:13 on deployment `803656a8`, confirmed from the
-banner rather than assumed:
+Live cutover completed at 14:13; production sat on `#24` until 16:50, when
+deployment `65e6e4ea` finally shipped the head of main. Confirmed from the
+banner and from a log line only the new code emits, rather than assumed:
 
 ```
+Restored volatility history: btc 612 point(s), eth 614 point(s)
 DÆMON-KALSHI starting | env=prod dry_run=False strategy=taker
 Startup state: $49.98 balance, 0 open position(s), 0 live order(s)
 ```
@@ -86,6 +94,28 @@ reliable trigger.
   whether they traded, papered, or were refused, in three modes that are never
   averaged (`live` / `paper` / `refused`).
 
+**Item 3 — latency-aware crypto.** Substantially done, not finished.
+
+- `#30` persists the volatility buffer, so a redeploy no longer resets the
+  clock. Confirmed in production: the 16:50 boot restored 612 btc and 614 eth
+  points instead of starting at zero. This was the reason the 15-minute and
+  hourly crypto families had never priced once in any run.
+- `#31` verified `KXBTC` from its own rules text (60-second BRTI average,
+  fixed strike, hourly window), which took it off the "unverified spec"
+  refusal path. Census now reports 27 candidates on that family alone.
+
+What is left on item 3 is genuinely latency-aware behaviour — reacting inside
+the settlement window rather than merely being warm enough to price.
+
+**Order pricing.** `#33` fixed a silent defect worth knowing about even though
+it is closed. Kalshi quotes some markets in tenths of a cent
+(`price_level_structure: "tapered_deci_cent"` — `KXBTC15M` rests 0.9590 /
+0.9600), and the wire price was built with `f"{cents / 100:.2f}"`, which
+rounds to the *nearest* cent. A 5.55c limit went out as a 6c order: above the
+price risk sized against, above the number stored on the order, above what
+counted as exposure. The limit is now floored onto the grid inside
+`cost_per_contract_cents`, and the formatter raises rather than rounds.
+
 ---
 
 ## What is IN PROGRESS / UNVERIFIED
@@ -115,15 +145,120 @@ exercise a code path that has never run end to end — reconciliation, fill
 recording, settlement and calibration writeback all included. Treat the first
 live trade as a test of the machinery, not as a trade.
 
-**`approved 0` on every pass observed so far.** The Checker rejects everything.
-Live mode does not change that — if it still reads `approved 0`, nothing is
-trading and the reason is upstream of execution.
+**`approved 0` on every pass observed so far**, and the reason is now known
+rather than suspected. On the LLM path the Checker rejects; on the quant path
+the coherence gate refuses every crypto proposal because the volatility
+estimate is ~3.5x too small. See "The single next action". Both are upstream
+of execution, so nothing has reached the exchange.
 
 ---
 
 ## The single next action
 
-**Read the calibration table and decide whether the Checker is miscalibrated.**
+**The quant model's volatility estimate is roughly 3.5x too small. Fix that.**
+
+This supersedes the previous "read the calibration table" instruction, which
+was written before the quant path had ever run. It has now run, and the answer
+it gave is much sharper than anything the calibration table would have said.
+
+### What the first warm pass showed
+
+`ddadc43`, 16:51 UTC, the first pass in the bot's history with a warm
+volatility clock:
+
+```
+Pass funnel: 2962 candidate(s) -> quant 99 (no proposal 0, below edge 69),
+             llm 10 | proposed 35 -> checked 16 (rejected 16) -> approved 0
+```
+
+`no proposal 0` is the headline. Every prior pass read `no proposal 68` or
+`no proposal 73` — the quant path declining every candidate for want of
+history. It now prices all 99. Items `#30` and `#31` did what they were for.
+
+And every single crypto proposal was then refused by the coherence gate:
+
+```
+Refusing KXBTCD-26AUG2117-T65499.99: model says 0% against a market at 19.0%
+  — 5.46 in log-odds, over the 3.00 limit
+Refusing KXBTCD-26AUG2117-T62499.99: model says 100% against a market at 84.5%
+  — 5.21 in log-odds, over the 3.00 limit
+```
+
+Not one or two. All of them, on both assets, at horizons from 45 minutes to
+four days, always in the same direction: the model collapses to 0% or 100%
+where the market prices 7-20% or 76-94%.
+
+### The arithmetic
+
+`KXBTCD-26AUG2117` expires four days out, and its strike ladder back-solves to
+a strikingly consistent market view (spot ~$64,100):
+
+| strike | market | implied sigma (4d) | per-second |
+|---|---|---|---|
+| 65,500 | 19.0% | 2.46% | 4.19e-5 |
+| 66,000 | 11.5% | 2.43% | 4.14e-5 |
+| 66,500 |  7.5% | 2.55% | 4.34e-5 |
+| 63,000 | 76.5% | 2.40% | 4.08e-5 |
+| 62,500 | 84.5% | 2.49% | 4.24e-5 |
+
+Five strikes agreeing to within 6% on one number — that is a coherent implied
+surface, not noise. Our model, clipped at 0.1%/99.9% on the same strikes,
+implies a per-second sigma of at most 1.19e-5.
+
+Annualized, that is the whole story:
+
+```
+market-implied BTC vol :  23.5%   <- plausible for a calm bitcoin regime
+our estimator          :   6.7%   <- not a credible number for bitcoin, ever
+```
+
+6.7% annualized is roughly the volatility of a G10 currency pair. This needs
+no market to refute it. **Do not treat this as "the market disagrees with us"
+— treat it as an estimator bug**, and note the corollary: the 69 candidates
+counted `below edge` in that funnel were scored with the same broken sigma, so
+that number means nothing yet either.
+
+### Where to look
+
+`PriceHistory.realized_vol` (`core/spot_price_client.py:171`) is correct as
+written — it normalises each log return by its own elapsed time, so uneven
+spacing is handled properly. The defect is upstream of it, in what lands in
+the buffer. In rough order of likelihood:
+
+1. **Repeated ticks.** `record_tick` downsamples to
+   `RTI_TICK_SAMPLE_SECONDS=5`. If BRTI republishes an unchanged value between
+   updates, the stored series carries runs of identical prices, every one of
+   which contributes a zero return and drags sigma down. Check first: pull the
+   `price_history` table and count how many consecutive pairs are equal.
+   ```sql
+   SELECT symbol, COUNT(*) FROM price_history GROUP BY symbol;
+   ```
+   then diff successive prices and see what fraction are exactly zero.
+2. **BRTI is itself a smoothed index**, not a raw print. Its 5-second returns
+   are damped relative to the underlying, so the level may be genuinely low
+   even with clean data.
+3. **Horizon extrapolation.** sqrt(t)-scaling a 5-second sigma to four days is
+   a ~70,000x extrapolation and misses drift and jumps entirely. Note the
+   understatement is ~2.7x at 45 minutes and ~3.5x at four days — it worsens
+   with horizon, but the base level is already wrong, so this is a second
+   effect and not the main one.
+
+Whatever the cause, the fix must keep the fail-closed property: a sigma that
+cannot be trusted means no trade, not a fudge factor. A defensible interim
+step is to refuse to price when the estimate implies an annualized vol outside
+a sanity band for the asset — that is a new refusal, not a loosened one.
+
+### Meanwhile, nothing is at risk
+
+The coherence gate is refusing 100% of these, which is exactly what it exists
+for, and `approved 0` means no money has moved. Live trading can be left
+running: an uncalibrated model behind a working gate trades nothing. Do not
+widen `COHERENCE_MAX_LOG_ODDS` to "unblock" the funnel — that gate is the only
+thing standing between this estimator and the account.
+
+### Still worth doing, after the above
+
+Read the calibration table, which now has real rows to read:
 
 ```python
 from memory.edge_store import EdgeStore
@@ -132,15 +267,10 @@ for row in EdgeStore().calibration_by_category():
           row["brier_score"], row["total_pnl"])
 ```
 
-The `refused` mode is the one that matters right now. It answers: *is the gate
-turning down trades that would have won?* With `approved 0` every pass, that is
-the highest-value question in the system. If `refused` shows good Brier and
-positive counterfactual PnL, the gate is too tight and that is where the edge
-is being lost — not in the model.
-
-Do not tune thresholds before that table has rows in it. Guessing at gate
-settings without it is exactly the failure mode this session spent its time
-eliminating.
+`refused` is the interesting mode: it answers whether the gates are turning
+down trades that would have won. Expect it to be dominated by
+`skipped_incoherent` crypto rows until the sigma above is fixed — which is
+itself the confirmation that the diagnosis was right.
 
 ---
 
@@ -188,11 +318,11 @@ datacenter IP and fail closed.
 
 ### Item 3 — latency-aware crypto quant path
 
-RTI settlement is correct and the feed is live. Volatility history is built
-from the tick stream (`#17`) at `RTI_TICK_SAMPLE_SECONDS=5`, needing
-`MIN_VOL_SPAN_SECONDS=600` — so ~10 minutes of uptime before crypto can price
-at all, and **every redeploy resets it** (in-memory buffer). That is the
-obvious first target: persist the history, or shorten the warmup safely.
+The warmup half is done (`#30` persists the buffer, `#31` verified `KXBTC`),
+and the path now prices 99/99 candidates. What replaced it as the blocker is
+the sigma calibration described in "The single next action" — do that first,
+because latency-aware behaviour built on a 6.7%-annualized bitcoin is
+pointless.
 
 Keep fail-closed: no feed → no trade. Do not weaken
 `MAX_SPOT_AGE_SECONDS`, the outlier filter, or the settlement blackout.
