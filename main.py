@@ -369,6 +369,18 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             if health is not None:
                 health.mark_reconciled()
 
+        # Re-read the book immediately before risk sees it. The quote on the
+        # candidate was captured during the scan, and everything between —
+        # ~53s of paginated scanning, then Maker and Checker per candidate —
+        # aged it past MAX_QUOTE_AGE_SECONDS. In production that refused 149
+        # of 150 Checker-approved candidates, none of them by less than the
+        # limit. One extra call per approved candidate, and only for
+        # candidates that have already cleared the Checker, so the cost is a
+        # handful of requests per pass rather than one per market scanned.
+        if verdict.approved and not scout.refresh_quote(candidate):
+            stats["quote_refresh_failed"] += 1
+            continue
+
         try:
             decision = risk.evaluate(verdict, account.snapshot)
         except KillSwitchTripped as e:

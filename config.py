@@ -110,7 +110,17 @@ class ModelConfig:
     # Moonshot at 30s aged the account snapshot past its freshness limit
     # before the first proposal ever reached risk. Failing over quickly is
     # worth more here than waiting out a slow response.
-    maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 15.0)
+    # Lowered from 15s on 2026-08-17, calibrated against observed latency
+    # rather than guessed. In production a SUCCESSFUL Moonshot call returns in
+    # roughly 2 seconds (05:16:32 scan end -> 05:16:34 first proposal); the
+    # 15s budget was only ever spent by calls that were going to time out
+    # anyway and then be answered by the fallback.
+    #
+    # That wasted time is not free: it is the direct cause of quotes ageing
+    # past MAX_QUOTE_AGE_SECONDS before risk evaluates them. 8s leaves ~4x
+    # headroom over the observed success latency while cutting the worst case
+    # nearly in half.
+    maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 8.0)
     # Model used when the Maker falls back to Anthropic. NOT the Checker's
     # model: the Maker is the high-volume path (tens of calls per 30-second
     # pass) and the Checker is the low-volume one (only on proposals that

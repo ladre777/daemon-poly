@@ -369,6 +369,23 @@ class RiskGuardrail:
             raise KillSwitchTripped("Daily drawdown limit hit — trading halted")
 
         if not verdict.approved:
+            # Two genuinely different signals, and they used to collapse into
+            # one string. `Verdict.approved` is False either because the
+            # Checker declined, or because it approved with confidence under
+            # the threshold — and the old message printed verdict.verdict
+            # either way, so 27 ledger rows read "Checker did not approve:
+            # approve". That is not just confusing, it is wrong: an auditor
+            # reading those rows concludes the model declined when in fact it
+            # agreed and a threshold blocked it. Those two facts lead to
+            # opposite responses (improve the model vs. revisit the
+            # threshold), so the permanent record has to tell them apart.
+            if verdict.verdict == "approve":
+                return RiskDecision(
+                    False,
+                    f"Checker approved but confidence {verdict.confidence:.2f} "
+                    f"is below the {CONFIG.risk.checker_min_confidence:.2f} "
+                    f"minimum",
+                )
             return RiskDecision(False, f"Checker did not approve: {verdict.verdict}")
 
         for rule in (

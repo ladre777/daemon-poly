@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.kalshi_client import KalshiClient
+from core.kalshi_client import KalshiAPIError, KalshiClient, KalshiTimeoutError
 from core.kalshi_categories import GROUPS, classify_ticker, ticker_prefix
 from core.validation import (
     LIQUIDITY_FIELDS,
@@ -124,6 +124,70 @@ class Candidate:
 class Scout:
     def __init__(self, client: KalshiClient = None):
         self.client = client or KalshiClient()
+
+    def refresh_quote(self, candidate: Candidate) -> bool:
+        """Re-read this market's book immediately before risk evaluates it.
+
+        Why this exists
+        ---------------
+        A candidate's quote is captured during the scan, and the scan is slow
+        by design: ~350 paginated calls at KALSHI_MIN_REQUEST_INTERVAL is a
+        ~53-second floor before a single model has been asked anything. Maker
+        and Checker then add several seconds each per candidate. Measured in
+        production, quotes reached risk between 60 and 115 seconds old
+        (median 79s) against a 60-second freshness limit — so the freshness
+        check refused 149 of 150 Checker-approved candidates, and not one
+        refusal was under the limit. The pipeline could not beat its own clock.
+
+        The fix is to re-read, not to relax the limit. That keeps the
+        guarantee the check exists for: the price a decision is made on is the
+        price the exchange is showing now.
+
+        Crucially this updates ``yes_bid``/``yes_ask``, not just the
+        timestamp. Refreshing the timestamp alone would be worse than doing
+        nothing — it would satisfy the freshness check while leaving the
+        decision anchored to a price that has moved, which is exactly what the
+        check was written to prevent. Risk re-derives net edge from these
+        fields, so a market that moved against us now fails the edge threshold
+        on its own merits.
+
+        Returns True if the candidate now carries a fresh, usable quote.
+        Returns False on any failure: an unreadable market is skipped, never
+        traded on the scan-time price.
+        """
+        try:
+            payload = self.client.get_market(candidate.ticker) or {}
+        except (KalshiAPIError, KalshiTimeoutError) as e:
+            log.warning("Could not refresh the quote for %s: %s — skipping "
+                        "rather than trading on the scan-time price",
+                        candidate.ticker, e)
+            return False
+
+        raw = payload.get("market", payload)
+        if not isinstance(raw, dict):
+            log.warning("Unexpected market payload refreshing %s — skipping",
+                        candidate.ticker)
+            return False
+
+        try:
+            fresh = validate_market(raw)
+        except MarketDataInvalid as e:
+            log.warning("Refreshed quote for %s failed validation (%s) — "
+                        "skipping", candidate.ticker, e)
+            return False
+
+        if (fresh.quote.yes_bid != candidate.yes_bid
+                or fresh.quote.yes_ask != candidate.yes_ask):
+            log.info(
+                "%s moved between scan and risk: %.0f/%.0f -> %.0f/%.0f "
+                "(edge is re-derived from the new price)",
+                candidate.ticker, candidate.yes_bid, candidate.yes_ask,
+                fresh.quote.yes_bid, fresh.quote.yes_ask,
+            )
+        candidate.yes_bid = fresh.quote.yes_bid
+        candidate.yes_ask = fresh.quote.yes_ask
+        candidate.quote = fresh.quote
+        return True
 
     def list_available_categories(self) -> list[str]:
         """Call this once to see what's actually live before setting

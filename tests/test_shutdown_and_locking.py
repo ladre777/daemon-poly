@@ -85,6 +85,9 @@ def test_sigterm_during_a_scan_does_not_abort_the_pass(
     shutdown = main.install_shutdown_handlers()
 
     class SignallingScout:
+        def refresh_quote(self, candidate):
+            return True
+
         def scan(self):
             os.kill(os.getpid(), signal.SIGTERM)
             time.sleep(0.05)
@@ -136,6 +139,9 @@ def test_sigterm_between_maker_and_execution_does_not_lose_the_order(
 class SignallingScoutFactory:
     def __init__(self, candidates):
         self._candidates = candidates
+
+    def refresh_quote(self, candidate):
+        return True
 
     def scan(self):
         return list(self._candidates)
