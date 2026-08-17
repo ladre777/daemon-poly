@@ -47,6 +47,43 @@ from workers.maker import Proposal
 log = logging.getLogger("daemon_kalshi.quant_maker")
 
 
+#: Length of the settlement averaging window, in seconds. Kalshi's crypto
+#: contracts settle on "the simple average of the sixty seconds" of the
+#: relevant CF Benchmarks index — confirmed verbatim from rules_primary on
+#: three live markets, see core/contract_specs.py.
+SETTLEMENT_AVERAGING_SECONDS = 60.0
+
+
+def _diffusion_horizon_seconds(spec, seconds_to_expiry: float) -> float:
+    """Effective diffusion horizon for the quantity that actually settles.
+
+    A point-in-time contract settles on the index value at T, whose variance
+    grows as sigma^2 * T. An index-settled Kalshi contract instead settles on
+    the *mean* of the index over the final w seconds, and a time-average is
+    less variable than the endpoint it straddles: for a driftless random walk
+    the average over a trailing window of length w has variance
+
+        sigma^2 * (T - w) + sigma^2 * w/3  =  sigma^2 * (T - 2w/3)
+
+    so the correct horizon is ``T - 2w/3``, not ``T``. Treating the average
+    as a point sample overstates the spread of outcomes, which pushes every
+    probability toward 0.5 and manufactures edge against markets that are
+    correctly priced.
+
+    The effect is modest at a 15-minute horizon (900s -> 860s, ~2% off the
+    standard deviation) and grows as expiry approaches — which is exactly
+    where the settlement blackout stops us pricing anyway. It is applied
+    because it is the right quantity, not because it is large.
+
+    Floored at one second: a non-positive horizon would make the diffusion
+    term zero and the probability a step function.
+    """
+    if spec is None or spec.observation != "rti_60s_average":
+        return seconds_to_expiry
+    horizon = seconds_to_expiry - (2.0 * SETTLEMENT_AVERAGING_SECONDS / 3.0)
+    return max(horizon, 1.0)
+
+
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
@@ -151,7 +188,16 @@ class QuantMaker:
         snapshot a good estimate of a 60-second index mean.
         """
         blackout = CONFIG.risk.crypto_settlement_blackout_seconds
-        if blackout <= 0 or spec is None or spec.source != "crypto":
+        if blackout <= 0 or spec is None:
+            return False
+        # Keyed on the settlement MECHANISM, not on the feed name. This
+        # previously read `spec.source != "crypto"`, which silently stopped
+        # protecting these families the moment they moved to source
+        # "kalshi_rti" — the gate would have disabled itself during exactly
+        # the change it was written to survive. `observation` describes what
+        # the contract does; `source` describes where we get a number, and
+        # only the first is a property of the market.
+        if spec.observation != "rti_60s_average":
             return False
         if seconds_to_close > blackout:
             return False
@@ -226,8 +272,10 @@ class QuantMaker:
             return None
 
         # Diffusion scaling on real elapsed time, not on an assumed count of
-        # poll intervals.
-        vol_to_expiry = vol_per_second * math.sqrt(seconds_to_expiry)
+        # poll intervals — and, for index-settled contracts, on the horizon
+        # of the quantity that actually settles them.
+        effective_seconds = _diffusion_horizon_seconds(spec, seconds_to_expiry)
+        vol_to_expiry = vol_per_second * math.sqrt(effective_seconds)
         if vol_to_expiry <= 0:
             return None
 

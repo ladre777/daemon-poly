@@ -23,10 +23,32 @@ from workers.scout import Candidate
 # -- contract specs ---------------------------------------------------------
 
 
-def test_every_shipped_spec_is_marked_unverified():
-    """Nothing in this repo has been checked against Kalshi's settlement
-    rules, and the specs must say so rather than implying otherwise."""
-    assert all(not s.verified for s in CONTRACT_SPECS)
+def test_only_index_backed_families_are_marked_verified():
+    """Was "nothing is verified". Three crypto families now are, because
+    their rules text was read from the live API and they are priced off the
+    CF Benchmarks index that settles them.
+
+    The invariant that replaces it is the one that actually protects us: a
+    family may be verified ONLY if it is priced off the settling instrument.
+    Marking a family verified while it still reads a spot proxy is the exact
+    mistake the flag exists to prevent, so it is asserted rather than
+    trusted.
+    """
+    verified = [s for s in CONTRACT_SPECS if s.verified]
+    assert verified, "the RTI-backed families should be verified"
+    for spec in verified:
+        assert spec.settlement_verified, (
+            f"{spec.prefix}: verified without its settlement rule confirmed"
+        )
+        assert spec.source == "kalshi_rti", (
+            f"{spec.prefix}: verified while priced off {spec.source!r}, which "
+            f"is not the instrument that settles it"
+        )
+    for spec in CONTRACT_SPECS:
+        if spec.observation == "rti_60s_average":
+            assert spec.source == "kalshi_rti", (
+                f"{spec.prefix}: settles on an index but reads {spec.source!r}"
+            )
     assert all(s.caveat for s in CONTRACT_SPECS)
 
 
@@ -44,14 +66,16 @@ def test_unmapped_family_has_no_spec():
 
 
 def test_unverified_specs_are_refused_by_default():
-    ok, why = usable(spec_for("KXBTCD-25AUG14-B"))
+    # KXSOL, not KXBTCD: the bitcoin families are verified now, and this test
+    # is about what happens to a family that still is not.
+    ok, why = usable(spec_for("KXSOL-25AUG14"))
     assert not ok
     assert "unverified" in why
 
 
 def test_unverified_specs_can_be_allowed_explicitly_for_demo():
     CONFIG.risk.quant_allow_unverified = True
-    ok, _ = usable(spec_for("KXBTCD-25AUG14-B"))
+    ok, _ = usable(spec_for("KXSOL-25AUG14"))
     assert ok
 
 
@@ -268,7 +292,8 @@ def candidate(ticker="KXBTCD-25AUG14-B", strike=50_000.0, strike_type="greater")
 def test_quant_declines_unverified_families_by_default():
     quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
     quant.begin_pass()
-    assert quant.can_handle(candidate()) is False
+    # KXSOL: still unverified. KXBTCD is verified now and would be handled.
+    assert quant.can_handle(candidate(ticker="KXSOL-25AUG14-B")) is False
 
 
 def test_quant_declines_a_family_with_no_spec():
@@ -342,7 +367,9 @@ def test_declines_are_logged_once_per_family_not_once_per_market(caplog):
     quant.begin_pass()
     with caplog.at_level("INFO"):
         for i in range(50):
-            quant.can_handle(candidate(ticker=f"KXBTCD-25AUG14-{i}"))
+            # KXSOL, not KXBTCD: this test needs a family that is still
+            # DECLINED, and the bitcoin families are verified now.
+            quant.can_handle(candidate(ticker=f"KXSOL-25AUG14-{i}"))
 
     assert caplog.text.count("Quant path declining") == 1
 
@@ -389,7 +416,7 @@ def test_the_blackout_holds_even_for_a_verified_family():
     quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
     quant.begin_pass()
     spec = specs.spec_for("KXBTCD-25AUG14-B")
-    assert spec.source == "crypto"
+    assert spec.source == "kalshi_rti"
     assert quant._in_settlement_blackout(spec, 30.0) is True
 
 
@@ -413,14 +440,24 @@ def test_the_blackout_does_not_apply_to_non_crypto_families():
 
 
 def test_the_corrected_btcd_spec_records_the_real_settlement_mechanism():
-    """This said observation="point_in_time", which was factually wrong."""
+    """This said observation="point_in_time", which was factually wrong.
+
+    Originally asserted `"60" in settlement_definition` — a proxy for
+    "records the 60-second mechanism". The definition now quotes Kalshi's own
+    rules text verbatim, and that text spells the number as "sixty seconds",
+    so the proxy broke while the property it stood for got stronger. Asserts
+    the structured fields instead; they cannot drift with prose wording.
+    """
     import core.contract_specs as specs
 
     spec = specs.spec_for("KXBTCD-25AUG14-B")
     assert spec.observation == "rti_60s_average"
-    assert "60" in spec.settlement_definition
-    assert spec.verified is False, (
-        "confirming the mechanism is not the same as verifying the feed — "
-        "the bot still prices this off CoinGecko spot, which is not what "
-        "settles it"
-    )
+    assert spec.settlement_verified is True
+    assert spec.settlement_index == "BRTI"
+    assert "sixty seconds" in spec.settlement_definition
+    # Was False while the feed was CoinGecko. The feed is now the BRTI relay
+    # that actually settles it, which is the whole condition this flag
+    # tracks — so verified is True, and the assertion that matters is that
+    # the two moved together rather than the flag moving alone.
+    assert spec.source == "kalshi_rti"
+    assert spec.verified is True

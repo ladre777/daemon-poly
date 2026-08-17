@@ -196,7 +196,14 @@ class PriceHistory:
 
 
 class SpotPriceClient:
-    def __init__(self, timeout: float = 8.0, http=None):
+    def __init__(self, timeout: float = 8.0, http=None, rti_feed=None):
+        #: Optional RTIFeed. When present, families whose spec says
+        #: source="kalshi_rti" are priced off the CF Benchmarks index Kalshi
+        #: relays, which is what actually settles them. When absent, those
+        #: families get no quote and the quant path declines — deliberately,
+        #: rather than falling back to the spot feed the exchange says is the
+        #: wrong instrument.
+        self.rti_feed = rti_feed
         self._http = http or httpx.Client(
             timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}
         )
@@ -266,10 +273,18 @@ class SpotPriceClient:
             return None
 
         try:
-            price = (
-                self._fetch_crypto(symbol) if source == "crypto"
-                else self._fetch_etf(symbol)
-            )
+            if source == "kalshi_rti":
+                # The settling instrument itself, not a proxy. No HTTP call:
+                # the index arrives over a WebSocket and this reads the
+                # newest value held. Returns None when the feed is cold or
+                # stale, which makes the quant path decline — it must never
+                # fall back to spot, because spot is precisely the instrument
+                # the exchange states does not settle these markets.
+                price = self._fetch_rti(symbol)
+            elif source == "crypto":
+                price = self._fetch_crypto(symbol)
+            else:
+                price = self._fetch_etf(symbol)
         except (httpx.TimeoutException, httpx.TransportError) as e:
             log.warning("%s request failed for %s: %r", source, symbol, e)
             self._record_failure(source)
@@ -287,6 +302,21 @@ class SpotPriceClient:
         # One observation per accepted fetch, timestamped.
         self.history.setdefault(symbol, PriceHistory()).add(price, quote.observed_at)
         return quote
+
+    def _fetch_rti(self, symbol: str) -> Optional[float]:
+        """Latest CF Benchmarks index level for this asset, or None.
+
+        No fallback by design. If the feed is absent, cold or stale the
+        answer is "we do not know", and the only safe response to that is to
+        not price the market.
+        """
+        if self.rti_feed is None:
+            log.warning(
+                "No RTI feed configured — cannot price %s off its settling "
+                "index. Declining rather than substituting spot.", symbol,
+            )
+            return None
+        return self.rti_feed.value_for_symbol(symbol)
 
     def _fetch_crypto(self, symbol: str) -> Optional[float]:
         cg_id = COINGECKO_IDS.get(symbol)

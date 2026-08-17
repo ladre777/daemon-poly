@@ -109,7 +109,28 @@ class KalshiWebSocket:
         }
         if tickers:
             cmd["params"]["market_tickers"] = tickers
+        await self.send(cmd)
+
+    async def send(self, cmd: dict):
+        """Send an already-built command frame.
+
+        :meth:`subscribe` only knows how to say ``market_tickers``, and not
+        every channel is keyed that way — ``cfbenchmarks_value`` subscribes by
+        ``index_ids`` and rejects market tickers outright. Rather than grow
+        one method a parameter per channel, callers that need a different
+        shape build the frame themselves (see
+        :func:`core.rti_client.subscribe_command`) and send it here, reusing
+        the signed connection.
+        """
         await self._ws.send(json.dumps(cmd))
+
+    def messages(self):
+        """Async-iterate raw frames off the socket.
+
+        For consumers that do their own dispatch. :meth:`run` remains the
+        orderbook-aware path; this is the un-opinionated one.
+        """
+        return self._ws
 
     async def run(self, channels: list[str], tickers: Optional[list[str]] = None):
         """Main receive loop. Kalshi sends a Ping control frame ~every 10s;

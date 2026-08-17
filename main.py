@@ -42,6 +42,7 @@ from workers.context import ContextEnricher
 from core.espn_client import ESPNClient
 from core.weather_client import NOAAClient
 from core.fred_client import FredClient
+from core.rti_runner import RTIFeedRunner
 from core.spot_price_client import SpotPriceClient
 from core.telegram_client import TelegramClient
 from workers.quant_maker import QuantMaker
@@ -632,7 +633,18 @@ def main():
         fred=FredClient() if CONFIG.models.fred_api_key else None,
     )
     maker = Maker(enricher=enricher)
-    quant_maker = QuantMaker(SpotPriceClient())
+    # The index feed that actually settles the crypto families. Started before
+    # the first pass so it has a chance to receive a frame; the quant path
+    # declines cleanly in the meantime rather than falling back to spot.
+    rti_runner = RTIFeedRunner() if CONFIG.risk.rti_feed_enabled else None
+    if rti_runner is not None:
+        rti_runner.start()
+    else:
+        log.warning("RTI_FEED_ENABLED is off — crypto families will not be "
+                    "priced. This suppresses trades; it does not risk any.")
+    quant_maker = QuantMaker(
+        SpotPriceClient(rti_feed=rti_runner.feed if rti_runner else None)
+    )
     # Model-free structural-arb detection. Constructed unconditionally;
     # the scanner itself is a no-op unless ARB_ENABLED.
     arb_scanner = ArbitrageScanner(notifier=notifier)
@@ -709,6 +721,11 @@ def main():
 
     pass_count = 0
     exit_reason = "loop ended"
+    #: Fires once, after the grace period, if the index feed never came up.
+    #: A dead feed is safe — nothing gets priced — but it is invisible from
+    #: the funnel, which just shows crypto producing no proposals, so it has
+    #: to announce itself.
+    rti_warned = rti_runner is None
     try:
         while True:
             try:
@@ -732,6 +749,17 @@ def main():
             health.check_stalled()
             health.maybe_daily_summary(risk, account, order_store)
 
+            if not rti_warned:
+                if rti_runner.is_ready:
+                    log.info("%s", rti_runner.status())
+                    rti_warned = True
+                elif (time.time() - (rti_runner.started_at or 0)
+                        > CONFIG.risk.rti_startup_grace_seconds):
+                    log.error("%s", rti_runner.status())
+                    _alert(notifier, "notify_systemic_error", "rti_feed",
+                           rti_runner.status())
+                    rti_warned = True
+
             if shutdown["signal"]:
                 exit_reason = f"{shutdown['signal']} received (likely a redeploy)"
                 break
@@ -746,6 +774,8 @@ def main():
                 time.sleep(min(1.0, max(deadline - time.time(), 0)))
     finally:
         log.info("Shutting down: %s", exit_reason)
+        if rti_runner is not None:
+            rti_runner.stop()
         _alert(notifier, "notify_shutdown", reason=exit_reason,
                filled_today=health.fills,
                realized_pnl=_safe_realized_pnl(risk))

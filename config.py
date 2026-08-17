@@ -243,6 +243,20 @@ class RiskConfig:
     # -- quant path / spot data quality ------------------------------------
     # A spot quote older than this is not usable for pricing a contract.
     max_spot_age_seconds: float = _float("MAX_SPOT_AGE_SECONDS", 120.0)
+    # Subscribe to Kalshi's CF Benchmarks index relay on startup.
+    #
+    # Crypto contracts settle on a 60-second average of a CF Benchmarks RTI,
+    # confirmed verbatim from three live markets' rules_primary. With this
+    # off, families whose spec says source="kalshi_rti" get no price at all
+    # and the quant path declines — deliberately, since the alternative is
+    # pricing them off the spot feed the exchange states does not settle
+    # them. Turning it off is therefore a way to stop trading crypto, not a
+    # way to trade it differently.
+    rti_feed_enabled: bool = _bool("RTI_FEED_ENABLED", True)
+    # How long after startup to wait before saying out loud that the index
+    # feed never came up. Long enough for a connect and first frame; short
+    # enough that a silent crypto outage is not discovered a day later.
+    rti_startup_grace_seconds: float = _float("RTI_STARTUP_GRACE_SECONDS", 90.0)
     # A print this many times away from the recent median is treated as a
     # feed glitch. Volatility sits in the denominator of the probability
     # calculation, so one bad tick distorts every market on that symbol for

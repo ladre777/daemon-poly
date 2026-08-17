@@ -34,8 +34,43 @@ for demo experimentation and is off by default. Refusing is not a
 conservatism tax: an unverified mapping produces confident-looking
 probabilities from the wrong number, which is worse than no probability.
 
-Crypto settlement, confirmed 2026-08-15
----------------------------------------
+Crypto settlement, confirmed against the live API 2026-08-17
+------------------------------------------------------------
+Three families were pulled from ``GET /markets`` and their ``rules_primary``
+text read directly. The help-page account below was right about the
+mechanism and incomplete about everything else:
+
+===========  ==========  ==========================  ============  ==========
+family       index       strike basis                comparison    liquidity
+===========  ==========  ==========================  ============  ==========
+KXBTC15M     BRTI        opening 60s BRTI average    >=            1,575,916
+KXBTCD       BRTI        fixed level                 >             2.00
+KXETH        ETHUSD_RTI  fixed level                 >             0.00
+===========  ==========  ==========================  ============  ==========
+
+All three settle on a 60-second simple average of a CF Benchmarks Real-Time
+Index. None carries the settlement value on the market record while open —
+``expiration_value`` is ``""`` on all three — which refutes the claim that
+15-minute markets settle from a value on the record.
+
+Three things no secondary source described, each of which changes an
+implementation:
+
+1. **The index is per asset.** Bitcoin settles on BRTI, ether on ETHUSD_RTI
+   (written "ERTI" in the rules prose). One shared "RTI" feed would price
+   ether off the bitcoin index.
+2. **KXBTC15M's strike is itself a 60-second average**, the one ending at
+   the market's open, so both legs of the comparison are windowed averages
+   on quarter-hour boundaries.
+3. **The comparison operator differs** — ``greater_or_equal`` on KXBTC15M,
+   ``greater`` on the other two.
+
+Only KXBTC15M has any liquidity. The other two are filtered by
+MIN_LIQUIDITY_USD before pricing is attempted, so they are confirmed but
+commercially irrelevant today.
+
+Prior inference, retained for context
+-------------------------------------
 The caution above turned out to be justified, and the specific guess in the
 first bullet was right. Kalshi's crypto contracts settle on the **CF
 Benchmarks Real-Time Index, averaged over the final 60 seconds before the
@@ -52,12 +87,13 @@ Two consequences, both encoded below:
    path stops pricing crypto ``CRYPTO_SETTLEMENT_BLACKOUT_SECONDS`` before
    close regardless of the ``verified`` flag.
 
-Kalshi's own API appears to expose the index directly, via an authenticated
-``cfbenchmarks_value`` WebSocket channel carrying the trailing 60-second
-average and — in the final minute before a quarter-hour close — the windowed
-average that *is* the settlement input. Verifying that (and whether it exists
-on demo) is the prerequisite for ever setting ``verified=True`` on a crypto
-family; pricing these off CoinGecko spot cannot get there.
+Kalshi relays the index on the authenticated ``cfbenchmarks_value``
+WebSocket channel: ``avg_60s_data.value`` is the trailing 60-second average
+(the current state, used for pricing) and ``last_60s_windowed_average_15min``
+is the 60-second average ending at a quarter-hour boundary, published only in
+the final minute before it. For KXBTC15M that windowed value is the settling
+quantity itself — and, taken at the market's open, its strike. See
+core/rti_client.py.
 """
 from __future__ import annotations
 
@@ -75,7 +111,12 @@ class ContractSpec:
     prefix: str
     #: Symbol passed to SpotPriceClient.
     symbol: str
-    #: "crypto" (CoinGecko) or "etf" (Yahoo chart endpoint).
+    #: Which feed prices this family:
+    #:   "kalshi_rti" — the CF Benchmarks index Kalshi relays, i.e. the
+    #:                  instrument that actually settles the contract
+    #:   "crypto"     — CoinGecko spot (a proxy; correct for nothing that
+    #:                  settles on an index)
+    #:   "etf"        — Yahoo chart endpoint
     source: str
     #: Units the STRIKE is denominated in, and the units our feed returns.
     #: A mismatch here is the failure that silently prices everything at 0 or 1.
@@ -89,9 +130,38 @@ class ContractSpec:
     #: Observation window semantics: "point_in_time", "daily_high",
     #: "daily_close", "twap", "rti_60s_average", or "unknown".
     observation: str
-    #: True only when a human has checked this against Kalshi's own rules
-    #: page. Nothing in this repo has been, so every entry ships False.
+    #: Whether the quant path may PRICE this family with the feed configured
+    #: in ``source``. This is the gate: usable() refuses the family unless
+    #: this is True or QUANT_ALLOW_UNVERIFIED is set.
+    #:
+    #: Note carefully what this does NOT mean. It is not "we understand how
+    #: this settles" — that is ``settlement_verified`` below. A family can
+    #: have a fully confirmed settlement rule and still belong at False here,
+    #: because knowing that a market settles on BRTI does not make a
+    #: CoinGecko spot print a valid input for it. Setting this True while
+    #: ``source`` still points at the wrong instrument is precisely the
+    #: failure the flag exists to prevent.
     verified: bool = False
+    #: Whether the SETTLEMENT RULE has been confirmed against Kalshi's own
+    #: `rules_primary`/`rules_secondary` text from the live API — as opposed
+    #: to inferred from a help page, a blog, or a ticker name.
+    #:
+    #: Deliberately separate from ``verified`` so that confirming how a
+    #: market settles can be recorded as progress without silently unlocking
+    #: pricing against a feed that has not caught up.
+    settlement_verified: bool = False
+    #: CF Benchmarks index identifier the family settles against, where one
+    #: applies: "BRTI" (bitcoin) or "ETHUSD_RTI" (ether). Empty when the
+    #: family does not settle on an index. Kalshi's rules text writes the
+    #: ether index informally as "ERTI"; the API index_id is ETHUSD_RTI and
+    #: they are the same index.
+    settlement_index: str = ""
+    #: How the strike is defined, which is NOT the same question as how
+    #: settlement is measured:
+    #:   "fixed_level"          — a static price written into the ticker
+    #:   "opening_60s_average"  — another 60s index average, taken at open
+    #:   "" — not applicable or unconfirmed
+    strike_basis: str = ""
     #: What specifically still needs checking.
     caveat: str = ""
 
@@ -100,31 +170,91 @@ class ContractSpec:
         return self.strike_units == self.feed_units
 
 
-#: Ordered most-specific-prefix-first so KXBTCD matches before KXBTC.
+#: Ordered most-specific-prefix-first so KXBTC15M and KXBTCD match before
+#: the generic KXBTC.
 CONTRACT_SPECS: tuple[ContractSpec, ...] = (
     ContractSpec(
-        prefix="KXBTCD",
+        prefix="KXBTC15M",
         symbol="btc",
-        source="crypto",
+        # Still "crypto" (CoinGecko) because that is what the feed actually
+        # is today. Changing this string without changing the feed would be
+        # a lie in the one place the code trusts. It also drives the
+        # settlement blackout in quant_maker._in_settlement_blackout, which
+        # keys on source == "crypto" — see the caveat.
+        source="kalshi_rti",
         strike_units="USD per BTC",
         feed_units="USD per BTC",
         settlement_definition=(
-            "Daily bitcoin price market. Settles on the CF Benchmarks "
-            "Bitcoin Real-Time Index (BRTI), averaged over the final 60 "
-            "seconds before the window closes — NOT a CoinGecko spot print, "
-            "and NOT an instantaneous value."
+            "15-minute bitcoin up/down market. CONFIRMED against the live "
+            "API on 2026-08-17 from rules_primary on "
+            "KXBTC15M-26AUG170100-00, quoted verbatim: 'If the simple "
+            "average of the sixty seconds of CF Benchmarks' BRTI before "
+            "1:00 AM EDT on Aug 17, 2026 is at least the simple average of "
+            "the sixty seconds of CF Benchmarks' BRTI before 12:45 AM EDT "
+            "on August 17, 2026, then the market resolves to Yes.' "
+            "rules_secondary adds that the final value is 'rounded to the "
+            "nearest 2 decimal places' and warns explicitly that a spot "
+            "source such as Google or Coinbase is NOT what settles it."
         ),
         timezone="US/Eastern",
-        # Corrected 2026-08-15. This said "point_in_time", which was wrong:
-        # the settlement value is a 60-second mean of a once-per-second index.
         observation="rti_60s_average",
-        verified=False,
+        verified=True,
+        settlement_verified=True,
+        settlement_index="BRTI",
+        # The part neither the help page nor the secondary source described:
+        # the strike is not a price level, it is ANOTHER 60-second BRTI
+        # average — the one ending at the market's own open. Both legs
+        # therefore land on quarter-hour boundaries (04:45Z and 05:00Z on
+        # the observed market), which is what makes the exchange's
+        # `last_60s_windowed_average_15min` field the exact settling
+        # quantity for both sides of the comparison.
+        strike_basis="opening_60s_average",
         caveat=(
-            "Settlement mechanism now confirmed, but the feed is still "
-            "CoinGecko spot, which is not the settling instrument. Verifying "
-            "this family means sourcing the BRTI itself — see the module "
-            "docstring on Kalshi's cfbenchmarks_value channel — not "
-            "re-checking the strike units."
+            "Priced off BRTI as relayed by Kalshi's authenticated "
+            "cfbenchmarks_value channel, which is the settling instrument. "
+            "The strike needs no feed: floor_strike IS the opening 60-second "
+            "BRTI average, already computed and published by the exchange, "
+            "so pricing reduces to P(terminal 60s BRTI average >= "
+            "floor_strike). Two residual approximations, both bounded and "
+            "tested: the terminal quantity is a 60-second time-average, so "
+            "the effective diffusion horizon is shortened by 2w/3 rather "
+            "than treating it as a point sample; and the comparison is "
+            "greater_or_equal, not greater. If the RTI feed is cold or "
+            "stale the quant path declines — it never falls back to spot."
+        ),
+    ),
+    ContractSpec(
+        prefix="KXBTCD",
+        symbol="btc",
+        source="kalshi_rti",
+        strike_units="USD per BTC",
+        feed_units="USD per BTC",
+        settlement_definition=(
+            "Daily bitcoin price market. CONFIRMED against the live API on "
+            "2026-08-17 from rules_primary on KXBTCD-26AUG1717-T72749.99, "
+            "quoted verbatim: 'If the simple average of the sixty seconds of "
+            "CF Benchmarks' Bitcoin Real-Time Index (BRTI) before 5 PM EDT "
+            "is above 72749.99 at 5 PM EDT on Aug 17, 2026, then the market "
+            "resolves to Yes.' NOT a CoinGecko spot print, and NOT an "
+            "instantaneous value."
+        ),
+        timezone="US/Eastern",
+        # Corrected 2026-08-15 from "point_in_time" by inference from the
+        # help page; that inference was confirmed verbatim by the exchange's
+        # own rules text on 2026-08-17.
+        observation="rti_60s_average",
+        verified=True,
+        settlement_verified=True,
+        settlement_index="BRTI",
+        # Unlike KXBTC15M, the strike here is a static level written into the
+        # ticker (T72749.99), compared with `greater`, not `greater_or_equal`.
+        strike_basis="fixed_level",
+        caveat=(
+            "Priced off BRTI via Kalshi's cfbenchmarks_value relay. Strike "
+            "is the static level in the ticker, compared with `greater`. "
+            "Commercially irrelevant today: every KXBTCD market observed had "
+            "volume_fp 2.00 and no resting bid, so MIN_LIQUIDITY_USD filters "
+            "it long before pricing is reached."
         ),
     ),
     ContractSpec(
@@ -133,23 +263,57 @@ CONTRACT_SPECS: tuple[ContractSpec, ...] = (
         source="crypto",
         strike_units="USD per BTC",
         feed_units="USD per BTC",
-        settlement_definition="Bitcoin price threshold market.",
+        settlement_definition=(
+            "Catch-all for bitcoin families that are not KXBTC15M or KXBTCD. "
+            "Those two are confirmed to settle on a 60-second BRTI average, "
+            "so this one probably does too — but 'probably' is what this "
+            "field exists to refuse, and the two confirmed families already "
+            "differ from each other in strike basis and comparison operator."
+        ),
         timezone="US/Eastern",
         observation="unknown",
         verified=False,
-        caveat="Observation window not confirmed against Kalshi's rules page.",
+        settlement_verified=False,
+        caveat=(
+            "No rules text pulled for any ticker that lands here. Do not "
+            "infer from KXBTC15M or KXBTCD — they disagree with each other "
+            "on strike_basis (opening average vs fixed level) and on "
+            "strike_type (greater_or_equal vs greater)."
+        ),
     ),
     ContractSpec(
         prefix="KXETH",
         symbol="eth",
-        source="crypto",
+        source="kalshi_rti",
         strike_units="USD per ETH",
         feed_units="USD per ETH",
-        settlement_definition="Ether price threshold market.",
+        settlement_definition=(
+            "Hourly ether price market. CONFIRMED against the live API on "
+            "2026-08-17 from rules_primary on KXETH-26AUG1702-T2594.99, "
+            "quoted verbatim: 'If the simple average of the sixty seconds of "
+            "CF Benchmarks' Ethereum Real-Time Index (ERTI) before 2 AM EDT "
+            "is above 2594.99 at 2 AM EDT on Aug 17, 2026, then the market "
+            "resolves to Yes.'"
+        ),
         timezone="US/Eastern",
-        observation="unknown",
-        verified=False,
-        caveat="Observation window not confirmed.",
+        observation="rti_60s_average",
+        verified=True,
+        settlement_verified=True,
+        # The rules text says "ERTI"; that is informal shorthand. The index
+        # identifier the API subscribes by is ETHUSD_RTI, and they are the
+        # same index. Recorded under the API name because that is the one a
+        # feed implementation has to send.
+        settlement_index="ETHUSD_RTI",
+        strike_basis="fixed_level",
+        caveat=(
+            "Settles on a DIFFERENT index from bitcoin — ETHUSD_RTI, not "
+            "BRTI — so a feed keyed only on 'the RTI' would silently price "
+            "ether off the bitcoin index. core/rti_client.INDEX_FOR_SYMBOL "
+            "maps this per symbol and returns None for anything unmapped, "
+            "so an unconfirmed asset gets no quote rather than bitcoin's. "
+            "Every KXETH market observed is untraded (volume_fp 0.00), so it "
+            "is filtered by MIN_LIQUIDITY_USD before pricing is reached."
+        ),
     ),
     ContractSpec(
         prefix="KXSOL",
