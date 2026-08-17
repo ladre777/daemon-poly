@@ -341,3 +341,48 @@ class KalshiClient:
         # Each order in the batch still costs its own rate-limit token —
         # batching saves round trips, not rate-limit budget.
         return self._request("POST", "/portfolio/events/orders/batched", json_body={"orders": orders})
+
+
+def diagnose_auth_failure(error: BaseException, env: str = None) -> str:
+    """Turn an authentication failure into a sentence that names the fix.
+
+    VERIFIED AGAINST PRODUCTION, 2026-08-17. Pointing a correctly-working bot
+    at ``KALSHI_ENV=prod`` while it still held a demo API key produced only
+    this::
+
+        Kalshi rejected a reconciliation call: Kalshi API error 401:
+        {"error":{"code":"authentication_error","message":"authentication_error",
+                  "details":"NOT_FOUND"}}
+
+    "NOT_FOUND" for an authentication error reads like a routing bug or a bad
+    URL. It actually means the key ID does not exist *in that environment* —
+    Kalshi issues separate credentials for demo and production, and a key from
+    one is simply unknown to the other. That is the single most likely reason
+    this call ever fails, it is entirely predictable, and the message says
+    none of it.
+
+    Returns "" when the error is not an authentication failure, so callers can
+    append it unconditionally.
+    """
+    text = str(error)
+    if "401" not in text and "authentication_error" not in text:
+        return ""
+    env = (env or CONFIG.kalshi.env or "").lower()
+    other = "prod" if env == "demo" else "demo"
+    # Derived from the env being reported on, NOT from CONFIG.kalshi.rest_base.
+    # The first cut of this read the property, which resolves against the
+    # *running* config — so a message about 'prod' printed the demo URL and
+    # sent the reader to check the wrong credentials. A diagnostic that
+    # contradicts itself is worse than the bare 401 it replaces.
+    base = (
+        "https://api.elections.kalshi.com/trade-api/v2" if env == "prod"
+        else "https://demo-api.kalshi.co/trade-api/v2"
+    )
+    return (
+        f"\nThis is an AUTHENTICATION failure, not an outage: Kalshi does not "
+        f"recognise this API key in the '{env}' environment. Demo and "
+        f"production use SEPARATE credentials — a '{other}' key is unknown to "
+        f"'{env}' and returns exactly this error. Check that "
+        f"KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PEM are the pair issued "
+        f"for '{env}' ({base}), and that the key has not been revoked."
+    )

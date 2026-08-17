@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from config import CONFIG
 from core.account_state import AccountState, ReconciliationError
 from core.errors import CircuitBreaker, classify
-from core.kalshi_client import KalshiClient
+from core.kalshi_client import KalshiClient, diagnose_auth_failure
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore, SignalAlertStore, signal_key
@@ -715,9 +715,15 @@ def main():
     try:
         snapshot = account.reconcile()
     except ReconciliationError as e:
+        # The commonest cause of this is not an outage but a credential that
+        # belongs to the other environment, and the raw 401 says
+        # "NOT_FOUND", which reads like a routing bug. Name it instead.
+        hint = diagnose_auth_failure(e)
         _alert(notifier, "notify_systemic_error", "reconciliation",
-               f"Startup reconciliation failed, refusing to start: {e}")
+               f"Startup reconciliation failed, refusing to start: {e}{hint}")
         notifier.flush()
+        if hint:
+            log.error("%s", hint.strip())
         # Refusing to start is right. Refusing to start *instantly* is not:
         # the supervisor restarts the container immediately, so the process
         # re-runs this same failing call every couple of seconds forever. If
@@ -734,7 +740,7 @@ def main():
                       "the restart loop does not hammer the exchange", hold)
             time.sleep(hold)
         raise SystemExit(
-            f"Startup reconciliation with Kalshi failed: {e}\n"
+            f"Startup reconciliation with Kalshi failed: {e}{hint}\n"
             f"Refusing to start — the bot cannot know its own exposure."
         ) from e
     if not snapshot.is_tradeable:
