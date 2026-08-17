@@ -256,3 +256,71 @@ def test_close_time_is_the_anchor_the_blackout_needs():
     assert blackout_starts <= close - 60, (
         "the blackout must fully cover the 60-second settlement window"
     )
+
+
+# -- verification must not spread by prefix --------------------------------
+#
+# VERIFIED AGAINST PRODUCTION, 2026-08-17. spec_for was a plain startswith
+# over the table in order, so every ether family claimed the one spec that
+# had actually been confirmed — against an HOURLY market whose rules text
+# names a single hour, 2 AM EDT on one day.
+
+
+def test_a_yearly_ether_family_does_not_inherit_the_hourly_confirmation():
+    """The live bug. Eighteen KXETHY candidates a pass were reaching the quant
+    path as verified, held back only by a price-history gate that was minutes
+    from clearing."""
+    assert spec_for("KXETHY-26DEC31-T5000", "") is None
+
+
+def test_a_daily_ether_family_does_not_inherit_it_either():
+    assert spec_for("KXETHD-26AUG17-T3000", "") is None
+
+
+def test_the_confirmed_hourly_ether_family_still_matches():
+    spec = spec_for("KXETH-26AUG1702-T2594.99", "")
+
+    assert spec is not None
+    assert spec.prefix == "KXETH"
+    assert spec.verified
+
+
+def test_an_unverified_catch_all_may_still_absorb_relatives():
+    """All it can do to them is refuse them, so grouping is safe — and it
+    gives a better message than "no spec at all"."""
+    for ticker in ("KXBTCY-26DEC31", "KXBTCMAXMON-26", "KXBTC2026200-26"):
+        spec = spec_for(ticker, "")
+        assert spec is not None and spec.prefix == "KXBTC"
+        assert not spec.verified
+        assert not usable(spec)[0]
+
+
+def test_bitcoins_confirmed_families_are_unaffected():
+    """They escaped the collision by luck of table order; this pins the
+    outcome as intended rather than accidental."""
+    assert spec_for("KXBTC15M-26AUG1707-B111500", "").prefix == "KXBTC15M"
+    assert spec_for("KXBTCD-26AUG17-B100000", "").prefix == "KXBTCD"
+
+
+def test_no_family_can_reach_a_verified_spec_without_matching_it_exactly():
+    """Stated as the invariant, so a future table edit cannot reopen this."""
+    from core.contract_specs import CONTRACT_SPECS
+
+    for spec in CONTRACT_SPECS:
+        if not spec.verified:
+            continue
+        impostor = f"{spec.prefix}XX-26AUG17-T1"
+        found = spec_for(impostor, "")
+        assert found is None or not found.verified, (
+            f"{impostor} claimed the verified {spec.prefix} spec"
+        )
+
+
+def test_the_series_ticker_is_matched_on_the_same_rule():
+    assert spec_for("SOMETHING-1", series_ticker="KXETHY") is None
+    assert spec_for("SOMETHING-1", series_ticker="KXETH").verified
+
+
+def test_junk_input_maps_to_nothing():
+    assert spec_for("", "") is None
+    assert spec_for(None, None) is None

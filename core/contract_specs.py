@@ -366,11 +366,51 @@ CONTRACT_SPECS: tuple[ContractSpec, ...] = (
 
 
 def spec_for(ticker: str, series_ticker: str = "") -> Optional[ContractSpec]:
-    """Find the contract spec for a ticker, or None if this family is unmapped."""
+    """Find the contract spec for a ticker, or None if this family is unmapped.
+
+    A **verified** spec is claimed only by an exact family match. An
+    unverified one may still absorb related families by prefix, because all
+    it can do to them is refuse them.
+
+    VERIFIED AGAINST PRODUCTION, 2026-08-17. This was a plain ``startswith``
+    over the table in order, and the ether families collided::
+
+        KXETHY-26DEC31-T5000  -> KXETH  verified=True   <-- yearly
+        KXETHD-26AUG17        -> KXETH  verified=True   <-- daily
+        KXETH-26AUG1702-T...  -> KXETH  verified=True   <-- the one confirmed
+
+    ``KXETH`` was confirmed against an *hourly* market — the rules text
+    quoted in its own spec names a single hour, 2 AM EDT on one day. A yearly
+    contract inheriting that confirmation is exactly what ``verified`` exists
+    to prevent, and it was live: eighteen KXETHY candidates a pass reached
+    the quant path as verified, held back only by a price-history gate that
+    was minutes from clearing. Pricing a year-dated option with a
+    60-second-average settlement model and a diffusion horizon of months is
+    not a smaller edge, it is a wrong number.
+
+    Bitcoin escaped this by luck of table order rather than by design: KXBTCY
+    misses KXBTC15M and KXBTCD, then lands on the unverified KXBTC catch-all
+    and is refused. The rule below makes that the intended outcome rather
+    than an accident.
+
+    An ether family with no exact spec now returns None — "no contract spec
+    for this ticker family" — instead of borrowing the hourly one. There is
+    no unverified KXETH catch-all for it to land on, and the refusal is the
+    same either way.
+    """
     for candidate in (series_ticker or "", ticker or ""):
-        upper = candidate.upper()
+        upper = (candidate or "").upper()
+        if not upper:
+            continue
+        family = upper.split("-", 1)[0]
         for spec in CONTRACT_SPECS:
-            if upper.startswith(spec.prefix):
+            if family == spec.prefix:
+                return spec
+        for spec in CONTRACT_SPECS:
+            # Prefix fallback, unverified specs only. A catch-all may group
+            # relatives it has never confirmed; a confirmation may not spread
+            # to relatives it never covered.
+            if not spec.verified and upper.startswith(spec.prefix):
                 return spec
     return None
 
