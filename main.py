@@ -111,6 +111,20 @@ def _log_vol_signature(spot_client, symbols) -> None:
                          if vol else f"{label} n/a")
         log.info("Volatility signature %s (annualized): %s",
                  symbol, "  ".join(rungs))
+        # The signature above is measured over one lookback. The quant path
+        # picks its lookback from each contract's horizon, so the two can
+        # disagree — and a diagnostic that does not report the number actually
+        # setting prices is the reason a 6.6%-annualized bitcoin survived a
+        # whole session. Both ends of that range are printed here, and
+        # QuantMaker logs the figure it really used per family per pass.
+        used = []
+        for lookback in sorted({3600.0, CONFIG.risk.vol_history_retention_seconds,
+                                86400.0}):
+            vol = history.realized_vol_robust(lookback)
+            used.append(f"{lookback:.0f}s -> "
+                        + (f"{vol * _SECONDS_PER_YEAR ** 0.5:.0%}" if vol else "n/a"))
+        log.info("Volatility used %s by lookback (annualized): %s",
+                 symbol, "  ".join(used))
 
 
 def _alert(notifier, method: str, *args, **kwargs) -> None:

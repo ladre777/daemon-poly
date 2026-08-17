@@ -140,11 +140,13 @@ class QuantMaker:
     def __init__(self, spot_client: SpotPriceClient = None):
         self.spot = spot_client or SpotPriceClient()
         self._declined: dict[str, str] = {}
+        self._vol_logged: set[str] = set()
 
     def begin_pass(self) -> None:
         """Reset per-pass state. One spot fetch per symbol per pass."""
         self.spot.begin_pass()
         self._declined.clear()
+        self._vol_logged.clear()
 
     # -- routing -----------------------------------------------------------
 
@@ -284,6 +286,21 @@ class QuantMaker:
         # normal conditions, tight enough to have caught the 6.6%-annualized
         # bitcoin reading on the very first pass.
         annualized = vol_per_second * _SECONDS_PER_YEAR ** 0.5
+        # Say, once per family per pass, what sigma this path is actually
+        # pricing with. The startup signature is logged at the default
+        # lookback while this uses a horizon-dependent one, so the two can
+        # disagree — and when they did, the operator-facing number was not the
+        # number setting prices. That gap is how a 6.6%-annualized bitcoin
+        # survived a whole session: sigma was only ever visible downstream, as
+        # a probability, where a broken input looks like a disagreement.
+        if spec.symbol not in self._vol_logged:
+            self._vol_logged.add(spec.symbol)
+            log.info(
+                "Pricing %s with sigma %.1f%% annualized (%.2e/s, lookback "
+                "%.0fs, %d observations)",
+                spec.symbol, annualized * 100, vol_per_second, lookback,
+                len(history),
+            )
         if not (CONFIG.risk.min_plausible_annual_vol
                 <= annualized
                 <= CONFIG.risk.max_plausible_annual_vol):

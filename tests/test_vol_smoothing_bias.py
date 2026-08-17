@@ -331,6 +331,60 @@ def test_the_buffer_spans_the_whole_retention_window():
     assert PriceHistory.DEFAULT_MAXLEN >= needed
 
 
+def test_the_lookback_changes_the_answer_so_it_must_be_reported():
+    """Why the pricing path logs its own sigma.
+
+    The quant path picks its lookback from each contract's horizon
+    (`max(3600, min(seconds_to_expiry * 20, 86400))`), while the startup
+    signature is measured over one window. On a buffer longer than the short
+    window those disagree — which is not a bug in itself, but a diagnostic
+    that reports a number other than the one setting prices is exactly how a
+    6.6%-annualized bitcoin survived a whole session.
+
+    So this pins the thing that made it invisible rather than the difference
+    itself: the two are allowed to differ, and both have to be logged.
+    """
+    import inspect
+
+    import main
+
+    h = history_from(smoothed(diffusion(n=7200), window=60))
+
+    short = h.realized_vol_robust(1800)
+    long = h.realized_vol_robust(86400)
+
+    assert short is not None and long is not None
+    # Both are logged by _log_vol_signature, so whichever the quant path
+    # picks, the operator can see it.
+    source = inspect.getsource(main._log_vol_signature)
+    assert "realized_vol_robust" in source
+    assert "86400" in source
+
+
+def test_the_quant_path_states_the_sigma_it_priced_with(caplog):
+    """Per family per pass, not per market, and in annualized terms — the
+    only units in which a wrong number is obvious at a glance."""
+    from tests.test_quant_path import candidate
+
+    import time
+
+    from core.spot_price_client import SpotQuote
+
+    quant, spot = quant_with_vol(0.40)
+    # begin_pass clears the per-pass quote cache, so reseed after it.
+    quant.begin_pass()
+    quant.spot._quotes["btc"] = SpotQuote(symbol="btc", price=spot,
+                                          observed_at=time.time(),
+                                          source="crypto")
+
+    with caplog.at_level("INFO"):
+        quant.propose(candidate(strike=spot * 1.001))
+        quant.propose(candidate(strike=spot * 1.002))
+
+    assert "annualized" in caplog.text
+    assert caplog.text.count("Pricing btc with sigma") == 1
+
+
 def test_thinning_respects_irregular_spacing():
     """The live feed does not arrive on a clean grid, so thinning walks
     forward from the last kept point rather than slicing every Nth."""

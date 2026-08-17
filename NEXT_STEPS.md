@@ -200,25 +200,46 @@ old 5.3%  ->  new 16.1%     (market implied 18.4%)
 and the market that logged `model says 100% against a market at 84.5%` prices
 at 86.6% with the recovered sigma.
 
-### Verify it live
+### Verified live — the diagnosis was right
 
-Startup now logs the signature. Read it first:
+Startup logs the signature, and production printed it at 17:14 and again at
+17:15:
 
 ```
-railway logs | grep "Volatility signature"
+btc   tick 6%   15s 10%   30s 13%   60s 15%   120s 16%
+eth   tick 5%   15s  9%   30s 12%   60s 14%   120s 16%
 ```
 
-Expect something like `tick 6%  15s 10%  30s 13%  60s 16%  120s 18%  300s 18%`
-— climbing then flattening. Then:
+against what a 60-second trailing average of an 18.4% path predicted before
+any of this shipped:
 
-- **If it climbs and plateaus in the high teens or above**, the fix is working
-  on real data and the diagnosis was right.
-- **If it is flat and low at every rung**, smoothing is not the mechanism and
-  the fix is treating the wrong cause. Do not paper over it — the sanity band
-  will refuse to price, which is the correct outcome, and the next place to
-  look is whether the stored series carries runs of identical prices.
-- **If the quant path now logs `outside the plausible band`**, the estimate is
-  still broken. That refusal is doing its job; the answer is upstream.
+```
+      tick 5.3%  15s 9.0%  30s 12.0%  60s 14.8%  120s 16.1%
+```
+
+A near-exact match on real data. The `tick` rung reads 6% — the same number
+back-solved from market prices — and the robust estimate now takes 16%.
+Smoothing was the mechanism.
+
+The 300s rung was dropped on this evidence: it read 12% on one container and
+19-21% on the next 90 seconds later, while every other rung agreed to the
+point. Nine to twelve observations is not enough, and because the estimate is
+a *maximum* a noisy rung can only hurt.
+
+**Residual gap.** 16% against a market implying 18.4% — still ~13% low, in the
+direction that overstates confidence. Not the 3x it was, but not finished
+either. The lever is `VOL_HISTORY_RETENTION_SECONDS`: more span makes longer
+sampling intervals trustworthy, which is where the remaining damping lives.
+That trades against the rule that a long outage must not reconstruct an
+estimate across a hole in the data, so it needs thought rather than a bigger
+number.
+
+Read these next:
+
+- **If the quant path logs `outside the plausible band`**, the estimate is
+  broken again. That refusal is doing its job; the answer is upstream of it.
+- **If the signature goes flat and low at every rung**, something changed in
+  the feed and smoothing is no longer the whole story.
 
 Then check what the coherence gate does with the corrected numbers:
 
