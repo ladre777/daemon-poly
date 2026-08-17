@@ -260,25 +260,34 @@ CONTRACT_SPECS: tuple[ContractSpec, ...] = (
     ContractSpec(
         prefix="KXBTC",
         symbol="btc",
-        source="crypto",
+        source="kalshi_rti",
         strike_units="USD per BTC",
         feed_units="USD per BTC",
         settlement_definition=(
-            "Catch-all for bitcoin families that are not KXBTC15M or KXBTCD. "
-            "Those two are confirmed to settle on a 60-second BRTI average, "
-            "so this one probably does too — but 'probably' is what this "
-            "field exists to refuse, and the two confirmed families already "
-            "differ from each other in strike basis and comparison operator."
+            "HOURLY bitcoin price market. CONFIRMED against the live API on "
+            "2026-08-17 from rules_primary on KXBTC-26AUG1712-T72299.99, "
+            "quoted verbatim: 'If the simple average of the sixty seconds of "
+            "CF Benchmarks' Bitcoin Real-Time Index (BRTI) before 12 PM EDT "
+            "is above 72299.99 at 12 PM EDT on Aug 17, 2026, then the market "
+            "resolves to Yes.' The hourly cadence is not inferred from the "
+            "name: that market carried open_time 15:00Z and close_time "
+            "16:00Z, a one-hour window, under event KXBTC-26AUG1712."
         ),
         timezone="US/Eastern",
-        observation="unknown",
-        verified=False,
-        settlement_verified=False,
+        observation="rti_60s_average",
+        verified=True,
+        settlement_verified=True,
+        settlement_index="BRTI",
+        strike_basis="fixed",
         caveat=(
-            "No rules text pulled for any ticker that lands here. Do not "
-            "infer from KXBTC15M or KXBTCD — they disagree with each other "
-            "on strike_basis (opening average vs fixed level) and on "
-            "strike_type (greater_or_equal vs greater)."
+            "Strike is a fixed level, like KXBTCD and unlike KXBTC15M's "
+            "opening 60-second average. strike_type varies per market — the "
+            "same event carried both 'greater' (T72299.99) and 'less' "
+            "(T53700) — which is read from the market rather than assumed "
+            "here. Verifying this prefix means it no longer acts as an "
+            "unverified catch-all: KXBTCY, KXBTCMAXMON and friends now match "
+            "no spec at all and are refused as unmapped, which is both "
+            "honest and the same refusal they got before."
         ),
     ),
     ContractSpec(

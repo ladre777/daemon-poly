@@ -202,11 +202,14 @@ def test_the_blackout_survived_the_feed_change():
 
 
 def test_unconfirmed_families_are_untouched():
-    """KXSOL was never queried; the generic KXBTC catch-all was not either.
+    """KXSOL was never queried and may not inherit confidence from the
+    families that were.
 
-    Neither may inherit confidence from the families that were confirmed.
+    KXBTC used to be listed here too. It was confirmed on 2026-08-17 from its
+    own rules text — hourly, 60-second BRTI average, fixed strike — so it no
+    longer belongs in this list. KXSOL still does.
     """
-    for prefix in ("KXSOL", "KXBTC"):
+    for prefix in ("KXSOL",):
         spec = next(s for s in CONTRACT_SPECS if s.prefix == prefix)
         assert spec.settlement_verified is False
         assert spec.verified is False
@@ -285,14 +288,44 @@ def test_the_confirmed_hourly_ether_family_still_matches():
     assert spec.verified
 
 
-def test_an_unverified_catch_all_may_still_absorb_relatives():
-    """All it can do to them is refuse them, so grouping is safe — and it
-    gives a better message than "no spec at all"."""
+def test_other_bitcoin_families_are_refused_as_unmapped():
+    """These used to land on the unverified KXBTC catch-all. Now that KXBTC
+    is confirmed, a verified spec is claimed only by an exact family match
+    (see spec_for), so they match nothing.
+
+    The outcome is unchanged — they were refused then and are refused now —
+    and "no contract spec for this ticker family" is the more honest message:
+    nobody has read the rules for a yearly or monthly bitcoin market.
+    """
     for ticker in ("KXBTCY-26DEC31", "KXBTCMAXMON-26", "KXBTC2026200-26"):
         spec = spec_for(ticker, "")
-        assert spec is not None and spec.prefix == "KXBTC"
-        assert not spec.verified
+        assert spec is None, f"{ticker} must not inherit the hourly confirmation"
         assert not usable(spec)[0]
+
+
+def test_the_hourly_family_is_confirmed_from_its_own_rules():
+    """Verified from rules_primary on KXBTC-26AUG1712-T72299.99, not inferred
+    from the neighbouring families — which disagree with each other."""
+    spec = spec_for("KXBTC-26AUG1712-T72299.99", "")
+
+    assert spec.prefix == "KXBTC"
+    assert spec.verified and spec.settlement_verified
+    assert spec.settlement_index == "BRTI"
+    assert spec.source == "kalshi_rti"
+    assert spec.observation == "rti_60s_average"
+    assert spec.strike_basis == "fixed"
+
+
+def test_the_hourly_family_gets_the_settlement_blackout():
+    """The blackout keys on observation, so confirming this family switches
+    it on — which is the point. Pricing the final minute off a spot read of
+    an average that is still forming is exactly what it exists to stop."""
+    from workers.quant_maker import QuantMaker
+
+    spec = spec_for("KXBTC-26AUG1712-T72299.99", "")
+
+    assert QuantMaker(spot_client=object())._in_settlement_blackout(spec, 30.0)
+    assert not QuantMaker(spot_client=object())._in_settlement_blackout(spec, 3600.0)
 
 
 def test_bitcoins_confirmed_families_are_unaffected():
