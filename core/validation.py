@@ -487,6 +487,71 @@ def extract_json(raw: Any) -> Optional[dict]:
     return parsed if isinstance(parsed, dict) else None
 
 
+def repair_truncated_json(raw: Any) -> Optional[dict]:
+    """Recover the complete leading fields of a JSON object cut off mid-write.
+
+    Returns None unless a strict prefix of ``raw`` parses as an object.
+
+    This repairs nothing and infers nothing. It finds a point where the model
+    had *finished* writing a field, closes the object there, and parses what
+    was actually written — so every returned value is one the model emitted in
+    full. A field still being written is dropped, never completed.
+
+    Production kept producing this, several times an hour::
+
+        {"verdict": "reject", "confidence": 0.65, "reasoning": "The maker's
+         reasoning is generic and lacks specific evidence about actual Senate
+         scheduling for CLARITY Act, which has had significant bipartisa
+
+    A real verdict at a real confidence, discarded as "unparseable" because
+    the prose ran out of room. :func:`validate_checker_output` governs when a
+    recovered verdict may be acted on — and it is not "always".
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    start = text.find("{")
+    if start < 0:
+        return None
+    text = text[start:]
+
+    # Every position where a field ended at the top level of the object: a
+    # comma at depth 1, outside a string. Closing there yields exactly the
+    # fields written before it.
+    cuts: list[int] = []
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = in_string
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        elif ch == "," and depth == 1:
+            cuts.append(i)
+
+    # Latest cut first, to recover as many complete fields as possible.
+    for cut in reversed(cuts):
+        try:
+            parsed = json.loads(text[:cut] + "}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 @dataclass
 class MakerOutput:
     probability_yes: float
@@ -552,10 +617,24 @@ def validate_checker_output(raw: Any, ticker: str = "") -> CheckerOutput:
     is explicit that invalid output must abstain rather than throw an
     exception that continues toward execution.
     """
+    truncated = False
     parsed = extract_json(raw)
     if parsed is None:
-        log.warning("Checker returned unparseable JSON for %s: %.200s", ticker, raw)
-        return abstention("parse_error")
+        parsed = repair_truncated_json(raw)
+        truncated = parsed is not None
+        if parsed is None:
+            # Enough to diagnose the next one without another deploy. The
+            # 200-char head alone could not distinguish a response cut off at
+            # the token cap from one that was complete but malformed, and
+            # that ambiguity sent three separate investigations after the
+            # prompt.
+            text = raw if isinstance(raw, str) else repr(raw)
+            log.warning(
+                "Checker returned unparseable JSON for %s (%d chars). "
+                "Head: %.200s | Tail: %.120s",
+                ticker, len(text), text, text[-120:],
+            )
+            return abstention("parse_error")
 
     verdict = parsed.get("verdict")
     if not isinstance(verdict, str):
@@ -572,6 +651,19 @@ def validate_checker_output(raw: Any, ticker: str = "") -> CheckerOutput:
         )
         return abstention("unknown_verdict")
 
+    if truncated and verdict == "approve":
+        # Asymmetric on purpose. A recovered "reject" can only ever refuse a
+        # trade, so acting on it is safe and keeps a real judgement out of the
+        # calibration data as a parse error. A recovered "approve" would
+        # authorise real money on a response whose reasoning was cut off
+        # before it finished — and the caveat that would have changed the
+        # verdict is exactly the part most likely to be missing.
+        log.warning(
+            "Checker approval for %s was recovered from a truncated response "
+            "— abstaining. A cut-off approval is not an approval.", ticker,
+        )
+        return abstention("truncated_approval")
+
     confidence = in_unit_interval(parsed.get("confidence"))
     if confidence is None:
         log.warning(
@@ -582,4 +674,12 @@ def validate_checker_output(raw: Any, ticker: str = "") -> CheckerOutput:
 
     reasoning = clamp_text(parsed.get("reasoning"), CONFIG.risk.max_reasoning_chars,
                            fallback="(no reasoning given)")
+    if truncated:
+        # Marked in the stored reasoning, so a ledger row cannot later be read
+        # as a complete judgement when it was a recovered fragment.
+        log.warning(
+            "Checker response for %s was cut off; recovered verdict=%s "
+            "confidence=%.2f from the complete fields", ticker, verdict, confidence,
+        )
+        reasoning = f"(recovered from a truncated response) {reasoning}"
     return CheckerOutput(verdict=verdict, confidence=confidence, reasoning=reasoning)
