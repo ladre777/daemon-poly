@@ -30,12 +30,23 @@ from typing import Optional
 from config import CONFIG
 from core.kalshi_client import KalshiAPIError, KalshiClient, KalshiTimeoutError
 from core.order_state import OrderRecord, OrderState
+from core.validation import parse_timestamp
 from memory.edge_store import EdgeStore, EdgeRecord
 from memory.order_store import OrderStore
 from workers.checker import Verdict
 from workers.risk_guardrail import RiskDecision
 
 log = logging.getLogger("daemon_kalshi.ledger")
+
+
+def _close_epoch(candidate) -> Optional[float]:
+    """Market close time as epoch seconds, or None if unparseable.
+
+    Stored on every edge row so reconcile_forecasts can ask only about markets
+    that could have resolved. Candidates carry close_time as an ISO string;
+    the ledger needs a number it can compare in SQL.
+    """
+    return parse_timestamp(getattr(candidate, "close_time", None))
 
 #: A settled binary contract pays out this much per contract.
 CONTRACT_PAYOUT_CENTS = 100.0
@@ -83,6 +94,7 @@ class Ledger:
                 size_contracts=0,
                 counterfactual_price_cents=price,
                 counterfactual_direction=side,
+                close_time=_close_epoch(c),
             )
         )
         log.info("Logged edge #%d for %s (%s: %s)", edge_id, c.ticker, action, decision.reason)
@@ -119,6 +131,7 @@ class Ledger:
                 size_contracts=0,
                 counterfactual_price_cents=price,
                 counterfactual_direction=side,
+                close_time=_close_epoch(c),
             )
         )
         log.info("Logged edge #%d for %s (%s: %s)", edge_id, c.ticker, action, reason)

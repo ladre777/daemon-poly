@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS edges (
     -- which is what keeps paper and live results from being confused.
     counterfactual_price_cents REAL,
     counterfactual_direction TEXT,  -- "yes" | "no"
+    -- When the market closes, so the reconciler can ask only about markets
+    -- that could possibly have resolved. Without it, grading was ordered
+    -- oldest-first and permanently stuck on long-dated rows.
+    close_time REAL,
     entry_price REAL,               -- average price actually FILLED, not requested
     size_contracts INTEGER,         -- contracts actually filled, not requested
     client_order_id TEXT,           -- links this decision to orders/fills/settlements
@@ -86,6 +90,9 @@ class EdgeRecord:
     #: rows that never traded; left None on rows that did.
     counterfactual_price_cents: Optional[float] = None
     counterfactual_direction: Optional[str] = None
+    #: Market close time. Lets the reconciler skip markets that cannot have
+    #: resolved yet instead of spending its whole budget re-asking about them.
+    close_time: Optional[float] = None
 
 
 class EdgeStore:
@@ -111,6 +118,8 @@ class EdgeStore:
             conn.execute("ALTER TABLE edges ADD COLUMN counterfactual_price_cents REAL")
         if "counterfactual_direction" not in have:
             conn.execute("ALTER TABLE edges ADD COLUMN counterfactual_direction TEXT")
+        if "close_time" not in have:
+            conn.execute("ALTER TABLE edges ADD COLUMN close_time REAL")
 
     @contextmanager
     def _conn(self):
@@ -127,14 +136,16 @@ class EdgeStore:
                  market_implied_probability, edge_size, checker_verdict,
                  checker_confidence, checker_reasoning, action_taken,
                  entry_price, size_contracts,
-                 counterfactual_price_cents, counterfactual_direction)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 counterfactual_price_cents, counterfactual_direction,
+                 close_time)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     edge.ticker, edge.category, edge.source, time.time(), edge.maker_probability,
                     edge.maker_reasoning, edge.market_implied_probability, edge.edge_size,
                     edge.checker_verdict, edge.checker_confidence, edge.checker_reasoning,
                     edge.action_taken, edge.entry_price, edge.size_contracts,
                     edge.counterfactual_price_cents, edge.counterfactual_direction,
+                    edge.close_time,
                 ),
             )
             return cur.lastrowid
@@ -206,14 +217,34 @@ class EdgeStore:
         table for the same reason, one level down. Refused rows also answer
         the more valuable question: is the Checker turning down trades that
         would have won?
+
+        Ordered by close time, most recently closed first, and markets that
+        have not closed yet are excluded outright. Both parts matter, and
+        getting them wrong is why this produced nothing at all.
+
+        It used to select oldest-first with no close-time filter, and the
+        caller then takes only the first FORECAST_RECONCILE_MAX_TICKERS
+        distinct tickers. A market that is still open returns no result and
+        nothing records that it was asked, so the same oldest tickers were
+        re-queried every pass forever. In production the oldest rows were
+        multi-day contracts and cross-category parlay shards — markets that
+        resolve months out, or never — so the 25-ticker window sat on them
+        permanently while crypto hourlies resolved every hour at the tail of
+        the queue and were never reached. The bot ran for hours with hourly
+        markets settling continuously and graded exactly zero rows.
+
+        Rows written before close_time existed carry NULL and sort last, so
+        they are still reachable once the closed-market queue drains, but they
+        can no longer block it.
         """
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM edges WHERE settled=0 "
                 "AND action_taken != 'executed' "
                 "AND maker_probability IS NOT NULL "
-                "ORDER BY created_at LIMIT ?",
-                (limit,),
+                "AND (close_time IS NULL OR close_time <= ?) "
+                "ORDER BY (close_time IS NULL), close_time DESC LIMIT ?",
+                (time.time(), limit),
             ).fetchall()
             return [dict(r) for r in rows]
 

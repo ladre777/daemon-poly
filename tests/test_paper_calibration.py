@@ -271,3 +271,112 @@ def test_an_unreachable_market_does_not_stop_the_rest(store, order_store):
             return super().get_market(ticker)
 
     assert Ledger(Flaky(), store, order_store).reconcile_forecasts() == 1
+
+
+# -- the reconciler must reach markets that actually resolved ---------------
+#
+# #24 built forecast grading and it produced ZERO rows in the entire history
+# of the bot, including a 4.4-hour uninterrupted run during which crypto
+# hourly markets resolved every hour.
+#
+# The cause was head-of-line blocking. unsettled_forecast_edges selected
+# oldest-first with no close-time filter, and reconcile_forecasts takes only
+# the first FORECAST_RECONCILE_MAX_TICKERS (25) distinct tickers from it. A
+# market that is still open returns no result and nothing records that it was
+# asked, so the same 25 oldest tickers were re-queried every pass forever. In
+# production the oldest rows were multi-day contracts and cross-category
+# parlay shards — markets resolving months out, or never — so the window sat
+# on them permanently while resolvable markets waited at the tail.
+
+
+def _edge(store, ticker, close_time, action="skipped_risk"):
+    from memory.edge_store import EdgeRecord
+
+    return store.record_edge(EdgeRecord(
+        ticker=ticker,
+        category="Crypto",
+        maker_probability=0.6,
+        market_implied_probability=0.5,
+        action_taken=action,
+        counterfactual_price_cents=50.0,
+        counterfactual_direction="yes",
+        close_time=close_time,
+    ))
+
+
+def test_markets_that_cannot_have_resolved_are_not_queued(edge_store):
+    """A contract four days out cannot have resolved, so asking about it is
+    a wasted call that also costs a slot in the reconcile window."""
+    import time
+
+    now = time.time()
+    _edge(edge_store, "KXBTCD-FUTURE", now + 4 * 86400)
+
+    assert edge_store.unsettled_forecast_edges() == []
+
+
+def test_a_long_dated_row_cannot_block_a_resolved_one(edge_store):
+    """The exact production failure, in miniature: an old row for a market
+    that resolves months out, and a newer row for one that closed an hour
+    ago. Oldest-first ordering put the first one permanently in front."""
+    import time
+
+    now = time.time()
+    _edge(edge_store, "KXMVECROSSCATEGORY-SHARD", now + 90 * 86400)
+    _edge(edge_store, "KXBTC-RESOLVED", now - 3600)
+
+    queued = [r["ticker"] for r in edge_store.unsettled_forecast_edges()]
+
+    assert queued == ["KXBTC-RESOLVED"]
+
+
+def test_recently_closed_markets_come_first(edge_store):
+    """Calibration wants recent outcomes, and crypto hourlies close
+    constantly. Most-recently-closed first keeps the window on them."""
+    import time
+
+    now = time.time()
+    _edge(edge_store, "OLD-CLOSE", now - 10 * 86400)
+    _edge(edge_store, "JUST-CLOSED", now - 60)
+
+    queued = [r["ticker"] for r in edge_store.unsettled_forecast_edges()]
+
+    assert queued[0] == "JUST-CLOSED"
+
+
+def test_legacy_rows_without_a_close_time_sort_last_but_remain_reachable(
+    edge_store
+):
+    """Rows written before the column existed carry NULL. They must not block
+    the closed-market queue, and must not be silently dropped either."""
+    import time
+
+    now = time.time()
+    _edge(edge_store, "LEGACY", None)
+    _edge(edge_store, "CLOSED", now - 60)
+
+    queued = [r["ticker"] for r in edge_store.unsettled_forecast_edges()]
+
+    assert queued == ["CLOSED", "LEGACY"]
+
+
+def test_executed_rows_are_still_excluded(edge_store):
+    """Unchanged: real fills settle through the fill path, not this one."""
+    import time
+
+    _edge(edge_store, "TRADED", time.time() - 60, action="executed")
+
+    assert edge_store.unsettled_forecast_edges() == []
+
+
+def test_close_time_survives_a_round_trip(edge_store):
+    """The column has to actually persist, or the filter silently treats
+    every row as legacy and the blocking comes back."""
+    import time
+
+    close = time.time() - 120
+    _edge(edge_store, "KXBTC-X", close)
+
+    row = edge_store.unsettled_forecast_edges()[0]
+
+    assert row["close_time"] == pytest.approx(close)
