@@ -274,7 +274,17 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             stats["quant_attempted"] += 1
             quant_result = quant_maker.propose(candidate)
             if quant_result:
+                # Two distinct outcomes, and conflating them cost visibility
+                # on the first pass where crypto was priced at all: the model
+                # priced the market fine and the edge simply did not clear
+                # MIN_EDGE_THRESHOLD after fees. That is the quant path
+                # working, but it was landing in the same silence as a
+                # failure — 18 attempted, 0 reported as no-proposal, and only
+                # 4 reaching the Checker with nothing accounting for the
+                # other 14.
                 proposal = quant_result.to_maker_proposal()
+                if proposal is None:
+                    stats["quant_below_edge_threshold"] += 1
             else:
                 stats["quant_no_proposal"] += 1
         elif candidate.category.lower() in CONFIG.llm_reasoning_categories:
@@ -523,13 +533,15 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # The funnel, on one line. Reading left to right tells you where every
     # candidate went and therefore which stage to look at when nothing trades.
     log.info(
-        "Pass funnel: %d candidate(s) -> quant %d (no proposal %d), llm %d "
+        "Pass funnel: %d candidate(s) -> quant %d (no proposal %d, below edge "
+        "%d), llm %d "
         "(below edge %d, failed %d, capped %d, per-event %d, tainted %d), "
         "no grounding source %d | "
         "proposed %d -> checked %d (rejected %d, failed %d) -> approved %d "
         "-> filled %d",
         len(candidates),
         stats["quant_attempted"], stats["quant_no_proposal"],
+        stats["quant_below_edge_threshold"],
         stats["llm_called"], stats["llm_below_edge_threshold"],
         stats["maker_failed"], stats["llm_capped"],
         stats["llm_capped_per_event"], stats["llm_skipped_tainted"],
