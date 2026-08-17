@@ -165,42 +165,111 @@ upstream of execution, so nothing has reached the exchange.
 
 ## The single next action — READ THIS FIRST
 
-**Read the Checker's reasons. Do not loosen it before you have.**
+**Read the calibration table. For the first time, it can actually have rows.**
 
-`#36` made them visible. Every pass still ends `approved 0 -> filled 0`, and
-the Checker has now rejected **100% of everything it has ever seen** — 24 for
-24 on one pass, across weather and crypto, from both the LLM and the quant
-path, at confidences from 0.55 to 0.90.
-
-```
-railway logs | grep "Checker verdict" | grep reject
+```python
+from memory.edge_store import EdgeStore
+for row in EdgeStore().calibration_by_category():
+    print(row["mode"], row["category"], row["source"], row["n"],
+          row["brier_score"], row["total_pnl"])
 ```
 
-Until `#36` that line read only `reject (conf 0.65)`, which cannot distinguish
-a correct gate standing in front of bad proposals from a gate biased toward
-reject. It now carries the model's reasoning.
+`#38` fixed the reason it was always empty, and the reason was not what the
+earlier notes assumed.
 
-Read twenty of them and the answer will be obvious in one of two directions:
+### Why grading never once ran
 
-- **The reasons are specific and correct** ("the market already prices this
-  forecast", "the Maker's estimate rests on a stale reading") — then the gate
-  is right, the proposals are weak, and the work is upstream in proposal
-  quality. Do not touch `CHECKER_MIN_CONFIDENCE`.
-- **The reasons are generic hedging** ("cannot verify", "insufficient
-  information") on every market regardless of content — then the Checker is
-  refusing by disposition rather than on the merits, and the fix is its prompt,
-  not its threshold.
+`#24` built forecast grading in the afternoon and it produced **zero rows in
+the entire history of the bot** — including a 4.4-hour uninterrupted run
+during which crypto hourly markets resolved every hour.
 
-The counterfactual data from `#24` answers the same question with outcomes
-rather than prose, and weather markets settle daily so it can exist within a
-day. `refused` is the mode that matters: it grades the trades the gates turned
-down. If those would have won, the gate is too tight — and that is a
-measurement, not a guess.
+Head-of-line blocking. `unsettled_forecast_edges` selected oldest-first with
+no close-time filter, and `reconcile_forecasts` takes only the first
+`FORECAST_RECONCILE_MAX_TICKERS` (25) distinct tickers from it. A market
+that is still open returns no result, and nothing recorded that it had been
+asked — so the same 25 oldest tickers were re-queried every pass, forever.
+The oldest rows were multi-day contracts and cross-category parlay shards,
+markets resolving months out or never. The window sat on them permanently.
 
-**Do not raise `CHECKER_MIN_CONFIDENCE`, widen `COHERENCE_MAX_LOG_ODDS`, or
-lower `MIN_EDGE_THRESHOLD` to produce fills.** A gate that blocks everything
-invites exactly that, and it is the wrong move if the gate is right. Fills
-bought by loosening a correct gate are losses with extra steps.
+It stayed invisible because a wasted lookup and an unresolved market look
+identical: both return nothing.
+
+Edges now carry `close_time`; the reconciler asks only about markets that
+could have resolved, most recently closed first. Crypto hourlies close
+constantly, which is exactly what calibration wants. Expect `Graded N
+forecast row(s)` within an hour of the deploy — **if it is still silent after
+that, something else is wrong and it is the first thing to chase.**
+
+### What to look for once there are rows
+
+`refused` is the mode that matters: it grades what the gates turned down.
+Discard rows created before 17:00 on 2026-08-17 — those were scored with the
+broken sigma.
+
+- **Good Brier and positive counterfactual PnL on `refused`** → the gates are
+  turning down winners, and that is where the edge is being lost.
+- **Poor Brier on `refused`** → the gates are right and the work is upstream
+  in proposal quality. Do not touch a threshold.
+
+---
+
+## What the 4-hour review found (2026-08-17, ~22:30 UTC)
+
+**The volatility ladder plateaus now.** `#37` was correct that 120s was
+truncating it:
+
+```
+btc  tick 16%  15s 26%  30s 35%  60s 48%  120s 58%  300s 62%
+eth  tick 11%  15s 18%  30s 24%  60s 33%  120s 41%  300s 42%
+```
+
+btc flattens 58→62, eth 41→42. The knee is at 300s, not 120s.
+
+**But the sigma in use has drifted high for medium-dated contracts.** Live
+readings at 22:04-22:27:
+
+```
+btc 17.7%   lookback 12046s (~10-min contract)
+btc 31.1%   lookback 59381s (~49-min contract, uses the whole 5.4h buffer)
+eth 23.1%
+```
+
+The short-lookback reading (17.7%) matches market-implied almost exactly —
+18.4% back-solved this afternoon from two adjacent strikes. The long-lookback
+one is nearly double, because `lookback = seconds_to_expiry * 20` pulls a
+49-minute contract's estimate across five hours that include an earlier
+volatile stretch.
+
+Back-solving one live market — 38 minutes out, spot 0.23% above strike, market
+94.5% — puts market-implied vol at **~17%** against our **30%**. The Checker
+flagged the same thing independently and in the opposite direction from this
+afternoon: it now says *"the model's per-second vol seems too high or
+misapplied"*, where at 17:53 it said 0.008 was too low.
+
+**So the 20x lookback multiplier is the next suspect** — but do not change it
+on this evidence alone. That is exactly the reasoning-from-one-observation
+that produced two wrong calls today. Wait for the calibration table.
+
+**The Checker is mostly right, and once was wrong for a fixable reason.** Its
+objections are specific and on-the-merits: it caught a bucket-contract
+mispricing in our quant model and the ETH sigma understatement. But on
+`KXHIGHNY-26AUG17-T84` it rejected an official NWS forecast as *"almost
+certainly a hallucination"* because it thought Aug 2026 was two years away.
+Nothing told it the date. `#39` fixes that. The false rejections cluster on
+weather — the markets with the best grounding.
+
+**Funnel is healthy on volume, still zero on approvals:**
+
+```
+110 candidate(s) -> quant 71 (no proposal 57, below edge 8),
+llm 10 (capped 0) | proposed 13 -> checked 12 (rejected 12) -> approved 0
+```
+
+2863 → 110 candidates and `capped 0` after `#36`. `no proposal 57` is the
+horizon guard refusing daily contracts, which at ~19000s of history are just
+over the 4x limit.
+
+**Nothing has traded. No fill has ever occurred in this bot's history.**
 
 ---
 
