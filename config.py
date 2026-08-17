@@ -322,18 +322,24 @@ class RiskConfig:
     # it, so the largest estimate across the ladder is the least damped one.
     #
     # The ladder stops at 120s, and the reason is the retention window rather
-    # than the physics. Measured on the live feed at 17:14 on 2026-08-17:
+    # than the physics. Two containers 90 seconds apart, reading the same
+    # feed on 2026-08-17:
     #
-    #   btc  tick 6%  15s 10%  30s 13%  60s 15%  120s 16%  300s 12%
-    #   eth  tick 5%  15s  9%  30s 12%  60s 14%  120s 16%  300s 12%
+    #   17:14  btc  tick 6%  15s 10%  30s 13%  60s 15%  120s 16%  300s 12%
+    #   17:15  btc  tick 6%  15s 10%  30s 13%  60s 15%  120s 16%  300s 19%
+    #          eth  ...                                  120s 17%  300s 21%
     #
-    # The signature has flattened by 120s, so the plateau is already reached.
-    # The 300s rung reads *lower* because it is noise, not signal: one hour of
-    # retention at the 5s tick rate leaves it 9-12 observations, where the
-    # sampling error on a standard deviation is ~20%. Because the estimate is
-    # a maximum across rungs, a rung that noisy can only ever hurt — a low
-    # reading is discarded, a spuriously high one is taken. Extending it needs
-    # a longer VOL_HISTORY_RETENTION_SECONDS, which is a separate trade
+    # Every rung agrees between the two runs except the last, which moved from
+    # 12% to 19-21%. That is not the signature — it has already flattened by
+    # 120s — it is sampling error: one hour of retention at the 5s tick rate
+    # leaves the 300s rung 9-12 observations, where the standard error on a
+    # standard deviation is ~20%.
+    #
+    # A noisy top rung is not harmless here, because the estimate is a MAXIMUM
+    # across rungs. A low reading is discarded and a spuriously high one is
+    # taken, so the 19-21% reading would have been adopted over the stable 16%
+    # — above even the market's implied vol. Extending the ladder needs a
+    # longer VOL_HISTORY_RETENTION_SECONDS first, which is a separate trade
     # against reconstructing an estimate across a gap in the data.
     vol_sample_intervals: tuple = _floats(
         "VOL_SAMPLE_INTERVALS", (0.0, 15.0, 30.0, 60.0, 120.0))
