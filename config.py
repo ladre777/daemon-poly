@@ -443,6 +443,25 @@ class AppConfig:
             k.strip().lower() for k in os.getenv("PRIORITY_KEYWORDS", "golf,pga").split(",") if k.strip()
         ]
     )
+    # Taxonomy groups evaluated ahead of the rest — but still inside the call
+    # caps, unlike PRIORITY_KEYWORDS.
+    #
+    # The model budget used to be spent in whatever order Scout returned
+    # candidates, which in practice meant politics: a production pass put all
+    # ten calls on KXVOTEPRIMARY, KXTRUMPSAY and KXCLARITYVOTE, on every pass,
+    # while weather got none. Crypto does not need a place here — it is priced
+    # on the quant path and spends no model budget at all.
+    #
+    # Ordering only. A preferred category is asked first; it is not asked
+    # without limit. Raising a spending ceiling is a separate decision from
+    # deciding who is asked first, and PRIORITY_KEYWORDS is where that lives.
+    priority_categories: set = field(
+        default_factory=lambda: {
+            c.strip().lower() for c in os.getenv(
+                "PRIORITY_CATEGORIES", "weather"
+            ).split(",") if c.strip()
+        }
+    )
     # Caps Maker (Kimi) LLM calls per scan pass so a broad category list
     # doesn't dilute spend/rate-limit budget away from priority markets.
     # Quant-path markets (crypto/commodities) aren't affected — no LLM call

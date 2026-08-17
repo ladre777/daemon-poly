@@ -33,6 +33,7 @@ _APP_FIELDS = (
     "scout_census_families",
     "llm_reasoning_categories",
     "priority_keywords",
+    "priority_categories",
     "max_llm_calls_per_pass",
     "max_llm_calls_per_event",
     "scout_poll_seconds",

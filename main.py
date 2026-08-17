@@ -225,10 +225,24 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         title = c.title.lower()
         return any(kw in title for kw in CONFIG.priority_keywords)
 
-    # Priority candidates (golf, by default) always go first and are never
-    # subject to the LLM call cap below — everything else fills remaining
-    # budget in whatever order Scout returned it.
-    candidates.sort(key=lambda c: not _is_priority(c))
+    def _is_preferred(c):
+        return c.category.lower() in CONFIG.priority_categories
+
+    # Three tiers, and the middle one is new.
+    #
+    # Priority candidates (golf, by default) go first and bypass every model
+    # call cap. That was the only tier, and "everything else in whatever order
+    # Scout returned it" turned out to mean "politics", because that is what
+    # the catalog happens to list first. A production pass spent all ten of
+    # its model calls on KXVOTEPRIMARY, KXTRUMPSAY and KXCLARITYVOTE while
+    # weather — named as a main focus — got none, on every pass, for hours.
+    #
+    # Preferred categories now sort ahead of the rest but still obey the caps.
+    # That split is deliberate: ordering decides who gets asked first, which is
+    # a preference; bypassing the cap decides who gets asked without limit,
+    # which is a spending decision and stays reserved for the one family the
+    # operator named as always-first.
+    candidates.sort(key=lambda c: (not _is_priority(c), not _is_preferred(c)))
 
     filled_this_pass = 0
     llm_calls_this_pass = 0
