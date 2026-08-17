@@ -295,6 +295,29 @@ class AnthropicBackend:
         return first_text_block(resp)
 
 
+#: Exception type names that mean "the provider was too slow", as opposed to
+#: "the provider said no". Matched on the class name so this needs no import
+#: of every client library's private exception hierarchy.
+_TIMEOUT_NAMES = frozenset({
+    "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout",
+    "TimeoutException", "APITimeoutError", "Timeout", "TimeoutError",
+})
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """True when the exception is a latency failure rather than a refusal.
+
+    Also matches the message, because httpx surfaces socket timeouts as
+    ``ReadTimeout("The read operation timed out")`` but some stacks wrap them
+    in a generic error whose only distinguishing feature is that text — which
+    is exactly what production logged.
+    """
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _TIMEOUT_NAMES:
+            return True
+    return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
+
+
 class MakerLLM:
     """Primary provider with automatic failover to the secondary.
 
@@ -310,6 +333,7 @@ class MakerLLM:
         fallback=None,
         failure_threshold: int = 3,
         cooldown_seconds: float = 600.0,
+        timeout_threshold: int = 2,
     ):
         self.primary = primary if (primary and primary.configured) else None
         self.fallback = fallback if (fallback and fallback.configured) else None
@@ -318,6 +342,23 @@ class MakerLLM:
             threshold=failure_threshold,
             cooldown_seconds=cooldown_seconds,
         )
+        #: Timeouts are counted separately from ordinary failures, and are NOT
+        #: reset by an interleaved success.
+        #:
+        #: The consecutive-failure breaker is right for a provider that is
+        #: down and wrong for one that is merely slow. Production showed
+        #: Moonshot timing out roughly once per pass with successes in
+        #: between, so the consecutive counter never reached 3, the breaker
+        #: never opened, and the bot paid the full timeout every pass before
+        #: succeeding on the fallback anyway. That latency is the direct cause
+        #: of quotes ageing past MAX_QUOTE_AGE_SECONDS before risk sees them.
+        #:
+        #: A success after a timeout does not mean the provider is healthy —
+        #: it means it is flaky, and a flaky provider with a multi-second
+        #: timeout is worse than a cleanly dead one, because the cost lands on
+        #: the critical path instead of surfacing as an error.
+        self.timeout_threshold = timeout_threshold
+        self.timeouts_seen = 0
         self.last_provider = ""
 
     @property
@@ -351,10 +392,25 @@ class MakerLLM:
 
         errors: list[str] = []
 
-        if self.primary and not self.breaker.is_open:
+        # `is_open` clears opened_at as a side effect once the cooldown
+        # elapses, letting one probe through. Clear the timeout tally on that
+        # same transition — and ONLY on that transition. Clearing it whenever
+        # the breaker merely happens to be closed would zero the counter at
+        # the top of every call, so it could never reach its threshold: the
+        # exact "never accumulates" bug this replaces, reintroduced one level
+        # down.
+        was_open = self.breaker.opened_at is not None
+        breaker_open = self.breaker.is_open
+        if was_open and not breaker_open:
+            self.timeouts_seen = 0
+
+        if self.primary and not breaker_open:
             try:
                 text = self.primary.complete(system, user, temperature)
                 self.breaker.record_success()
+                # Deliberately does NOT clear timeouts_seen: one fast answer
+                # does not undo a pattern of slow ones. The cooldown clears
+                # it, on the same clock as the breaker.
                 self.last_provider = self.primary.name
                 return text
             except Exception as e:                  # noqa: BLE001 - failover point
@@ -370,6 +426,27 @@ class MakerLLM:
                     )
                     if not tripped and self.breaker.opened_at is None:
                         self.breaker.record_failure(str(e))
+                elif _is_timeout(e):
+                    # Slowness is its own failure mode. Counted across
+                    # successes, because a provider that intermittently costs
+                    # a full timeout is one we should stop calling even though
+                    # it sometimes answers.
+                    self.timeouts_seen += 1
+                    if self.timeouts_seen >= self.timeout_threshold:
+                        self.breaker.consecutive_failures = max(
+                            self.breaker.consecutive_failures,
+                            self.breaker.threshold,
+                        )
+                        if self.breaker.opened_at is None:
+                            self.breaker.record_failure(str(e))
+                        log.warning(
+                            "Maker primary %s has timed out %d time(s) — "
+                            "opening the breaker for %.0fs rather than paying "
+                            "its timeout on every candidate. The fallback "
+                            "answers these anyway.",
+                            self.primary.name, self.timeouts_seen,
+                            self.breaker.cooldown_seconds,
+                        )
                 log.warning(
                     "Maker primary provider %s failed (%s): %s%s",
                     self.primary.name, severity.value, e,
