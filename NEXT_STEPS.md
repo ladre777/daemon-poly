@@ -14,8 +14,8 @@ Verify these rather than trusting them; they were true when written.
 | | |
 |---|---|
 | `main` | `#24` merged (paper calibration). Check `git log --oneline -5`. |
-| Tests | 813 passing, `ruff` clean |
-| Railway | `env=prod`, **`DRY_RUN=false` — LIVE, REAL MONEY** |
+| Tests | 813 passing locally, `ruff` clean. **CI was NOT read** — see below. |
+| Railway | `env=prod`. **NOT LIVE.** See "deploy state" below — verify before trusting. |
 | Account | funded ~$49.98 |
 | RTI feed | live on prod, ~200 frames/2min across BRTI + ETHUSD_RTI |
 | ESPN | **blocked for bots. Do not touch the ESPN client.** |
@@ -24,6 +24,38 @@ Verify these rather than trusting them; they were true when written.
 Effective bankroll is `min(--bankroll, exchange balance)`, so sizing is capped
 by the real $49.98, not the $1000 CLI default. At `MAX_POSITION_PCT=0.05`
 that is ~$2.50/position — roughly 6 contracts at 40c.
+
+### Deploy state — READ THIS FIRST
+
+At the end of the session the picture was:
+
+```
+latest deployment:  596a4f00  FAILED  (13:48, carrying the #24 merge)
+running container:  c64c0f42  SUCCESS (13:24) — #23 code, DRY_RUN=true
+```
+
+`DRY_RUN=false` **was set as a Railway variable**, but variables only take
+effect at container start and the deploy carrying it failed. Railway kept the
+previous container alive, so the process is still running #23 with
+`DRY_RUN=true`.
+
+Consequences, all of which need verifying rather than assuming:
+
+- **Live trading was NOT active.** No real money had been placed at risk.
+- **`#24` was merged but never ran.** No forecast row has ever been graded.
+- This was the second transient Railway build failure of the day
+  (`b630a81e` failed identically at 12:00; the next deploy succeeded with the
+  same code). A build that fails twice deserves the build log read, not
+  another retry.
+
+**First action: read the boot banner and believe it over this file.**
+
+```
+DÆMON-KALSHI starting | env=prod dry_run=??? strategy=taker
+```
+
+`dry_run=False` means live and the cutover completed. `dry_run=True` means it
+did not, and the variable still has not reached a running container.
 
 ---
 
@@ -47,8 +79,15 @@ that is ~$2.50/position — roughly 6 contracts at 40c.
 
 ## What is IN PROGRESS / UNVERIFIED
 
+**CI was never read for `#24`.** GitHub's check-runs API began returning
+`403 Resource not accessible by integration` mid-session and the commit-status
+API reported no registered checks. It was merged on local evidence only — 813
+tests passing and `ruff` clean on that exact commit. Defensible, but not the
+same as green CI. Re-run the suite before building on it.
+
 **`#24` has not yet produced a single graded row.** The code is tested but the
-mechanism has never run against a real resolution. First thing to check:
+mechanism has never run against a real resolution — and cannot until the
+deploy above succeeds. First thing to check once it does:
 
 ```
 railway logs | grep "Graded .* forecast row"
@@ -59,9 +98,11 @@ If that line never appears after a few hours, look at
 nothing because markets have not resolved yet, which is benign, but confirm
 rather than assume.
 
-**Live trading has just been enabled and no fill has ever completed.** The bot
-has never executed a single order in its entire history. The first live fill is
-an unverified code path end-to-end.
+**No fill has ever completed, in the entire history of this bot.** Not one
+order has ever been executed, in demo or prod. The first live fill will
+exercise a code path that has never run end to end — reconciliation, fill
+recording, settlement and calibration writeback all included. Treat the first
+live trade as a test of the machinery, not as a trade.
 
 **`approved 0` on every pass observed so far.** The Checker rejects everything.
 Live mode does not change that — if it still reads `approved 0`, nothing is
