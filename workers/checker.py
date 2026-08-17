@@ -119,6 +119,20 @@ class Checker:
         # indexed straight into the parsed dict and called float() on whatever
         # was there.
         checked = validate_checker_output(raw, ticker=c.ticker)
+        if checked.reasoning == "parse_error":
+            # Production showed two of these with stop_reason NOT max_tokens,
+            # so the budget check above did not fire and the cause is still
+            # open. Recording the stop_reason next to the failure is what
+            # closes that gap: it separates "the model stopped early for some
+            # other reason" from "the model finished and emitted non-JSON",
+            # which is the distinction the 200-char log used to destroy.
+            log.warning(
+                "Checker parse failure on %s with stop_reason=%s, %d content "
+                "block(s) — NOT a token-cap truncation (that path abstains "
+                "earlier). See the payload logged above.",
+                c.ticker, getattr(resp, "stop_reason", "<absent>"),
+                len(getattr(resp, "content", []) or []),
+            )
         return Verdict(
             proposal=proposal,
             verdict=checked.verdict,

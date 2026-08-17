@@ -552,6 +552,40 @@ def repair_truncated_json(raw: Any) -> Optional[dict]:
     return None
 
 
+#: How much of an unparseable model response to keep in the log.
+#:
+#: Was 200, which is why two production Checker parse failures
+#: (KXRAINSHARD2-26AUG15-NYC at 00:38:43Z, -PHIL at 00:58:17Z) could not be
+#: diagnosed: the logged payload ended mid-sentence, and the clip meant there
+#: was no way to tell whether the *model* stopped there or the *logger* did.
+#: Those two readings have opposite fixes — a token budget versus a prompt or
+#: parser problem — so a log that cannot distinguish them sends the next
+#: investigation in a random direction. It already sent one.
+#:
+#: Bounded rather than unbounded: a looping model can emit megabytes, and this
+#: text goes to the log stream. 4000 comfortably exceeds a complete verdict
+#: (the Checker's whole budget is CHECKER_MAX_TOKENS=4000 for thinking *and*
+#: answer together), so a clip here now means genuinely anomalous output.
+MAX_UNPARSEABLE_LOG_CHARS = 4000
+
+
+def _describe_unparseable(raw: Any) -> str:
+    """Render an unparseable payload for the log, stating what was withheld.
+
+    Reports the true length alongside the excerpt so a clipped log line can
+    never again be mistaken for a short response.
+    """
+    text = raw if isinstance(raw, str) else repr(raw)
+    total = len(text)
+    if total <= MAX_UNPARSEABLE_LOG_CHARS:
+        return f"[{total} chars, complete] {text}"
+    return (
+        f"[{total} chars, showing first {MAX_UNPARSEABLE_LOG_CHARS} — clipped "
+        f"by the logger, NOT by the model] "
+        f"{text[:MAX_UNPARSEABLE_LOG_CHARS]}"
+    )
+
+
 @dataclass
 class MakerOutput:
     probability_yes: float
@@ -569,7 +603,8 @@ def validate_maker_output(raw: Any, ticker: str = "") -> Optional[MakerOutput]:
     """
     parsed = extract_json(raw)
     if parsed is None:
-        log.warning("Maker returned unparseable JSON for %s: %.200s", ticker, raw)
+        log.warning("Maker returned unparseable JSON for %s: %s",
+                    ticker, _describe_unparseable(raw))
         return None
 
     probability = in_unit_interval(parsed.get("probability_yes"))
@@ -620,20 +655,14 @@ def validate_checker_output(raw: Any, ticker: str = "") -> CheckerOutput:
     truncated = False
     parsed = extract_json(raw)
     if parsed is None:
+        # Recovery first: a response cut off mid-prose usually still carries a
+        # complete verdict, and discarding it records a real judgement as a
+        # parse error.
         parsed = repair_truncated_json(raw)
         truncated = parsed is not None
         if parsed is None:
-            # Enough to diagnose the next one without another deploy. The
-            # 200-char head alone could not distinguish a response cut off at
-            # the token cap from one that was complete but malformed, and
-            # that ambiguity sent three separate investigations after the
-            # prompt.
-            text = raw if isinstance(raw, str) else repr(raw)
-            log.warning(
-                "Checker returned unparseable JSON for %s (%d chars). "
-                "Head: %.200s | Tail: %.120s",
-                ticker, len(text), text, text[-120:],
-            )
+            log.warning("Checker returned unparseable JSON for %s: %s",
+                        ticker, _describe_unparseable(raw))
             return abstention("parse_error")
 
     verdict = parsed.get("verdict")

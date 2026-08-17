@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -49,9 +50,22 @@ from workers.quant_maker import QuantMaker
 from workers.arbitrage import ArbitrageScanner
 from workers.coherence import CoherenceGate
 
+# stream=stdout, not the logging default of stderr.
+#
+# Railway classifies everything a container writes to stderr as severity
+# "error". With the default handler, every INFO line — every pass funnel,
+# every successful reconciliation — arrived tagged as an error, so filtering
+# the log stream by severity returned the entire log and a genuine failure
+# was indistinguishable from a routine pass. Verified against deployment
+# d3a6756b: `"level": "error"` on lines reading
+# `INFO daemon_kalshi.account: Reconciled: ...`.
+#
+# WARNING and above still carry their real level in the message text, and
+# real crashes still reach stderr via the interpreter itself.
 logging.basicConfig(
     level=CONFIG.log_level,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
 )
 
 # httpx logs every request at INFO as "HTTP Request: <METHOD> <full URL>".

@@ -39,13 +39,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Lint
-        run: ruff check core workers memory backtest tests main.py config.py
+        run: ruff check core workers memory backtest scripts tests main.py config.py
 
       - name: Tests
         # No credentials are set, which is the point: every test must run
         # against fakes. A suite that needs a live Kalshi key is a suite that
         # silently stops running the day the key rotates.
-        run: python -m pytest -q
+        #
+        # No -q here: pytest.ini already sets it, and passing it again makes
+        # -qq, which suppresses the "N passed" summary entirely. CI logs then
+        # show rows of dots and no count, so a run collecting 494 tests and
+        # one collecting 3 look identical — and a silently shrinking suite is
+        # exactly what CI exists to catch.
+        run: python -m pytest
 
       - name: Refuse to ship a live-trading default
         # DRY_RUN defaults to true and must stay that way. Flipping the

@@ -159,16 +159,27 @@ def test_a_truncated_response_missing_confidence_abstains():
     assert out.reasoning == "invalid_confidence"
 
 
-def test_an_unparseable_response_logs_length_and_tail(caplog):
-    """The 200-char head alone could not tell a token-cap cutoff from a
-    complete-but-malformed answer, and that ambiguity cost three separate
-    investigations."""
+def test_an_unparseable_response_logs_its_true_length(caplog):
+    """A 200-char excerpt could not tell a token-cap cutoff from a
+    complete-but-malformed answer — the logged payload ended mid-sentence
+    either way. Those two readings have opposite fixes, and the ambiguity
+    cost several investigations."""
     with caplog.at_level("WARNING"):
         validate_checker_output("total garbage, no object, " + "x" * 400,
                                 ticker="KXTEST-1")
 
-    assert "chars" in caplog.text
-    assert "Tail:" in caplog.text
+    assert "426 chars, complete" in caplog.text, (
+        "the log must say the response was whole, not merely show its start"
+    )
+
+
+def test_an_over_long_response_says_the_logger_did_the_clipping(caplog):
+    """The distinction that matters: a clip here means our logger stopped,
+    not that the model did."""
+    with caplog.at_level("WARNING"):
+        validate_checker_output("no object here " + "x" * 8000, ticker="KXTEST-1")
+
+    assert "clipped by the logger, NOT by the model" in caplog.text
 
 
 def test_a_complete_response_is_not_marked_as_recovered():
