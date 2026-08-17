@@ -42,6 +42,7 @@ from config import CONFIG
 from core.account_state import AccountSnapshot
 from core.kelly import kelly_cap_cents, win_probability_for
 from core.pricing import (
+    cost_per_contract_cents,
     executable_price_cents as _executable_price_cents,
     fee_cents_per_contract as _fee_cents_per_contract,
     net_edge,
@@ -438,9 +439,26 @@ class RiskGuardrail:
         # 2. Budget the worst case per contract: what we pay, plus a slippage
         #    allowance, plus fees. Sizing against the raw price would let the
         #    real cost of a filled order exceed the cap it was approved under.
-        limit_price = min(price + CONFIG.risk.slippage_cents, 99.0)
-        fees_per_contract = fee_cents_per_contract(limit_price)
-        cost_per_contract = limit_price + fees_per_contract
+        #
+        #    Shared with Maker via core.pricing rather than recomputed here.
+        #    It was recomputed here, and the two copies had already diverged
+        #    once the limit started being floored onto the order grid — which
+        #    is exactly the drift the shared module exists to prevent.
+        limit_price, fees_per_contract, cost_per_contract = cost_per_contract_cents(price)
+
+        #    Flooring onto the grid moves the limit down, so a quote sitting
+        #    inside the top tick can leave a limit that no longer crosses it:
+        #    a 99.5c ask is capped at 99.0c and floors to 99.0c. Submitting
+        #    that is not dangerous, it simply cannot fill, and an order that
+        #    cannot fill should be refused here rather than sent and counted
+        #    as exposure until it expires.
+        if limit_price < price:
+            return RiskDecision(
+                False,
+                f"limit price {limit_price:.0f}c does not reach the executable "
+                f"price {price:.2f}c after grid flooring — order could not fill",
+                executable_price_cents=price,
+            )
 
         # 3. Position cap and every concentration cap bound the size together.
         bankroll_cents = bankroll_usd * 100.0

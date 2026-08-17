@@ -38,6 +38,7 @@ from config import CONFIG
 from core.account_state import AccountState
 from core.kalshi_client import KalshiAPIError, KalshiClient, KalshiTimeoutError
 from core.order_state import OrderIntent, OrderRecord, OrderState
+from core.pricing import price_dollars_string
 from memory.order_store import OrderStore
 from workers.checker import Verdict
 from workers.risk_guardrail import RiskDecision
@@ -189,7 +190,7 @@ class Execution:
         price_field = (
             "yes_price_dollars" if record.side == "yes" else "no_price_dollars"
         )
-        price_dollars = f"{record.limit_price_cents / 100:.2f}"
+        price_dollars = price_dollars_string(record.limit_price_cents)
         record.submitted_at = time.time()
         if record.time_in_force.upper() == "GTC":
             record.expires_at = record.submitted_at + CONFIG.risk.order_ttl_seconds

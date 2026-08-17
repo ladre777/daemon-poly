@@ -58,14 +58,68 @@ def executable_probability(candidate, direction: str) -> float:
     return price / 100.0 if direction == "yes" else 1.0 - (price / 100.0)
 
 
+#: Order prices go to Kalshi as dollar-denominated strings on a per-market
+#: grid. Two structures appear on live payloads: ``linear_cent`` (1c steps)
+#: and ``tapered_deci_cent`` (0.001 steps below $0.10 and above $0.90, 0.01
+#: between) — the crypto 15-minute and hourly families quote on the latter,
+#: e.g. KXBTC15M resting 0.9590 / 0.9600, a tenth-of-a-cent spread.
+#:
+#: A whole cent is a member of *every* published grid, so flooring a limit to
+#: the cent is a valid price on any market without having to read the
+#: structure off the payload first. Sub-cent quoting is a market-making
+#: concern (two-sided quotes inside a 0.1c spread) and belongs with that
+#: layer, where the grid has to be read per market anyway.
+LIMIT_PRICE_TICK_CENTS = 1.0
+
+
+def grid_floor_cents(price_cents: float) -> float:
+    """Floor a price onto the order grid.
+
+    Applied to *buy* limits, so the effect is always to pay no more than the
+    caller approved. The tolerance absorbs float dust — 6.000000001c is a 6c
+    limit, not a 6c limit that floors to 5.
+    """
+    return math.floor(round(price_cents, 6) / LIMIT_PRICE_TICK_CENTS) * LIMIT_PRICE_TICK_CENTS
+
+
+def price_dollars_string(price_cents: float) -> str:
+    """Kalshi's dollar wire format, refusing anything it cannot express.
+
+    This used to be ``f"{cents / 100:.2f}"`` at the call site, which rounds to
+    the *nearest* cent. On a market quoting in tenths of a cent that rounds
+    **up** half the time, so a 5.55c limit left the process as a 6c order —
+    above the price the risk decision sized, budgeted and invariant-checked,
+    and above the number persisted as the order's limit. Small in absolute
+    terms and entirely silent, which is the part that matters: the approved
+    budget stopped being the submitted budget.
+
+    Raising rather than rounding keeps that failure impossible to reintroduce
+    by accident. Callers are expected to have gone through
+    ``cost_per_contract_cents``, which returns a gridded limit.
+    """
+    if price_cents != grid_floor_cents(price_cents):
+        raise ValueError(
+            f"limit price {price_cents}c is not on the {LIMIT_PRICE_TICK_CENTS}c "
+            f"order grid — refusing to round it silently"
+        )
+    return f"{price_cents / 100:.2f}"
+
+
 def cost_per_contract_cents(executable_price: float) -> tuple[float, float, float]:
     """(limit_price, fee, total cost) for one contract at this price.
 
     The limit price carries the slippage allowance, and the fee is computed
     on the limit price rather than the quote, so a fill at the worst price we
     are willing to pay is still inside the budget it was approved under.
+
+    It is also floored onto the order grid here rather than at submission, so
+    the number risk sizes against, the number stored on the order, and the
+    number sent to Kalshi are the same number. Flooring can only ever move
+    the limit down, so this never widens the budget.
     """
-    limit_price = min(executable_price + CONFIG.risk.slippage_cents, 99.0)
+    limit_price = grid_floor_cents(
+        min(executable_price + CONFIG.risk.slippage_cents, 99.0)
+    )
     fee = fee_cents_per_contract(limit_price)
     return limit_price, fee, limit_price + fee
 
