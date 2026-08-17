@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 from core.espn_client import ESPNClient
 from core.weather_client import NOAAClient, WEATHER_STATIONS, CITY_ALIASES
@@ -240,6 +241,28 @@ def _golf_event_state(event: dict, competition: dict) -> str:
     return ", ".join(parts)
 
 
+def _settlement_date(candidate) -> str | None:
+    """The local calendar date a market settles on, from its close time.
+
+    Kalshi's close_time is UTC. A weather market closes at the end of the
+    settlement day in the station's local time, which is the small hours of
+    the following day in UTC — so taking the UTC date directly would ask for
+    tomorrow's forecast on every single market. The close is shifted back a
+    few hours before the date is read, which lands on the right local day for
+    every US time zone Kalshi runs weather markets in.
+    """
+    raw = getattr(candidate, "close_time", "") or ""
+    if not raw:
+        return None
+    try:
+        closed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if closed.tzinfo is None:
+        closed = closed.replace(tzinfo=timezone.utc)
+    return (closed.astimezone(timezone.utc) - timedelta(hours=8)).date().isoformat()
+
+
 def _guess_sport_league(title: str) -> tuple[str, str] | None:
     t = title.lower()
     for kw, sl in _SPORT_LEAGUE_KEYWORDS.items():
@@ -288,22 +311,48 @@ class ContextEnricher:
         return None
 
     def _weather_context(self, candidate: Candidate) -> str | None:
+        """Forecast for the day this market settles, not for today.
+
+        A temperature market names a date, and the forecast handed to the
+        Maker has to be for that date. The previous version always read the
+        nearest NWS period, so an evening scan produced no high at all (the
+        nearest period is "Tonight") and a market two days out was given
+        today's numbers as though they were its own.
+        """
         city = resolve_weather_city(candidate)
         if not city:
             log.debug("No NWS station matched %s (%s / %s)", candidate.ticker,
                       candidate.taxonomy_category, candidate.taxonomy_subcategory)
             return None
-        data = self.weather.get_city_forecast(city)
+        target = _settlement_date(candidate)
+        data = self.weather.get_city_forecast(city, target_date=target)
         if not data:
             return None
+
         lines = [f"NWS data for {city.title()} (station {data['station']}) — this is the "
                  f"same station Kalshi's market rules should name for settlement, verify against "
                  f"the specific market's rules:"]
-        if data["forecast_high_f"] is not None:
-            lines.append(f"  NWS forecast high today: {data['forecast_high_f']}\u00b0F")
-        if data["current_temp_f"] is not None:
+        if target:
+            lines.append(f"  This market settles on {target}.")
+        if data.get("forecast_high_f") is None:
+            # Stated, not omitted. A missing high on a market that turns on
+            # the high is the single most important thing to know about this
+            # context, and leaving it out reads like the forecast said
+            # nothing rather than like we could not find the right day.
+            lines.append(
+                f"  NO NWS daytime forecast is available for "
+                f"{target or 'the requested day'} — NWS publishes about a week "
+                f"ahead. Do NOT infer a high from the other figures here."
+            )
+        else:
+            label = data.get("forecast_label") or "forecast"
+            lines.append(
+                f"  NWS forecast high for {data.get('forecast_date') or 'that day'} "
+                f"({label}): {data['forecast_high_f']}\u00b0F"
+            )
+        if data.get("current_temp_f") is not None:
             lines.append(f"  Current observed temp: {data['current_temp_f']:.1f}\u00b0F")
-        if data["forecast_today"]:
+        if data.get("forecast_today"):
             lines.append(f"  Forecast detail: {data['forecast_today']}")
         return "\n".join(lines)
 

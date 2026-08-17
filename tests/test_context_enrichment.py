@@ -41,8 +41,12 @@ class _RecordingNOAA:
         self.calls = []
         self._forecast = forecast
 
-    def get_city_forecast(self, city):
+    def get_city_forecast(self, city, target_date=None):
+        # Records the date asked for as well as the city: which day the
+        # forecast is for is now part of the contract, not an afterthought.
         self.calls.append(city)
+        self.dates = getattr(self, "dates", [])
+        self.dates.append(target_date)
         return self._forecast
 
 

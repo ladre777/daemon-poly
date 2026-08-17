@@ -116,6 +116,7 @@ def make_candidate(
     event_ticker="KXTEST-25AUG14",
     taxonomy_category="",
     taxonomy_subcategory="",
+    close_time="2026-12-31T00:00:00Z",
 ) -> Candidate:
     return Candidate(
         ticker=ticker,
@@ -124,7 +125,7 @@ def make_candidate(
         yes_bid=yes_bid,
         yes_ask=yes_ask,
         volume=volume,
-        close_time="2026-12-31T00:00:00Z",
+        close_time=close_time,
         event_ticker=event_ticker,
         taxonomy_category=taxonomy_category,
         taxonomy_subcategory=taxonomy_subcategory,

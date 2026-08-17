@@ -96,21 +96,80 @@ class NOAAClient:
         how close today's running high already is to a Kalshi threshold."""
         return self._get(f"/stations/{station_id}/observations/latest")
 
-    def get_city_forecast(self, city_keyword: str) -> Optional[dict]:
+    def get_city_forecast(self, city_keyword: str,
+                          target_date: str = None) -> Optional[dict]:
+        """Forecast for the day the market actually settles on.
+
+        ``target_date`` is an ISO date (YYYY-MM-DD) in the station's own local
+        time. Omit it to get the next daytime period.
+
+        This used to read ``periods[0]`` unconditionally, which is wrong twice
+        over and silently:
+
+        1. NWS periods alternate day/night. Called in the evening,
+           ``periods[0]`` is "Tonight" with ``isDaytime`` false, so
+           ``forecast_high_f`` came back None — the single number a "highest
+           temperature" market turns on simply vanished, with no error.
+        2. ``periods[0]`` is always the *nearest* period. A market settling
+           two days out was handed today's forecast, presented exactly like a
+           relevant one. The model then reasoned confidently about the wrong
+           day.
+
+        Both are the same failure: supplying data about a different subject
+        than the contract. The returned dict now names the date it actually
+        found, so a mismatch is visible instead of assumed away.
+        """
         station = WEATHER_STATIONS.get(city_keyword.lower())
         if not station:
             return None
         icao, lat, lon = station
         forecast = self.get_forecast(lat, lon)
+        periods = (forecast.get("properties") or {}).get("periods") or []
+        day = _daytime_period_for(periods, target_date)
         try:
             observation = self.get_latest_observation(icao)
             current_temp_c = observation["properties"]["temperature"]["value"]
         except Exception:
             current_temp_c = None
-        today = forecast["properties"]["periods"][0] if forecast["properties"]["periods"] else {}
         return {
             "station": icao,
-            "forecast_today": today.get("detailedForecast"),
-            "forecast_high_f": today.get("temperature") if today.get("isDaytime") else None,
+            "forecast_today": (day or {}).get("detailedForecast"),
+            "forecast_high_f": (day or {}).get("temperature"),
+            "forecast_date": _period_date(day) if day else None,
+            "forecast_label": (day or {}).get("name"),
+            "requested_date": target_date,
             "current_temp_f": (current_temp_c * 9 / 5 + 32) if current_temp_c is not None else None,
         }
+
+
+def _period_date(period: dict) -> Optional[str]:
+    """The local calendar date an NWS period belongs to.
+
+    ``startTime`` carries the station's own UTC offset, so slicing the date
+    off it gives the local day without needing a timezone database — and
+    without the off-by-one that converting to UTC would introduce for evening
+    periods in western time zones.
+    """
+    start = (period or {}).get("startTime")
+    if not isinstance(start, str) or len(start) < 10:
+        return None
+    return start[:10]
+
+
+def _daytime_period_for(periods: list, target_date: str = None) -> Optional[dict]:
+    """The daytime period for `target_date`, or the next one if not given.
+
+    Returns None rather than a nearby day when the requested date is not in
+    the forecast at all — NWS publishes about seven days, and a market four
+    weeks out has no forecast. Substituting the closest available day would
+    be indistinguishable from a real answer.
+    """
+    daytime = [p for p in periods if p.get("isDaytime")]
+    if not daytime:
+        return None
+    if not target_date:
+        return daytime[0]
+    for period in daytime:
+        if _period_date(period) == target_date:
+            return period
+    return None
