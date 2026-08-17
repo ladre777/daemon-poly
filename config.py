@@ -360,6 +360,15 @@ class RiskConfig:
     # 1.0x, which is why this refuses the multi-day contracts without touching
     # them.
     max_horizon_vol_span_ratio: float = _float("MAX_HORIZON_VOL_SPAN_RATIO", 4.0)
+    # Skip Kalshi multi-value event shards — single markets standing for a
+    # combination of legs. Nothing here can price a parlay: it resolves on the
+    # joint outcome of several events and this bot has no joint model and no
+    # grounding for one, so the Maker is handed a title and guesses. Live, that
+    # produced "model says 72% against a market at 0.7%" — refused by the
+    # coherence gate, after paying for the model call. They are also 2,717 of
+    # 2,863 candidates on a typical scan, so they crowd the per-pass model
+    # budget out of the 15-minute, hourly and weather families.
+    skip_multi_event_shards: bool = _bool("SKIP_MULTI_EVENT_SHARDS", True)
     spot_backoff_base_seconds: float = _float("SPOT_BACKOFF_BASE_SECONDS", 30.0)
     spot_backoff_max_seconds: float = _float("SPOT_BACKOFF_MAX_SECONDS", 900.0)
     # Contract specs in core/contract_specs.py all ship verified=False,

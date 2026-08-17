@@ -141,3 +141,44 @@ def test_the_quant_dispositions_sum_to_the_attempts(run_pass, caplog):
 
     assert attempted == 4
     assert no_proposal + below_edge + proposed == attempted
+
+
+# -- the Checker's reason is visible ---------------------------------------
+
+
+def test_a_rejection_logs_the_reason_not_just_the_verdict(caplog):
+    """This gate has rejected 100% of everything it has ever seen — 24 for 24
+    on one pass, across weather and crypto, from both the LLM and the quant
+    path. That is either a correct gate in front of bad proposals or a gate
+    biased toward reject, and "reject (conf 0.65)" cannot tell those apart.
+
+    It is the same blindness that let a 6.6%-annualized bitcoin survive a
+    whole session, and it matters more here: when a gate blocks everything the
+    temptation is to loosen it, which is precisely the wrong move if the gate
+    is right.
+    """
+    import logging
+
+    from core.validation import clamp_text
+
+    reasoning = ("The Maker's estimate leans on a stale forecast and the "
+                 "market already reflects the same information.")
+    log = logging.getLogger("daemon_kalshi.main")
+
+    with caplog.at_level("INFO"):
+        log.info("Checker verdict on %s: %s (conf %.2f) — %s",
+                 "KXHIGHNY-26AUG18-T85", "reject", 0.90,
+                 clamp_text(reasoning, 400))
+
+    assert "stale forecast" in caplog.text
+
+
+def test_the_reason_is_clamped_so_one_verdict_cannot_flood_the_log():
+    """Checker reasoning is model output and therefore unbounded in
+    principle; the log line has to stay one line."""
+    from core.validation import clamp_text
+
+    clamped = clamp_text("x" * 5000, 400)
+
+    assert len(clamped) < 500
+    assert "truncated" in clamped

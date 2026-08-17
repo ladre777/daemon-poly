@@ -264,3 +264,88 @@ def test_a_family_with_no_tradeable_market_is_not_listed_as_tradeable(caplog):
     _, text = scan(client, caplog)
 
     assert "Tradeable families" not in text
+
+
+# -- multi-event shards ----------------------------------------------------
+#
+# Kalshi lists "multi-value event" markets: one contract standing for a
+# combination of legs. A typical scan returned KXMVECROSSCATEGORY x1783 and
+# KXMVESPORTSMULTIGAMEEXTENDED x934 — 2,717 of 2,863 candidates — and they
+# crowded the per-pass model budget out of the 15-minute, hourly and weather
+# families that are actually in scope.
+#
+# Nothing here can price them. A parlay resolves on the joint outcome of
+# several events and this bot has no joint model and no grounding for one, so
+# the Maker was handed a title and guessed. Live, that produced "model says
+# 72% against a market at 0.7%" — 5.97 in log-odds, refused by the coherence
+# gate after the model call had already been paid for.
+
+
+def _shard(ticker="KXBTCD-26AUG17-SHARD1", **extra):
+    """A parlay shard that is otherwise perfectly tradeable: liquid, valid,
+    and in a watched family. Only the mve_* fields make it different."""
+    m = _market(ticker)
+    m.update(extra)
+    return m
+
+
+@pytest.fixture
+def watch_everything():
+    CONFIG.scout_census_families = ["KXBTCD", "KXBTC15M"]
+    CONFIG.scout_categories = ["Crypto"]
+    CONFIG.risk.skip_multi_event_shards = True
+
+
+def test_a_shard_is_recognised_by_its_own_fields_not_its_ticker(
+    watch_everything, caplog
+):
+    """Kalshi labels these on the payload, so read that rather than
+    pattern-matching a name — a ticker convention can change under us, and
+    KXBTCD is a real family whose ordinary markets must survive."""
+    client = CategoryClient([[
+        _shard("KXBTCD-26AUG17-S1", mve_collection_ticker="KXMVECROSS"),
+        _shard("KXBTCD-26AUG17-S2", mve_selected_legs=[{"ticker": "A"}]),
+        _market("KXBTCD-26AUG17-T64000"),
+    ]])
+
+    candidates, _ = scan(client, caplog)
+
+    assert [c.ticker for c in candidates] == ["KXBTCD-26AUG17-T64000"]
+
+
+def test_the_exclusion_is_counted_rather_than_silent(watch_everything, caplog):
+    """"0 candidates" with no reason is indistinguishable from a broken scan.
+    Every other filter in this file reports its count; so does this one."""
+    client = CategoryClient([[
+        _shard("KXBTCD-26AUG17-S1", mve_collection_ticker="KXMVECROSS"),
+    ]])
+
+    _, text = scan(client, caplog)
+
+    assert "multi-event shard" in text
+
+
+def test_the_exclusion_is_operator_reversible(watch_everything, caplog):
+    """A judgement about what this bot can price, not a safety invariant."""
+    CONFIG.risk.skip_multi_event_shards = False
+    client = CategoryClient([[
+        _shard("KXBTCD-26AUG17-S1", mve_collection_ticker="KXMVECROSS"),
+    ]])
+
+    candidates, _ = scan(client, caplog)
+
+    assert len(candidates) == 1
+
+
+def test_shards_still_count_as_seen_in_the_census(watch_everything, caplog):
+    """The census exists to explain where the catalog went. A family whose
+    markets are all shards must not read "0 seen", which would point at
+    pagination instead of at this filter."""
+    client = CategoryClient([[
+        _shard("KXBTCD-26AUG17-S1", mve_collection_ticker="KXMVECROSS"),
+        _shard("KXBTCD-26AUG17-S2", mve_collection_ticker="KXMVECROSS"),
+    ]])
+
+    _, text = scan(client, caplog)
+
+    assert "KXBTCD: 2 seen" in text

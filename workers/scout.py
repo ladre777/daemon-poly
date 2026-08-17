@@ -344,6 +344,34 @@ class Scout:
                     tally.skipped_group += 1
                 return
 
+            # Multi-value event shards: one market standing for a combination
+            # of legs ("team A wins AND index closes above X"). Kalshi labels
+            # them on the payload itself, so this reads their own fields rather
+            # than pattern-matching a ticker.
+            #
+            # They are excluded because nothing here can price them. A parlay
+            # resolves on the joint outcome of several events, and this bot has
+            # no joint model and no grounding source for one — the Maker is
+            # handed a title and guesses. In production that produced
+            # "model says 72% against a market at 0.7%", 5.97 in log-odds,
+            # which the coherence gate then refused. The whole round trip is a
+            # paid model call whose only possible output is a refusal.
+            #
+            # It is also a scale problem. One scan returned KXMVECROSSCATEGORY
+            # x1783 and KXMVESPORTSMULTIGAMEEXTENDED x934 — 2,717 of 2,863
+            # candidates — so they consume the per-pass model budget while the
+            # 15-minute, hourly and weather families wait behind them. And the
+            # sports shards are multi-game parlays, which is not golf, the one
+            # sport this operator has named as in scope.
+            if CONFIG.risk.skip_multi_event_shards and (
+                m.get("mve_collection_ticker") or m.get("mve_selected_legs")
+            ):
+                key = "multi-event shard (no joint model)"
+                rejected[key] = rejected.get(key, 0) + 1
+                if tally is not None:
+                    tally.skipped_group += 1
+                return
+
             # Everything past here is external data being turned into numbers
             # the trading logic will act on, so it is validated first. One
             # malformed market is skipped, not allowed to abort the scan.

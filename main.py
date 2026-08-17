@@ -46,6 +46,7 @@ from core.weather_client import NOAAClient
 from core.fred_client import FredClient
 from core.rti_runner import RTIFeedRunner
 from core.spot_price_client import SpotPriceClient
+from core.validation import clamp_text
 from core.telegram_client import TelegramClient
 from workers.quant_maker import QuantMaker
 from workers.arbitrage import ArbitrageScanner
@@ -465,7 +466,25 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         stats["checked"] += 1
         if not verdict.approved:
             stats["checker_rejected"] += 1
-        log.info("Checker verdict on %s: %s (conf %.2f)", candidate.ticker, verdict.verdict, verdict.confidence)
+        # The reasoning is logged, not just the verdict.
+        #
+        # This gate has rejected 100% of everything it has ever seen — 24 for
+        # 24 on a single pass, across weather and crypto, from both the LLM and
+        # the quant path. That is either a correct gate in front of bad
+        # proposals or a gate biased toward reject, and until now the logs
+        # could not tell those apart: only "reject (conf 0.65)" was recorded.
+        #
+        # It is the same blindness that let a 6.6%-annualized bitcoin survive a
+        # whole session. A refusal whose reason is invisible cannot be judged,
+        # and the temptation when a gate blocks everything is to loosen it,
+        # which is exactly the wrong move if the gate happens to be right.
+        if verdict.approved:
+            log.info("Checker verdict on %s: %s (conf %.2f)",
+                     candidate.ticker, verdict.verdict, verdict.confidence)
+        else:
+            log.info("Checker verdict on %s: %s (conf %.2f) — %s",
+                     candidate.ticker, verdict.verdict, verdict.confidence,
+                     clamp_text(verdict.reasoning, 400))
 
         # Risk runs against the snapshot as it stands right now, including
         # every order already placed earlier in this same pass — that is why
