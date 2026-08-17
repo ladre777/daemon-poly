@@ -3,7 +3,7 @@
 Handoff for the next session. **Read this, not chat history** — chat contains
 stale PR numbers and at least two claims I had to correct later.
 
-Last updated: 2026-08-17 17:00 UTC, end of the prod-cutover session.
+Last updated: 2026-08-17 17:20 UTC, end of the prod-cutover session.
 
 ---
 
@@ -13,8 +13,8 @@ Verify these rather than trusting them; they were true when written.
 
 | | |
 |---|---|
-| `main` | `#33` merged. Check `git log --oneline -8`. |
-| Tests | 859 passing locally, `ruff` clean. **CI was NOT read** — see below. |
+| `main` | `#34` merged. Check `git log --oneline -8`. |
+| Tests | 876 passing locally, `ruff` clean. **CI was NOT read** — see below. |
 | Railway | `env=prod`, `DRY_RUN=false` — **LIVE, REAL MONEY**, confirmed from the boot banner at 16:50. |
 | Live commit | `ddadc43`, deployment `65e6e4ea`, booted 16:50 UTC. Read `meta.commitHash`, never a green SUCCESS. |
 | Account | funded ~$49.98 |
@@ -104,8 +104,15 @@ reliable trigger.
   fixed strike, hourly window), which took it off the "unverified spec"
   refusal path. Census now reports 27 candidates on that family alone.
 
-What is left on item 3 is genuinely latency-aware behaviour — reacting inside
-the settlement window rather than merely being warm enough to price.
+- `#34` fixed the volatility estimate. It read 6.6% annualized for bitcoin
+  against a market implying 18.4%, because BRTI is a smoothed aggregate and we
+  sampled it at 5 seconds — inside its smoothing window. Sigma is now measured
+  across a ladder of sampling intervals, taking the largest, and the quant path
+  refuses outright when the estimate implies an implausible annualized vol.
+
+What is left on item 3 is confirming `#34` against the live feed (see below),
+and then genuinely latency-aware behaviour — reacting inside the settlement
+window rather than merely being warm enough to price.
 
 **Order pricing.** `#33` fixed a silent defect worth knowing about even though
 it is closed. Kalshi quotes some markets in tenths of a cent
@@ -145,194 +152,95 @@ exercise a code path that has never run end to end — reconciliation, fill
 recording, settlement and calibration writeback all included. Treat the first
 live trade as a test of the machinery, not as a trade.
 
-**`approved 0` on every pass observed so far**, and the reason is now known
-rather than suspected. On the LLM path the Checker rejects; on the quant path
-the coherence gate refuses every crypto proposal because the volatility
-estimate is ~3.5x too small. See "The single next action". Both are upstream
-of execution, so nothing has reached the exchange.
+**`approved 0` on every pass observed so far.** On the LLM path the Checker
+rejects. On the quant path the coherence gate refused every crypto proposal
+because the volatility estimate was ~3x too small — diagnosed and fixed in
+`#34`, but **not yet observed working against the live feed**. Both are
+upstream of execution, so nothing has reached the exchange.
 
 ---
 
 ## The single next action
 
-**The quant model's volatility estimate is roughly 3.5x too small. Fix that.**
+**Confirm the volatility fix in production, then read the calibration table.**
 
-This supersedes the previous "read the calibration table" instruction, which
-was written before the quant path had ever run. It has now run, and the answer
-it gave is much sharper than anything the calibration table would have said.
+The previous next action — "the quant model's sigma is ~3.5x too small" — was
+diagnosed and fixed in `#34`. What remains is verifying it against the live
+feed rather than against a simulation.
 
-### What the first warm pass showed
+### What was wrong, and what fixed it
 
-`ddadc43`, 16:51 UTC, the first pass in the bot's history with a warm
-volatility clock:
-
-```
-Pass funnel: 2962 candidate(s) -> quant 99 (no proposal 0, below edge 69),
-             llm 10 | proposed 35 -> checked 16 (rejected 16) -> approved 0
-```
-
-`no proposal 0` is the headline. Every prior pass read `no proposal 68` or
-`no proposal 73` — the quant path declining every candidate for want of
-history. It now prices all 99. Items `#30` and `#31` did what they were for.
-
-And every single crypto proposal was then refused by the coherence gate:
+The first pass with a warm clock (`ddadc43`, 16:51 UTC) priced every crypto
+candidate for the first time in the bot's history — `quant 99 (no proposal 0)`
+where every previous pass read `no proposal 68` — and the coherence gate then
+refused all of it:
 
 ```
-Refusing KXBTCD-26AUG2117-T65499.99: model says 0% against a market at 19.0%
-  — 5.46 in log-odds, over the 3.00 limit
-Refusing KXBTCD-26AUG2117-T62499.99: model says 100% against a market at 84.5%
-  — 5.21 in log-odds, over the 3.00 limit
+model says 0% against a market at 19.0%  — 5.46 in log-odds
+model says 100% against a market at 84.5% — 5.21 in log-odds
 ```
 
-Not one or two. All of them, on both assets, at horizons from 45 minutes to
-four days, always in the same direction: the model collapses to 0% or 100%
-where the market prices 7-20% or 76-94%.
+Back-solving sigma from two *adjacent* strikes on a ten-minute contract (a
+derivation that cancels spot, so it assumes nothing) put us at 6.6% annualized
+against the market's 18.4%. The same 1.18e-5 per-second figure appeared at ten
+minutes and at four days, so the sqrt(t) scaling was correct and the error was
+in the level.
 
-### The arithmetic
-
-`KXBTCD-26AUG2117` expires four days out, and its strike ladder back-solves to
-a strikingly consistent market view (spot ~$64,100):
-
-| strike | market | implied sigma (4d) | per-second |
-|---|---|---|---|
-| 65,500 | 19.0% | 2.46% | 4.19e-5 |
-| 66,000 | 11.5% | 2.43% | 4.14e-5 |
-| 66,500 |  7.5% | 2.55% | 4.34e-5 |
-| 63,000 | 76.5% | 2.40% | 4.08e-5 |
-| 62,500 | 84.5% | 2.49% | 4.24e-5 |
-
-Five strikes agreeing to within 6% on one number — that is a coherent implied
-surface, not noise. Our model, clipped at 0.1%/99.9% on the same strikes,
-implies a per-second sigma of at most 1.19e-5.
-
-Annualized, that is the whole story:
+The cause was the feed, not the arithmetic: BRTI is a deliberately smoothed
+cross-venue aggregate and `record_tick` sampled it every 5 seconds, inside its
+smoothing window. `#34` measures across a ladder of sampling intervals and
+takes the largest estimate, since averaging can destroy variance but never
+create it. On the production-equivalent input:
 
 ```
-market-implied BTC vol :  23.5%   <- plausible for a calm bitcoin regime
-our estimator          :   6.7%   <- not a credible number for bitcoin, ever
+tick 5.3%  15s 9.0%  30s 12.0%  60s 14.8%  120s 16.1%  300s 15.6%
+old 5.3%  ->  new 16.1%     (market implied 18.4%)
 ```
 
-6.7% annualized is roughly the volatility of a G10 currency pair. This needs
-no market to refute it. **Do not treat this as "the market disagrees with us"
-— treat it as an estimator bug**, and note the corollary: the 69 candidates
-counted `below edge` in that funnel were scored with the same broken sigma, so
-that number means nothing yet either.
+and the market that logged `model says 100% against a market at 84.5%` prices
+at 86.6% with the recovered sigma.
 
-(The 23.5% figure above comes from the four-day ladder, which assumed spot
-~$64,100. The spot-free derivation in the next section puts the market at
-18.4% on a ten-minute market. Both are in the same place; the ten-minute one
-is the stronger evidence because it assumes nothing.)
+### Verify it live
 
-### It is a level error, not a scaling error
-
-The sharpest measurement comes from `KXBTCD-26AUG1713`, expiring 17:00Z and
-logged at 16:52Z — about **ten minutes** to expiry — on two *adjacent* strikes
-$100 apart:
+Startup now logs the signature. Read it first:
 
 ```
-T63999.99   market 84.5%   model 100%
-T64099.99   market 17.5%   model   1%
+railway logs | grep "Volatility signature"
 ```
 
-Using the gap between two adjacent strikes cancels spot entirely: only the
-log-spacing and the two prices are needed, so this derivation assumes nothing.
+Expect something like `tick 6%  15s 10%  30s 13%  60s 16%  120s 18%  300s 18%`
+— climbing then flattening. Then:
+
+- **If it climbs and plateaus in the high teens or above**, the fix is working
+  on real data and the diagnosis was right.
+- **If it is flat and low at every rung**, smoothing is not the mechanism and
+  the fix is treating the wrong cause. Do not paper over it — the sanity band
+  will refuse to price, which is the correct outcome, and the next place to
+  look is whether the stored series carries runs of identical prices.
+- **If the quant path now logs `outside the plausible band`**, the estimate is
+  still broken. That refusal is doing its job; the answer is upstream.
+
+Then check what the coherence gate does with the corrected numbers:
 
 ```
-market per-second sigma  3.27e-5   (18.4% annualized)
-model  per-second sigma  1.18e-5   ( 6.6% annualized)
-understatement           2.78x
+railway logs | grep -E "Refusing|Maker edge" | head -40
 ```
 
-Now put that beside the four-day ladder:
+Disagreements should now be single-digit to low-double-digit percentage
+points rather than 0%-vs-19%. Log-odds distances under 3.00 will start
+reaching the Checker.
 
-| horizon | model per-second sigma | understatement |
-|---|---|---|
-| 10 minutes | 1.18e-5 | 2.78x |
-| 4 days | <=1.19e-5 | 3.5x |
+### Do not
 
-**The model's per-second sigma is the same number at both horizons.** The
-sqrt(t) scaling is working correctly and the model is internally consistent —
-what is wrong is the level of the per-second estimate itself, by a roughly
-constant ~3x (about 8x in variance).
+- **Do not widen `COHERENCE_MAX_LOG_ODDS`.** It caught this bug. If it starts
+  refusing again, that is information, not an obstacle.
+- **Do not apply a calibration multiplier** to make the model agree with the
+  market. That fits one observation and hides the mechanism.
+- **Do not lower `MIN_PLAUSIBLE_ANNUAL_VOL`** to get past a refusal.
 
-That rules out the explanation to reach for first. sqrt(t)-scaling a
-5-second sigma out to four days *is* a ~70,000x extrapolation and would
-normally be the prime suspect, but the error is already 2.78x at ten minutes,
-where there is no extrapolation at all — the estimator's own window is longer
-than the horizon it is pricing. Horizon effects explain the 2.78 -> 3.5 drift
-and nothing more.
+### Then, the calibration table
 
-### Where to look
-
-`PriceHistory.realized_vol` (`core/spot_price_client.py:171`) is correct as
-written — it normalises each log return by its own elapsed time, so uneven
-spacing is handled properly. So is the sqrt(t) scaling, per the table above.
-
-**Leading explanation: BRTI is a smoothed index, and we sample it at 5
-seconds.** CF Benchmarks' Real-Time Index is a deliberately smoothed
-aggregation across venues, built to resist manipulation rather than to
-reproduce tick-level variance. Smoothing suppresses high-frequency variance
-while leaving low-frequency moves intact, so realized vol measured at a
-sampling interval near or below the smoothing window is damped — by a
-roughly constant factor, at every horizon. That is exactly the signature
-observed.
-
-**The diagnostic that settles it**, from the buffer already on the production
-volume — no new data collection needed. Compute realized vol from the same
-stored series at several sampling intervals:
-
-```python
-from memory.price_store import PriceStore
-from core.spot_price_client import PriceHistory
-
-points = PriceStore().load("btc", max_age_seconds=3600)
-for step in (5, 15, 30, 60, 120, 300):
-    h = PriceHistory()
-    for at, p in points[::max(1, step // 5)]:
-        h.add(p, at)
-    v = h.realized_vol(lookback_seconds=3600)
-    print(step, v, v and f"{v * (365*24*3600)**0.5:.1%} annualized")
-```
-
-This is a volatility-signature plot, the standard test for microstructure
-damping. Read it as:
-
-- **sigma rises with sampling interval, then plateaus** -> smoothing confirmed.
-  The plateau is the honest sigma; estimate at or beyond that interval. Expect
-  the plateau near 18-23% annualized if this diagnosis is right.
-- **sigma flat across all intervals** -> smoothing is not the cause. Then check
-  whether the stored series carries runs of identical prices (nothing in
-  `record_tick` or `PriceHistory.add` rejects a repeated value). Note that
-  repeated ticks alone are *not* obviously biasing: a zero return followed by
-  one large return contributes the same sum of squares as the moves spread
-  evenly, so this inflates the estimator's variance rather than shifting its
-  level. It would have to be combined with something else to produce a
-  constant 3x.
-
-Sampling less often costs span — at a 300-second interval the same 500-point
-buffer covers many hours rather than 40 minutes — so `MIN_VOL_SPAN_SECONDS`
-and the retention window have to move together with any change here. That is
-a real design trade, not a one-line edit.
-
-Whatever the cause, the fix must keep the fail-closed property: a sigma that
-cannot be trusted means no trade, not a fudge factor. **Do not apply a
-calibration multiplier to make the numbers agree with the market** — that
-fits one observation and hides the mechanism. A defensible interim step is
-the opposite direction: refuse to price when the estimate implies an
-annualized vol outside a sanity band for the asset. That is a new refusal,
-not a loosened one, and it would have caught this on the first pass.
-
-### Meanwhile, nothing is at risk
-
-The coherence gate is refusing 100% of these, which is exactly what it exists
-for, and `approved 0` means no money has moved. Live trading can be left
-running: an uncalibrated model behind a working gate trades nothing. Do not
-widen `COHERENCE_MAX_LOG_ODDS` to "unblock" the funnel — that gate is the only
-thing standing between this estimator and the account.
-
-### Still worth doing, after the above
-
-Read the calibration table, which now has real rows to read:
+It now has real rows to read:
 
 ```python
 from memory.edge_store import EdgeStore
@@ -342,9 +250,10 @@ for row in EdgeStore().calibration_by_category():
 ```
 
 `refused` is the interesting mode: it answers whether the gates are turning
-down trades that would have won. Expect it to be dominated by
-`skipped_incoherent` crypto rows until the sigma above is fixed — which is
-itself the confirmation that the diagnosis was right.
+down trades that would have won. Rows written before `#34` were scored with
+the broken sigma, so `skipped_incoherent` crypto entries from before 17:00 on
+2026-08-17 describe the old estimator and should not be read as evidence about
+the gate. Judge the gate on rows written after that.
 
 ---
 
