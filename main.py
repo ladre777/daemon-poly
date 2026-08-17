@@ -27,6 +27,7 @@ from core.kalshi_client import KalshiClient, diagnose_auth_failure
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore, SignalAlertStore, signal_key
+from memory.price_store import PriceStore
 from workers.scout import Scout
 from workers.maker import Maker
 from workers.checker import Checker
@@ -678,8 +679,22 @@ def main():
     # declines cleanly in the meantime rather than falling back to spot.
     rti_runner = RTIFeedRunner() if CONFIG.risk.rti_feed_enabled else None
     spot_client = SpotPriceClient(
-        rti_feed=rti_runner.feed if rti_runner else None
+        rti_feed=rti_runner.feed if rti_runner else None,
+        price_store=PriceStore() if CONFIG.risk.persist_vol_history else None,
     )
+    # Reload what a previous process observed. The quant path needs
+    # MIN_VOL_SPAN_SECONDS of history before it prices anything, and that
+    # buffer used to be in memory only — so every redeploy reset the clock and
+    # the 15-minute and hourly crypto families never warmed up at all. The
+    # requirement is unchanged; the observations just survive a restart now.
+    restored = spot_client.restore_history()
+    if restored:
+        log.info("Restored volatility history: %s",
+                 ", ".join(f"{sym} {n} point(s)" for sym, n in sorted(restored.items())))
+    else:
+        log.info("No stored volatility history — the quant path starts cold "
+                 "and needs ~%.0fs of feed before it can price crypto.",
+                 CONFIG.risk.min_vol_span_seconds)
     if rti_runner is not None:
         # Every frame also feeds the volatility history. Without this the
         # estimate is built from one sample per scan pass, which needs the
@@ -791,6 +806,9 @@ def main():
                 # that is every prediction the bot makes, so without this the
                 # whole paper period produces no calibration data at all.
                 ledger.reconcile_forecasts()
+                # Once a pass is cheap and bounds how much history a crash
+                # can cost to one pass's worth of ticks.
+                spot_client.persist_history()
                 pass_count += 1
                 if args.reflect_every and pass_count % args.reflect_every == 0:
                     reflector.reflect()

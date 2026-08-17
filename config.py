@@ -274,6 +274,19 @@ class RiskConfig:
     # every row is reached eventually without any one pass being expensive.
     # 0 disables forecast grading entirely.
     forecast_reconcile_max_tickers: int = _int("FORECAST_RECONCILE_MAX_TICKERS", 25)
+    # Keep index observations across restarts, so the volatility clock is not
+    # reset by every redeploy.
+    #
+    # The quant path needs MIN_VOL_SPAN_SECONDS of observations before it will
+    # price anything. That buffer lived only in memory, and production
+    # redeploys often — so the 15-minute and hourly crypto families never
+    # priced once, in any run. This keeps the SAME 600 seconds of real ticks
+    # rather than lowering the bar.
+    persist_vol_history: bool = _bool("PERSIST_VOL_HISTORY", True)
+    # How far back stored observations stay useful. Older points are dropped
+    # on save and ignored on load: a container down for an hour must not come
+    # back and compute a "600-second span" across a 60-minute hole.
+    vol_history_retention_seconds: float = _float("VOL_HISTORY_RETENTION_SECONDS", 3600.0)
     # A print this many times away from the recent median is treated as a
     # feed glitch. Volatility sits in the denominator of the probability
     # calculation, so one bad tick distorts every market on that symbol for

@@ -211,7 +211,8 @@ class PriceHistory:
 
 
 class SpotPriceClient:
-    def __init__(self, timeout: float = 8.0, http=None, rti_feed=None):
+    def __init__(self, timeout: float = 8.0, http=None, rti_feed=None,
+                 price_store=None):
         #: Optional RTIFeed. When present, families whose spec says
         #: source="kalshi_rti" are priced off the CF Benchmarks index Kalshi
         #: relays, which is what actually settles them. When absent, those
@@ -230,9 +231,55 @@ class SpotPriceClient:
         self.fetch_counts: dict[str, int] = {}
         #: Last stored streaming observation per symbol, for downsampling.
         self._last_tick_at: dict[str, float] = {}
+        #: Durable backing for the volatility buffers. Without it every
+        #: restart resets the volatility clock and the quant path never warms
+        #: up — see memory/price_store.py.
+        self.price_store = price_store
 
     def close(self):
         self._http.close()
+
+    # -- durable history ---------------------------------------------------
+
+    def restore_history(self, symbols=None) -> dict[str, int]:
+        """Reload observations persisted by a previous process.
+
+        Returns points restored per symbol, so startup can say plainly
+        whether the quant path begins warm or cold.
+
+        Restoring is additive and safe: `PriceHistory.add` still rejects
+        out-of-order and outlier points, so a stale or corrupt row cannot
+        smuggle itself past the checks a live tick has to clear.
+        """
+        if self.price_store is None:
+            return {}
+        restored: dict[str, int] = {}
+        for symbol in (symbols or list(self.history) or ["btc", "eth"]):
+            points = self.price_store.load(symbol)
+            if not points:
+                continue
+            history = self.history.setdefault(symbol, PriceHistory())
+            added = sum(1 for at, price in points if history.add(price, at))
+            if added:
+                restored[symbol] = added
+                self._last_tick_at[symbol] = points[-1][0]
+        return restored
+
+    def persist_history(self) -> int:
+        """Write the current buffers out. Cheap enough to call once a pass.
+
+        Saves the whole rolling buffer rather than a delta; the store's
+        primary key makes re-saving overlapping points a no-op, which is what
+        keeps this correct without tracking what was already written.
+        """
+        if self.price_store is None:
+            return 0
+        written = 0
+        for symbol, history in self.history.items():
+            written += self.price_store.save(symbol, history.points)
+        if written:
+            self.price_store.prune()
+        return written
 
     # -- streaming observations --------------------------------------------
 
