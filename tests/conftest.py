@@ -33,6 +33,7 @@ _APP_FIELDS = (
     "llm_reasoning_categories",
     "priority_keywords",
     "max_llm_calls_per_pass",
+    "max_llm_calls_per_event",
     "scout_poll_seconds",
     "scout_max_pages",
 )

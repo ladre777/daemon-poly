@@ -231,6 +231,9 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
 
     filled_this_pass = 0
     llm_calls_this_pass = 0
+    #: Model calls spent per event this pass, so one strike ladder cannot
+    #: consume the whole budget. See the per-event cap below.
+    llm_calls_by_event: dict[str, int] = defaultdict(int)
     # Per-pass funnel counters. Without these, "Scout returned 2917 candidates"
     # followed by silence is indistinguishable from a crash, a threshold no
     # market cleared, and a category filter that matched nothing — three very
@@ -283,6 +286,30 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 if getattr(maker, "on_fallback", False)
                 else CONFIG.max_llm_calls_per_pass
             )
+            # An event that has already contradicted itself gets no further
+            # model calls. Production burned all ten calls in a pass on one
+            # oil contract's strike ladder and the coherence gate refused
+            # every one of them — so weather, crypto and golf saw no budget at
+            # all while the bot re-asked a question it had already proved the
+            # model could not answer.
+            if coherence_gate.is_tainted(candidate):
+                stats["llm_skipped_tainted"] += 1
+                continue
+
+            # Spread the budget across events rather than down one ladder.
+            # Ten strikes of the same contract are ten calls answering nearly
+            # the same question; a handful of different events is worth far
+            # more per call, and the whole budget landing on one of them is
+            # how the priority markets got starved.
+            event_key = candidate.event_ticker or candidate.ticker
+            per_event_cap = CONFIG.max_llm_calls_per_event
+            if (not is_priority and per_event_cap
+                    and llm_calls_by_event[event_key] >= per_event_cap):
+                stats["llm_capped_per_event"] += 1
+                log.debug("Event %s already used its %d call(s) this pass — "
+                          "skipping %s", event_key, per_event_cap, candidate.ticker)
+                continue
+
             if not is_priority and call_cap and llm_calls_this_pass >= call_cap:
                 stats["llm_capped"] += 1
                 log.debug("LLM call cap (%d) reached this pass — skipping non-priority %s",
@@ -304,6 +331,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 continue
             model_breaker.record_success()
             llm_calls_this_pass += 1
+            llm_calls_by_event[event_key] += 1
             stats["llm_called"] += 1
             if proposal is None:
                 stats["llm_below_edge_threshold"] += 1
@@ -495,13 +523,15 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # candidate went and therefore which stage to look at when nothing trades.
     log.info(
         "Pass funnel: %d candidate(s) -> quant %d (no proposal %d), llm %d "
-        "(below edge %d, failed %d, capped %d), no grounding source %d | "
+        "(below edge %d, failed %d, capped %d, per-event %d, tainted %d), "
+        "no grounding source %d | "
         "proposed %d -> checked %d (rejected %d, failed %d) -> approved %d "
         "-> filled %d",
         len(candidates),
         stats["quant_attempted"], stats["quant_no_proposal"],
         stats["llm_called"], stats["llm_below_edge_threshold"],
         stats["maker_failed"], stats["llm_capped"],
+        stats["llm_capped_per_event"], stats["llm_skipped_tainted"],
         stats["no_grounding_source"],
         stats["proposed"], stats["checked"], stats["checker_rejected"],
         stats["checker_failed"], stats["approved"], filled_this_pass,

@@ -115,6 +115,22 @@ class CoherenceGate:
     def begin_pass(self) -> None:
         self._events.clear()
 
+    def is_tainted(self, candidate) -> bool:
+        """Has this candidate's event already contradicted itself this pass?
+
+        Asked *before* the Maker runs, so a ladder that has already proved the
+        model is not reading its strikes costs nothing further. Without this
+        the gate still refuses the trade, but only after paying for the
+        proposal that produced it — and in production that was ten LLM calls
+        per pass on one oil contract, every one of them refused.
+        """
+        event = candidate.event_ticker or candidate.ticker
+        return any(
+            group.tainted
+            for key, group in self._events.items()
+            if key.rsplit("|", 1)[0] == event
+        )
+
     # -- gate 1: strike monotonicity ---------------------------------------
 
     def _check_monotonic(self, proposal) -> CoherenceReport:

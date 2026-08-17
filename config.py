@@ -419,6 +419,17 @@ class AppConfig:
     # Quant-path markets (crypto/commodities) aren't affected — no LLM call
     # to cap there. 0 = unlimited.
     max_llm_calls_per_pass: int = _int("MAX_LLM_CALLS_PER_PASS", 40)
+    # Model calls one event may consume in a single pass.
+    #
+    # Production spent all ten calls of every pass on ONE oil contract's
+    # strike ladder — ten near-identical questions — while weather, crypto
+    # and golf got none at all. Ten strikes of the same contract are worth far
+    # less than five different events, and once the coherence gate had refused
+    # that ladder the calls were not just poor value, they were wasted.
+    #
+    # Priority markets (PRIORITY_KEYWORDS) bypass this, as they do the
+    # per-pass cap. 0 disables it.
+    max_llm_calls_per_event: int = _int("MAX_LLM_CALLS_PER_EVENT", 2)
     # Tighter cap that applies while the Maker is running on its fallback
     # provider. The default cap is sized for Moonshot's price; the fallback
     # exists to keep the bot trading through an outage, not to run the same

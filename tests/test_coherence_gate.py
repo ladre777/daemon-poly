@@ -300,3 +300,137 @@ def test_run_once_refuses_an_incoherent_ladder_before_the_checker(
     assert refused[0]["checker_verdict"] is None, (
         "no verdict — the Checker was never asked, and the row must say so"
     )
+
+
+# --------------------------------------------------------------------------
+# budget diversification
+# --------------------------------------------------------------------------
+#
+# Production spent all ten model calls of every pass on ONE oil contract's
+# strike ladder, while weather, crypto and golf — the markets that actually
+# matter — got none at all. Worse, the coherence gate then refused that whole
+# ladder, so every one of those calls was wasted.
+
+
+def test_a_tainted_event_is_visible_before_the_next_model_call(gate):
+    """So the ladder can be skipped BEFORE paying for another proposal.
+
+    Without this the gate still refuses the trade, but only after the LLM
+    call that produced it.
+    """
+    first = proposal(84.99, 0.32)
+    assert not gate.is_tainted(first.candidate), "nothing seen yet"
+
+    gate.check(first)
+    contradiction = proposal(86.49, 0.45)
+    assert not gate.check(contradiction).ok
+
+    assert gate.is_tainted(proposal(83.49, 0.48).candidate), (
+        "every remaining strike on this event is now skippable"
+    )
+
+
+def test_taint_does_not_leak_across_events(gate):
+    gate.check(proposal(84.99, 0.32, event="KXWTI-A"))
+    gate.check(proposal(86.49, 0.45, event="KXWTI-A"))
+
+    assert gate.is_tainted(proposal(83.0, 0.5, event="KXWTI-A").candidate)
+    assert not gate.is_tainted(proposal(83.0, 0.5, event="KXRAIN-B").candidate)
+
+
+def test_taint_clears_between_passes(gate):
+    gate.check(proposal(84.99, 0.32))
+    gate.check(proposal(86.49, 0.45))
+    assert gate.is_tainted(proposal(83.0, 0.5).candidate)
+
+    gate.begin_pass()
+    assert not gate.is_tainted(proposal(83.0, 0.5).candidate)
+
+
+def test_one_event_cannot_eat_the_whole_model_budget(
+    client, order_store, edge_store, account, execution, risk, ledger
+):
+    """The production failure, as a test.
+
+    Twelve strikes of one contract plus two other events. Without a per-event
+    cap the ladder consumes everything and the other markets are never looked
+    at — which is exactly what starved weather and crypto.
+    """
+    import main
+    from tests.test_pass_loop import (
+        StubChecker, StubMaker, StubQuantMaker, StubScout, _positions_follow_fills,
+    )
+
+    CONFIG.risk.dry_run = True
+    CONFIG.max_llm_calls_per_event = 2
+    CONFIG.max_llm_calls_per_pass = 10
+    CONFIG.priority_keywords = []
+    CONFIG.llm_reasoning_categories = ["sports"]
+
+    ladder = [
+        make_candidate(ticker=f"KXWTI-A-T{i}", event_ticker="KXWTI-A")
+        for i in range(12)
+    ]
+    others = [
+        make_candidate(ticker="KXRAIN-B-SFO", event_ticker="KXRAIN-B"),
+        make_candidate(ticker="KXBTC-C-T1", event_ticker="KXBTC-C"),
+    ]
+    candidates = ladder + others
+    _positions_follow_fills(client, candidates)
+
+    class CountingMaker(StubMaker):
+        def __init__(self):
+            super().__init__()
+            self.seen: list[str] = []
+
+        def propose(self, candidate):
+            self.seen.append(candidate.event_ticker)
+            return super().propose(candidate)
+
+    maker = CountingMaker()
+    main.run_once(StubScout(candidates), maker, StubQuantMaker(), StubChecker(),
+                  risk, execution, ledger, account)
+
+    assert maker.seen.count("KXWTI-A") <= 2, (
+        f"the ladder took {maker.seen.count('KXWTI-A')} calls; the cap is 2"
+    )
+    assert "KXRAIN-B" in maker.seen, "weather must get a look in"
+    assert "KXBTC-C" in maker.seen, "crypto must get a look in"
+
+
+def test_priority_markets_still_bypass_the_per_event_cap(
+    client, order_store, edge_store, account, execution, risk, ledger
+):
+    """Golf is the one family the operator named as always-first, and it was
+    already exempt from the per-pass cap. Keep it exempt here too."""
+    import main
+    from tests.test_pass_loop import (
+        StubChecker, StubMaker, StubQuantMaker, StubScout, _positions_follow_fills,
+    )
+
+    CONFIG.risk.dry_run = True
+    CONFIG.max_llm_calls_per_event = 1
+    CONFIG.priority_keywords = ["golf"]
+    CONFIG.llm_reasoning_categories = ["sports"]
+
+    candidates = [
+        make_candidate(ticker=f"KXGOLF-T{i}", title="PGA golf winner",
+                       event_ticker="KXGOLF-A")
+        for i in range(4)
+    ]
+    _positions_follow_fills(client, candidates)
+
+    class CountingMaker(StubMaker):
+        def __init__(self):
+            super().__init__()
+            self.seen: list[str] = []
+
+        def propose(self, candidate):
+            self.seen.append(candidate.ticker)
+            return super().propose(candidate)
+
+    maker = CountingMaker()
+    main.run_once(StubScout(candidates), maker, StubQuantMaker(), StubChecker(),
+                  risk, execution, ledger, account)
+
+    assert len(maker.seen) == 4, "priority markets are not rationed per event"
