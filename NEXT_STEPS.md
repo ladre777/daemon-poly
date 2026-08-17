@@ -56,6 +56,18 @@ confirm which commit is actually live, read `meta.commitHash` from
 list-deployments, or check for a log line only the newest code emits — do not
 infer it from a green SUCCESS.
 
+**`get-status` hides failed attempts.** It reports the latest *active*
+deployment, not the latest *attempt*, so a newer failure is invisible there
+and the service looks fine. This led to a wrong diagnosis once
+("auto-deploy has stopped responding") when auto-deploy was working and the
+build was simply failing. Always use `list-deployments` to see attempts.
+
+**Auto-deploy on push works.** Builds are just flaky — roughly 3 successes in
+9 attempts on 2026-08-17, all failures stopping at
+`scheduling build on Metal builder` with no Docker steps. The remedy is to
+retry, not to hunt for a cause in the repo. Pushing a commit to `main` is a
+reliable trigger.
+
 ---
 
 ## What is DONE
