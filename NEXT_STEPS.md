@@ -3,7 +3,7 @@
 Handoff for the next session. **Read this, not chat history** — chat contains
 stale PR numbers and at least two claims I had to correct later.
 
-Last updated: 2026-08-17 17:35 UTC, end of the prod-cutover session.
+Last updated: 2026-08-18 02:55 UTC, after the overnight review.
 
 ---
 
@@ -13,16 +13,18 @@ Verify these rather than trusting them; they were true when written.
 
 | | |
 |---|---|
-| `main` | `1b431a5`, `#34` merged plus four follow-ups. Check `git log --oneline -8`. |
-| Tests | 880 passing locally, `ruff` clean. **CI was NOT read** — see below. |
+| `main` | `14728b7` — `#34` through `#40` merged. Check `git log --oneline -10`. |
+| Tests | 904 passing locally, `ruff` clean. **CI was NOT read** — see below. |
 | Railway | `env=prod`, `DRY_RUN=false` — **LIVE, REAL MONEY**, confirmed from the boot banner at 16:50. |
-| Live commit | `1b431a5`, deployment `0c8eae18`, booted 17:31 UTC. Read `meta.commitHash`, never a green SUCCESS. |
+| Live commit | `ae6b07e`, deployment `2ac82865`, booted 02:34 UTC 18 Aug. Read `meta.commitHash`, never a green SUCCESS. |
 | Account | funded ~$49.98 |
 | RTI feed | live on prod, subscribed to BRTI + ETHUSD_RTI |
-| Volatility clock | **starts warm now** (`Restored volatility history: btc 430 point(s), eth 431`). Sigma is measured across a sampling ladder and logged both at boot and per family per pass — the two agree, 52% vs 52.2% at 17:33. |
+| Volatility clock | **starts warm.** Ladder plateaus at 300s; sigma logged at boot and per family per pass. Retention is 4h. |
 | ESPN | **blocked for bots. Do not touch the ESPN client.** |
 | Web access from the agent sandbox | direct `curl` is blocked, but the proxy-backed WebSearch/WebFetch tools DO work — usable for research, not for testing whether an endpoint works from Railway |
-| NOAA | wired, never yet executed against a live weather market |
+| NOAA | wired and live — weather markets are proposed on it every pass |
+| Calibration | **has rows now** (`#38`, `#40`). Logged on every settlement. |
+| Fills | **none, ever.** No order has been filled in this bot's history. |
 
 **Fetch before you read `origin/main`.** A stale remote ref in this session
 made `#31` look unmerged when it was already on main, and produced `#32` — an
@@ -136,18 +138,9 @@ API reported no registered checks. It was merged on local evidence only — 813
 tests passing and `ruff` clean on that exact commit. Defensible, but not the
 same as green CI. Re-run the suite before building on it.
 
-**`#24` has not yet produced a single graded row.** The code is tested but the
-mechanism has never run against a real resolution — and cannot until the
-deploy above succeeds. First thing to check once it does:
-
-```
-railway logs | grep "Graded .* forecast row"
-```
-
-If that line never appears after a few hours, look at
-`Ledger.reconcile_forecasts` — most likely cause is `_market_result` returning
-nothing because markets have not resolved yet, which is benign, but confirm
-rather than assume.
+**`#24` now produces graded rows** — that entry used to say it never had, and
+the reason was not "markets have not resolved". It was head-of-line blocking,
+fixed in `#38`. Nine grading runs and ~28 rows landed overnight.
 
 **No fill has ever completed, in the entire history of this bot.** Not one
 order has ever been executed, in demo or prod. The first live fill will
