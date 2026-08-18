@@ -56,6 +56,25 @@ class Verdict:
 class Checker:
     def __init__(self):
         self._client = anthropic.Anthropic(api_key=CONFIG.models.anthropic_api_key)
+        # Say which model decides every trade, the way Maker already does.
+        #
+        # The Maker prints "Maker LLM: primary=... fallback=..." at startup and
+        # the Checker printed nothing, so the model standing between a proposal
+        # and the account could only be established by reading config.py and
+        # then checking whether CHECKER_MODEL was set in the environment. Two
+        # lookups, one of them outside the repo, to answer "what is judging
+        # this?".
+        #
+        # max_tokens and effort are on the same line deliberately: they are not
+        # incidental. Those two are what a truncated verdict is diagnosed from,
+        # and a verdict cut off mid-JSON is discarded entirely — see the
+        # stop_reason handling below.
+        log.info(
+            "Checker LLM: model=%s max_tokens=%d effort=%s",
+            CONFIG.models.checker_model,
+            CONFIG.models.checker_max_tokens,
+            CONFIG.models.checker_effort,
+        )
 
     def check(self, proposal: Proposal) -> Verdict:
         c = proposal.candidate

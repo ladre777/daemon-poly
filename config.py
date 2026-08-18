@@ -49,6 +49,13 @@ def _floats(name: str, default: tuple) -> tuple:
     return parsed or default
 
 
+#: Explicitly cheap model the Maker's Anthropic fallback uses when nothing
+#: else is configured. Named here rather than inlined so config.py and
+#: core/llm_client.py resolve the same value, and so "what does the
+#: high-volume path cost when it degrades" has one answer.
+DEFAULT_MAKER_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+
+
 @dataclass
 class KalshiConfig:
     env: str = os.getenv("KALSHI_ENV", "demo")  # "demo" or "prod"
@@ -143,9 +150,16 @@ class ModelConfig:
     # pass) and the Checker is the low-volume one (only on proposals that
     # already cleared an edge threshold). Running the Maker's volume through
     # the Checker's model is how a fallback meant to keep the bot alive turns
-    # into a bill larger than the trading account. Haiku by default.
+    # into a bill larger than the trading account.
+    #
+    # The constant is shared with core/llm_client.py so the two cannot drift.
+    # That mattered: llm_client used to resolve an empty value with
+    # `... or models_config.checker_model`, so setting MAKER_FALLBACK_MODEL=""
+    # silently routed every Maker call onto whatever the Checker was running —
+    # exactly the bill this comment warns about, with the warning sitting one
+    # file away from the code that ignored it.
     maker_fallback_model: str = os.getenv(
-        "MAKER_FALLBACK_MODEL", "claude-haiku-4-5-20251001"
+        "MAKER_FALLBACK_MODEL", DEFAULT_MAKER_FALLBACK_MODEL
     )
 
     # Grounding data sources (not LLMs, but live here alongside the other

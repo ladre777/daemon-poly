@@ -39,6 +39,7 @@ from typing import Optional
 
 import httpx
 
+from config import DEFAULT_MAKER_FALLBACK_MODEL
 from core.errors import CircuitBreaker, Severity, SystemicError, classify
 
 log = logging.getLogger("daemon_kalshi.llm")
@@ -474,9 +475,33 @@ def build_maker_llm(models_config) -> MakerLLM:
         model=models_config.moonshot_model,
         timeout=getattr(models_config, "maker_timeout_seconds", 15.0),
     )
+    # Never checker_model.
+    #
+    # This used to read `... or models_config.checker_model`, so an empty
+    # MAKER_FALLBACK_MODEL silently routed the Maker's high-volume path — tens
+    # of calls per pass — onto whatever the Checker happened to be configured
+    # with. The Checker is the low-volume path and is chosen for judgement
+    # quality, not unit cost, so that inheritance points the expensive model at
+    # the expensive workload. config.py has warned about exactly this in prose
+    # since the fallback was added; the code one file over did it anyway.
+    #
+    # It now degrades to a fixed, explicitly cheap model and says so, rather
+    # than raising. A cost guardrail should not be able to take an unattended
+    # trading bot offline — but it must not be silent either, so the warning
+    # names both the variable and the model actually in use.
+    fallback_model = (getattr(models_config, "maker_fallback_model", "") or "").strip()
+    if not fallback_model:
+        fallback_model = DEFAULT_MAKER_FALLBACK_MODEL
+        log.warning(
+            "MAKER_FALLBACK_MODEL is empty — the Maker's Anthropic fallback "
+            "will use %s. It will NOT inherit CHECKER_MODEL (%s): the Maker "
+            "runs tens of calls per pass and the Checker only a handful, so "
+            "that inheritance puts the costlier model on the heavier path.",
+            fallback_model, getattr(models_config, "checker_model", "unset"),
+        )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,
-        model=getattr(models_config, "maker_fallback_model", "") or models_config.checker_model,
+        model=fallback_model,
     )
 
     if preference == "moonshot":

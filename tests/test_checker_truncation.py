@@ -271,3 +271,42 @@ def test_the_prompt_carries_the_market_close_time(monkeypatch):
 def test_no_threshold_moved_with_it():
     """This change informs the gate; it does not weaken it."""
     assert CONFIG.risk.checker_min_confidence >= 0.6
+
+
+# -- the Checker announces itself at boot ----------------------------------
+
+
+def test_the_checker_logs_its_model_at_startup(caplog, monkeypatch):
+    """Maker prints "Maker LLM: primary=... fallback=..." on startup; the
+    Checker printed nothing. So the model standing between a proposal and the
+    account could only be established by reading config.py and then checking
+    whether CHECKER_MODEL was set in the environment — two lookups, one of
+    them outside the repo, to answer "what is judging this?"."""
+    import anthropic
+
+    from workers.checker import Checker
+
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: object())
+
+    with caplog.at_level("INFO"):
+        Checker()
+
+    assert "Checker LLM:" in caplog.text
+    assert CONFIG.models.checker_model in caplog.text
+
+
+def test_it_also_reports_the_budget_levers(caplog, monkeypatch):
+    """max_tokens and effort are not incidental — they are what a truncated
+    verdict is diagnosed from, and a verdict cut off mid-JSON is discarded
+    entirely."""
+    import anthropic
+
+    from workers.checker import Checker
+
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: object())
+
+    with caplog.at_level("INFO"):
+        Checker()
+
+    assert f"max_tokens={CONFIG.models.checker_max_tokens}" in caplog.text
+    assert f"effort={CONFIG.models.checker_effort}" in caplog.text

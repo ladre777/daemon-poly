@@ -428,3 +428,81 @@ def test_first_text_block_skips_empty_text_blocks():
     from core.llm_client import first_text_block
 
     assert first_text_block(_Response([_Block(""), _Block("real")])) == "real"
+
+
+# -- the fallback must never inherit the Checker's model -------------------
+#
+# build_maker_llm used to resolve an empty MAKER_FALLBACK_MODEL with
+# `... or models_config.checker_model`, so clearing the variable silently
+# routed the Maker's high-volume path -- tens of calls per pass -- onto
+# whatever the Checker was configured with. The Checker is the low-volume
+# path and is picked for judgement quality, not unit cost, so that
+# inheritance points the expensive model at the expensive workload.
+# config.py had warned about exactly this in prose since the fallback was
+# added; the code one file over did it anyway.
+
+
+def _models(fallback, checker="claude-sonnet-5"):
+    from config import ModelConfig
+
+    m = ModelConfig()
+    m.maker_fallback_model = fallback
+    m.checker_model = checker
+    m.anthropic_api_key = "test-key"
+    m.moonshot_api_key = "test-key"
+    return m
+
+
+def test_an_empty_fallback_does_not_inherit_the_checker_model():
+    from core.llm_client import build_maker_llm
+
+    llm = build_maker_llm(_models("", checker="some-expensive-model"))
+
+    assert llm.fallback.model != "some-expensive-model"
+
+
+def test_an_empty_fallback_uses_the_explicit_cheap_default():
+    from config import DEFAULT_MAKER_FALLBACK_MODEL
+    from core.llm_client import build_maker_llm
+
+    llm = build_maker_llm(_models(""))
+
+    assert llm.fallback.model == DEFAULT_MAKER_FALLBACK_MODEL
+
+
+def test_a_whitespace_only_fallback_is_treated_as_empty():
+    from config import DEFAULT_MAKER_FALLBACK_MODEL
+    from core.llm_client import build_maker_llm
+
+    llm = build_maker_llm(_models("   "))
+
+    assert llm.fallback.model == DEFAULT_MAKER_FALLBACK_MODEL
+
+
+def test_degrading_is_loud(caplog):
+    """A cost guardrail must not silently take effect. It also must not take
+    an unattended trading bot offline, which is why this warns rather than
+    raising -- so the warning has to name the variable AND the model in use."""
+    from core.llm_client import build_maker_llm
+
+    with caplog.at_level("WARNING"):
+        build_maker_llm(_models("", checker="some-expensive-model"))
+
+    assert "MAKER_FALLBACK_MODEL" in caplog.text
+    assert "some-expensive-model" in caplog.text
+
+
+def test_an_explicit_fallback_is_honoured_unchanged():
+    from core.llm_client import build_maker_llm
+
+    llm = build_maker_llm(_models("claude-haiku-4-5-20251001"))
+
+    assert llm.fallback.model == "claude-haiku-4-5-20251001"
+
+
+def test_config_and_client_share_one_default():
+    """Two places resolving "what does the degraded path cost" must not be
+    able to drift apart."""
+    from config import DEFAULT_MAKER_FALLBACK_MODEL, ModelConfig
+
+    assert ModelConfig().maker_fallback_model == DEFAULT_MAKER_FALLBACK_MODEL
