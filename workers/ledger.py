@@ -254,10 +254,60 @@ class Ledger:
                 pnl = _counterfactual_pnl(row, result["result"])
                 self.store.settle(row["id"], result["result"], pnl)
                 settled += 1
+                # Each graded row, individually.
+                #
+                # The aggregate count alone cannot answer the question these
+                # rows exist for: "the Checker rejected a 45-point edge on
+                # KXHIGHCHI-T78 — was it right?" That needs the ticker, what
+                # the model said, what happened, and what the refusal cost or
+                # saved. Cheap: this fires only when a market actually
+                # resolves, a few times an hour.
+                log.info(
+                    "Settled forecast %s (%s/%s): model said %.0f%%, market "
+                    "%.0f%%, outcome %s, counterfactual PnL $%.2f",
+                    row["ticker"], row.get("category") or "?",
+                    row.get("action_taken") or "?",
+                    (row.get("maker_probability") or 0.0) * 100,
+                    (row.get("market_implied_probability") or 0.0) * 100,
+                    result["result"].upper(), pnl or 0.0,
+                )
         if settled:
             log.info("Graded %d forecast row(s) across %d resolved market(s)",
                      settled, len(by_ticker))
+            self._log_calibration()
         return settled
+
+    def _log_calibration(self) -> None:
+        """Print the calibration table whenever new rows land in it.
+
+        Nothing surfaced this before, so the one measurement built to say
+        whether the gates are refusing correctly could only be read by opening
+        the database on the production volume — which is not somewhere an
+        operator, or a future session, is going to look. Every other number
+        that mattered today was wrong in a way the logs did not show, which is
+        precisely the failure this closes.
+
+        Emitted on settlement rather than per pass, so it appears exactly when
+        it has changed.
+        """
+        try:
+            rows = self.store.calibration_by_category()
+        except Exception:
+            log.exception("Could not read the calibration table — continuing")
+            return
+        if not rows:
+            return
+        for row in sorted(rows, key=lambda r: (r["mode"], -(r["n"] or 0))):
+            log.info(
+                "Calibration [%s] %s/%s: n=%d  brier=%.3f  said %.0f%% "
+                "actual %.0f%%  pnl $%.2f",
+                row["mode"], row["category"] or "?", row["source"] or "?",
+                row["n"] or 0,
+                row["brier_score"] if row["brier_score"] is not None else -1.0,
+                (row["avg_maker_probability"] or 0.0) * 100,
+                (row["actual_yes_rate"] or 0.0) * 100,
+                row["total_pnl"] or 0.0,
+            )
 
     def _settle_fill(self, ticker: str, fill: dict, result: dict) -> bool:
         side = (fill["side"] or "").lower()

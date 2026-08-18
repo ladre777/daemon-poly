@@ -380,3 +380,72 @@ def test_close_time_survives_a_round_trip(edge_store):
     row = edge_store.unsettled_forecast_edges()[0]
 
     assert row["close_time"] == pytest.approx(close)
+
+
+# -- the calibration table has to be readable ------------------------------
+
+
+def test_settling_a_forecast_logs_the_row_and_the_table(ledger, edge_store,
+                                                        client, caplog):
+    """Grading that nobody can read answers nothing.
+
+    The whole point of #24 is to say whether the gates are refusing correctly,
+    and until now that measurement could only be read by opening the database
+    on the production volume. Meanwhile the aggregate "Graded 2 forecast
+    row(s)" cannot answer the question the rows exist for: the Checker
+    rejected a 45-point edge on KXHIGHCHI-T78 — was it right?
+    """
+    import time
+
+    from memory.edge_store import EdgeRecord
+
+    edge_store.record_edge(EdgeRecord(
+        ticker="KXHIGHCHI-26AUG17-T78",
+        category="Weather",
+        source="llm",
+        maker_probability=0.88,
+        market_implied_probability=0.425,
+        action_taken="skipped_risk",
+        counterfactual_price_cents=43.0,
+        counterfactual_direction="yes",
+        close_time=time.time() - 3600,
+    ))
+    client.markets["KXHIGHCHI-26AUG17-T78"] = {
+        "ticker": "KXHIGHCHI-26AUG17-T78", "result": "no",
+    }
+
+    with caplog.at_level("INFO"):
+        assert ledger.reconcile_forecasts() == 1
+
+    # The individual outcome, with everything needed to judge the refusal.
+    assert "KXHIGHCHI-26AUG17-T78" in caplog.text
+    assert "model said 88%" in caplog.text
+    assert "outcome NO" in caplog.text
+    # And the table it rolls up into.
+    assert "Calibration [refused]" in caplog.text
+    assert "Weather" in caplog.text
+
+
+def test_a_broken_calibration_read_cannot_stop_grading(ledger, edge_store,
+                                                       client, caplog,
+                                                       monkeypatch):
+    """Reporting is observability, not control flow. A failure printing the
+    summary must not roll back settlements that already committed."""
+    import time
+
+    from memory.edge_store import EdgeRecord
+
+    edge_store.record_edge(EdgeRecord(
+        ticker="KXBTC-X", category="Crypto", maker_probability=0.6,
+        market_implied_probability=0.5, action_taken="skipped_risk",
+        counterfactual_price_cents=50.0, counterfactual_direction="yes",
+        close_time=time.time() - 60,
+    ))
+    client.markets["KXBTC-X"] = {"ticker": "KXBTC-X", "result": "yes"}
+    monkeypatch.setattr(
+        edge_store, "calibration_by_category",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with caplog.at_level("INFO"):
+        assert ledger.reconcile_forecasts() == 1
