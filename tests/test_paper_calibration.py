@@ -344,20 +344,51 @@ def test_recently_closed_markets_come_first(edge_store):
     assert queued[0] == "JUST-CLOSED"
 
 
-def test_legacy_rows_without_a_close_time_sort_last_but_remain_reachable(
+def test_legacy_rows_fall_back_to_creation_time_rather_than_sorting_last(
     edge_store
 ):
-    """Rows written before the column existed carry NULL. They must not block
-    the closed-market queue, and must not be silently dropped either."""
+    """Rows written before close_time existed carry NULL.
+
+    Sorting them behind every non-NULL row made "last" permanent in practice:
+    crypto hourlies close continuously and kept arriving ahead of them, so a
+    legacy row was never reached. A row that can never be reached is not
+    deprioritised, it is dropped — silently, which is the property this whole
+    mechanism exists to avoid.
+
+    They now order by created_at, which is the closest stand-in the row
+    carries for when its market resolved.
+    """
     import time
 
     now = time.time()
-    _edge(edge_store, "LEGACY", None)
-    _edge(edge_store, "CLOSED", now - 60)
+    _edge(edge_store, "LEGACY-RECENT", None)
+    _edge(edge_store, "CLOSED-OLD", now - 10 * 86400)
 
     queued = [r["ticker"] for r in edge_store.unsettled_forecast_edges()]
 
-    assert queued == ["CLOSED", "LEGACY"]
+    # The legacy row was created just now, so it outranks a market that
+    # closed ten days ago rather than queueing behind it.
+    assert queued == ["LEGACY-RECENT", "CLOSED-OLD"]
+
+
+def test_a_recently_closed_market_still_outranks_an_older_legacy_row(
+    edge_store
+):
+    """The fallback must not invert the main ordering: calibration still wants
+    the most recently resolved markets first."""
+    import sqlite3
+    import time
+
+    now = time.time()
+    legacy = _edge(edge_store, "LEGACY-OLD", None)
+    with sqlite3.connect(edge_store.db_path) as c:
+        c.execute("UPDATE edges SET created_at=? WHERE id=?",
+                  (now - 10 * 86400, legacy))
+    _edge(edge_store, "JUST-CLOSED", now - 60)
+
+    queued = [r["ticker"] for r in edge_store.unsettled_forecast_edges()]
+
+    assert queued == ["JUST-CLOSED", "LEGACY-OLD"]
 
 
 def test_executed_rows_are_still_excluded(edge_store):

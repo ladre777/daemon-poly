@@ -233,9 +233,18 @@ class EdgeStore:
         the queue and were never reached. The bot ran for hours with hourly
         markets settling continuously and graded exactly zero rows.
 
-        Rows written before close_time existed carry NULL and sort last, so
-        they are still reachable once the closed-market queue drains, but they
-        can no longer block it.
+        Rows written before close_time existed carry NULL. They fall back to
+        ``created_at`` for ordering rather than sorting behind every non-NULL
+        row: "last" was permanent in practice, because crypto hourlies close
+        continuously and kept arriving ahead of them. A row that can never be
+        reached is not deprioritised, it is dropped — silently, which is the
+        property this whole mechanism exists to avoid.
+
+        COALESCE also keeps the ordering honest for the rows that do have a
+        close time. Most recently closed still comes first; a legacy row simply
+        takes its creation time as the best available stand-in for when its
+        market resolved, which is the closest thing to true that the row
+        carries.
         """
         with self._conn() as c:
             rows = c.execute(
@@ -243,7 +252,7 @@ class EdgeStore:
                 "AND action_taken != 'executed' "
                 "AND maker_probability IS NOT NULL "
                 "AND (close_time IS NULL OR close_time <= ?) "
-                "ORDER BY (close_time IS NULL), close_time DESC LIMIT ?",
+                "ORDER BY COALESCE(close_time, created_at) DESC LIMIT ?",
                 (time.time(), limit),
             ).fetchall()
             return [dict(r) for r in rows]
