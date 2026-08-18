@@ -165,51 +165,92 @@ upstream of execution, so nothing has reached the exchange.
 
 ## The single next action — READ THIS FIRST
 
-**Read the calibration table. For the first time, it can actually have rows.**
+**Split the calibration table by time, then re-read it. Do not touch a
+threshold before you do.**
 
-```python
-from memory.edge_store import EdgeStore
-for row in EdgeStore().calibration_by_category():
-    print(row["mode"], row["category"], row["source"], row["n"],
-          row["brier_score"], row["total_pnl"])
+The table has rows for the first time in the bot's history, and the first row
+says something important:
+
+```
+Calibration [refused] Crypto/quant: n=64  brier=0.175  said 46% actual 45%  pnl $12.75
 ```
 
-`#38` fixed the reason it was always empty, and the reason was not what the
-earlier notes assumed.
+Read carefully, that is the gates refusing trades that would have won:
 
-### Why grading never once ran
+| | |
+|---|---|
+| Brier | 0.175 against a climatology baseline of 0.2475 — a **+29% skill score** |
+| Calibration | said 46%, actual 45% — one point off in aggregate |
+| Counterfactual PnL | **+$12.75** over 64 forecasts, $0.199/contract |
 
-`#24` built forecast grading in the afternoon and it produced **zero rows in
-the entire history of the bot** — including a 4.4-hour uninterrupted run
-during which crypto hourly markets resolved every hour.
+At a plausible per-row spread of $0.3-0.7 that PnL carries t = 2.3 to 5.3. The
+model has genuine skill and the refused trades were profitable.
 
-Head-of-line blocking. `unsettled_forecast_edges` selected oldest-first with
-no close-time filter, and `reconcile_forecasts` takes only the first
-`FORECAST_RECONCILE_MAX_TICKERS` (25) distinct tickers from it. A market
-that is still open returns no result, and nothing recorded that it had been
-asked — so the same 25 oldest tickers were re-queried every pass, forever.
-The oldest rows were multi-day contracts and cross-category parlay shards,
-markets resolving months out or never. The window sat on them permanently.
+**And it is still not enough to act on.** Four reasons, and the third is
+disqualifying on its own:
 
-It stayed invisible because a wasted lookup and an unresolved market look
-identical: both return nothing.
+1. n=64, one category, one source.
+2. Counterfactual PnL assumes a fill at the quote available when the decision
+   was made. Real fills slip.
+3. **These rows span two different models.** Grading only started tonight, but
+   the rows themselves are older — many were written before 17:00 on
+   2026-08-17, when sigma was 6.6% annualized and every crypto probability was
+   pinned at 0% or 100%. This number may be measuring a model that no longer
+   exists.
+4. Aggregate calibration hides offsetting errors: a mix of over- and
+   under-confident forecasts averages to "well calibrated".
 
-Edges now carry `close_time`; the reconciler asks only about markets that
-could have resolved, most recently closed first. Crypto hourlies close
-constantly, which is exactly what calibration wants. Expect `Graded N
-forecast row(s)` within an hour of the deploy — **if it is still silent after
-that, something else is wrong and it is the first thing to chase.**
+So the next action is to make (3) answerable. `calibration_by_category` groups
+by category, source and mode; it needs a time dimension too — either a
+`since` parameter or a bucket by day — so the pre- and post-fix regimes can be
+read apart. Then re-read, and only then consider whether any gate is too
+tight.
 
-### What to look for once there are rows
+The logging from `#40` fires on every settlement, so the table keeps filling
+on its own. By morning n should be substantially larger.
 
-`refused` is the mode that matters: it grades what the gates turned down.
-Discard rows created before 17:00 on 2026-08-17 — those were scored with the
-broken sigma.
+**Do not lower `MIN_EDGE_THRESHOLD`, raise `CHECKER_MIN_CONFIDENCE` or widen
+`COHERENCE_MAX_LOG_ODDS` on the strength of one aggregate row that mixes two
+model regimes.** Two wrong calls were made today by reasoning from a single
+observation; this is the same shape.
 
-- **Good Brier and positive counterfactual PnL on `refused`** → the gates are
-  turning down winners, and that is where the edge is being lost.
-- **Poor Brier on `refused`** → the gates are right and the work is upstream
-  in proposal quality. Do not touch a threshold.
+---
+
+## What the overnight review found (2026-08-18, ~02:50 UTC)
+
+**Forecast grading runs now.** `#38` fixed head-of-line blocking and produced
+nine grading runs and ~28 rows overnight, after producing exactly zero in the
+bot's entire prior history.
+
+**The calibration table is visible.** `#40` logs it on every settlement, plus
+each graded row individually. It had been readable only by opening SQLite on
+the production volume — the same blindness as the volatility estimate, one
+level up.
+
+**The Checker date fix worked, and immediately found a real defect in the
+Maker.** Its weather reasoning went from *"NWS forecasts don't extend 2+ years
+out, so the Maker's claimed forecast is almost certainly a hallucination"* to:
+
+```
+same-day forecast errors are much smaller (often <2°F) than the 3-4°F the
+Maker assumes
+A forecast of 86°F is only 1°F above threshold, well within typical forecast
+error margins
+```
+
+**That is the same bug as the crypto volatility problem, in the weather
+path**: overstated uncertainty inflating the chance of a threshold miss, which
+manufactures edge that is not there. Different path, identical shape. Worth
+fixing next after the calibration split — the Maker should use realistic
+same-day NWS error (~1-2°F), not 3-4°F.
+
+**Nothing has traded.** `approved 0 -> filled 0` on every pass, before and
+after the date fix. No fill has ever occurred in this bot's history.
+
+**Off-mandate scanning.** MLB player props (`KXMLBKS-...`) are being scanned
+and consuming Checker calls. They are not parlay shards so `#36` did not
+exclude them, and golf is the only sports priority. Costs money, not
+correctness.
 
 ---
 
