@@ -344,6 +344,21 @@ class Scout:
                     tally.skipped_group += 1
                 return
 
+            # Golf is the only sport in scope, and "Sports" cannot express
+            # that on its own — golf and MLB share the group, so dropping
+            # Sports from SCOUT_CATEGORIES would drop golf with it. Without
+            # this, MLB player props reached the Checker and spent model
+            # budget on a sport nobody asked to trade, with no grounding
+            # source behind it.
+            allowed_sports = CONFIG.risk.scout_sports_categories
+            if (group.lower() == "sports" and allowed_sports
+                    and (taxonomy_category or "").lower() not in allowed_sports):
+                key = f"Sports/{taxonomy_category or '?'} (out of scope)"
+                skipped_by_group[key] = skipped_by_group.get(key, 0) + 1
+                if tally is not None:
+                    tally.skipped_group += 1
+                return
+
             # Multi-value event shards: one market standing for a combination
             # of legs ("team A wins AND index closes above X"). Kalshi labels
             # them on the payload itself, so this reads their own fields rather
@@ -367,7 +382,7 @@ class Scout:
                 m.get("mve_collection_ticker") or m.get("mve_selected_legs")
             ):
                 key = "multi-event shard (no joint model)"
-                rejected[key] = rejected.get(key, 0) + 1
+                skipped_by_group[key] = skipped_by_group.get(key, 0) + 1
                 if tally is not None:
                     tally.skipped_group += 1
                 return

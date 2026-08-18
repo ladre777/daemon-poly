@@ -555,3 +555,46 @@ def test_the_refusal_is_logged_once_per_family_not_per_strike(caplog):
 
     assert caplog.text.count("is the wrong quantity") <= 1
     assert caplog.text.count("over the") <= 1
+
+
+# -- the boot diagnostic must be able to show every rung --------------------
+
+
+def test_every_configured_rung_can_clear_minimums_at_the_logged_lookback():
+    """The boot logger used to call vol_signature() with its 3600s default.
+
+    MIN_VOL_OBSERVATIONS is 10, so at a one-hour lookback the 600s rung gets
+    6 observations and can NEVER clear it, however deep the buffer. The 300s
+    rung gets 12, barely over. Production logged exactly that:
+
+        btc  tick 16%  15s 26%  30s 35%  60s 48%  120s 58%  300s 62%  600s n/a
+
+    and "600s n/a" read like a warm-up artifact when it was structural — the
+    two rungs past the knee were the ones being suppressed, which is
+    precisely the region the ladder exists to measure.
+    """
+    lookback = CONFIG.risk.vol_history_retention_seconds
+
+    for interval in CONFIG.risk.vol_sample_intervals:
+        if not interval:
+            continue
+        assert lookback / interval >= CONFIG.risk.min_vol_observations, (
+            f"{interval}s rung gets only {lookback / interval:.0f} "
+            f"observations at the logged {lookback:.0f}s lookback"
+        )
+
+
+def test_the_boot_logger_uses_the_retention_window_not_the_default():
+    """Behavioural, not a source grep: a history holding more than an hour
+    must report the 600s rung rather than n/a."""
+    import main
+
+    h = history_from(smoothed(diffusion(n=14400, annual_vol=0.70), window=60))
+
+    at_default = dict(h.vol_signature())
+    at_retention = dict(h.vol_signature(CONFIG.risk.vol_history_retention_seconds))
+
+    assert at_default.get(600.0) is None, "3600s lookback cannot reach 600s"
+    assert at_retention.get(600.0) is not None, "retention lookback should"
+    # And the boot logger is the one reading the retention window.
+    assert "vol_history_retention_seconds" in main._log_vol_signature.__code__.co_names

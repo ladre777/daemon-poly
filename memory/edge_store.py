@@ -248,7 +248,8 @@ class EdgeStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def calibration_by_category(self) -> list[dict]:
+    def calibration_by_category(self, since: float = None,
+                                until: float = None) -> list[dict]:
         """
         For each (category, source): how often did Maker's stated
         probability track reality, and — more rigorously than PnL alone —
@@ -274,7 +275,27 @@ class EdgeStore:
 
         Averaging them would let paper results dress up as realized ones, so
         they are kept apart rather than summed.
+
+        ``since`` and ``until`` bound rows by ``created_at`` — when the
+        forecast was MADE, not when it settled, because that is what decides
+        which model produced it. Both are needed because the model changes
+        under us: the first refused-mode row ever produced read
+
+            n=64  brier=0.175  said 46% actual 45%  pnl $12.75
+
+        which looks like the gates refusing winners, but spans 2026-08-17
+        17:00 UTC — before which sigma read 6.6% annualized and every crypto
+        probability was pinned at 0% or 100%. One number across two models
+        describes neither. Callers pass a boundary and read the halves apart.
         """
+        clauses, params = [], []
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(float(since))
+        if until is not None:
+            clauses.append("created_at < ?")
+            params.append(float(until))
+        window = ("" if not clauses else " AND " + " AND ".join(clauses))
         with self._conn() as c:
             rows = c.execute(
                 """SELECT category, source,
@@ -292,8 +313,10 @@ class EdgeStore:
                               ELSE 'refused'
                           END as mode
                    FROM edges
-                   WHERE settled = 1 AND maker_probability IS NOT NULL
-                   GROUP BY category, source, mode"""
+                   WHERE settled = 1 AND maker_probability IS NOT NULL"""
+                + window +
+                """ GROUP BY category, source, mode""",
+                params,
             ).fetchall()
             return [dict(r) for r in rows]
 

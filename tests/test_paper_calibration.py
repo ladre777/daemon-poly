@@ -422,7 +422,7 @@ def test_settling_a_forecast_logs_the_row_and_the_table(ledger, edge_store,
     assert "model said 88%" in caplog.text
     assert "outcome NO" in caplog.text
     # And the table it rolls up into.
-    assert "Calibration [refused]" in caplog.text
+    assert "[refused]" in caplog.text and "Calibration" in caplog.text
     assert "Weather" in caplog.text
 
 
@@ -449,3 +449,118 @@ def test_a_broken_calibration_read_cannot_stop_grading(ledger, edge_store,
 
     with caplog.at_level("INFO"):
         assert ledger.reconcile_forecasts() == 1
+
+
+# -- regime split ----------------------------------------------------------
+#
+# The first refused-mode row ever produced read
+#
+#     n=64  brier=0.175  said 46% actual 45%  pnl $12.75
+#
+# which reads as the gates refusing winners. It spans 2026-08-17T17:00Z,
+# before which sigma was 6.6% annualized and every crypto probability was
+# pinned at 0% or 100%. One number across two models describes neither, so
+# the table is logged as two and never merged.
+
+
+def _edge_at(store, ticker, created_at, prob, close_time):
+    """Insert a settled-able row with an explicit created_at."""
+    import sqlite3
+
+    from memory.edge_store import EdgeRecord
+
+    edge_id = store.record_edge(EdgeRecord(
+        ticker=ticker, category="Crypto", source="quant",
+        maker_probability=prob, market_implied_probability=0.5,
+        action_taken="skipped_risk", counterfactual_price_cents=50.0,
+        counterfactual_direction="yes", close_time=close_time,
+    ))
+    with sqlite3.connect(store.db_path) as c:
+        c.execute("UPDATE edges SET created_at=? WHERE id=?",
+                  (created_at, edge_id))
+    return edge_id
+
+
+def test_the_window_selects_by_when_the_forecast_was_made(edge_store):
+    """Not by when it settled — what decides the regime is which model
+    produced the probability."""
+    boundary = 1_000_000.0
+    old = _edge_at(edge_store, "OLD", boundary - 100, 0.9, boundary)
+    new = _edge_at(edge_store, "NEW", boundary + 100, 0.6, boundary)
+    edge_store.settle(old, "no", -0.5)
+    edge_store.settle(new, "yes", 0.5)
+
+    before = edge_store.calibration_by_category(until=boundary)
+    after = edge_store.calibration_by_category(since=boundary)
+
+    assert [r["n"] for r in before] == [1]
+    assert [r["n"] for r in after] == [1]
+    assert before[0]["total_pnl"] == pytest.approx(-0.5)
+    assert after[0]["total_pnl"] == pytest.approx(0.5)
+
+
+def test_the_boundary_is_exclusive_on_one_side_only(edge_store):
+    """A row exactly on the boundary belongs to the post-fix regime, and to
+    exactly one of the two tables — no row may be counted twice."""
+    boundary = 1_000_000.0
+    exact = _edge_at(edge_store, "EXACT", boundary, 0.6, boundary)
+    edge_store.settle(exact, "yes", 0.5)
+
+    before = edge_store.calibration_by_category(until=boundary)
+    after = edge_store.calibration_by_category(since=boundary)
+
+    assert before == []
+    assert [r["n"] for r in after] == [1]
+
+
+def test_an_unbounded_call_still_returns_everything(edge_store):
+    """Unset boundary collapses to the previous behaviour."""
+    boundary = 1_000_000.0
+    a = _edge_at(edge_store, "A", boundary - 100, 0.9, boundary)
+    b = _edge_at(edge_store, "B", boundary + 100, 0.6, boundary)
+    edge_store.settle(a, "no", -0.5)
+    edge_store.settle(b, "yes", 0.5)
+
+    assert [r["n"] for r in edge_store.calibration_by_category()] == [2]
+
+
+def test_both_tables_are_logged_and_labelled(ledger, edge_store, client,
+                                             caplog, monkeypatch):
+    """The property the split exists for: two labelled tables, never one
+    merged number."""
+    import time
+
+    from config import CONFIG
+
+    now = time.time()
+    monkeypatch.setattr(CONFIG.risk, "calibration_regime_split_at",
+                        "2026-08-17T17:00:00Z")
+    _edge_at(edge_store, "KXBTC-OLD", 1_000_000.0, 0.99, now - 60)
+    client.markets["KXBTC-OLD"] = {"ticker": "KXBTC-OLD", "result": "no"}
+
+    with caplog.at_level("INFO"):
+        ledger.reconcile_forecasts()
+
+    assert "Calibration (pre-fix)" in caplog.text
+    assert "Calibration (post-fix)" in caplog.text
+
+
+def test_an_unparseable_boundary_falls_back_to_one_table(ledger, edge_store,
+                                                         client, caplog,
+                                                         monkeypatch):
+    """Two tables labelled by a boundary nobody set would be worse than one
+    honest table."""
+    import time
+
+    from config import CONFIG
+
+    now = time.time()
+    monkeypatch.setattr(CONFIG.risk, "calibration_regime_split_at", "not-a-date")
+    _edge_at(edge_store, "KXBTC-Y", now - 3600, 0.6, now - 60)
+    client.markets["KXBTC-Y"] = {"ticker": "KXBTC-Y", "result": "yes"}
+
+    with caplog.at_level("INFO"):
+        ledger.reconcile_forecasts()
+
+    assert "Calibration (all)" in caplog.text
+    assert "pre-fix" not in caplog.text

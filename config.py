@@ -291,6 +291,21 @@ class RiskConfig:
     # every row is reached eventually without any one pass being expensive.
     # 0 disables forecast grading entirely.
     forecast_reconcile_max_tickers: int = _int("FORECAST_RECONCILE_MAX_TICKERS", 25)
+    # Boundary between two model regimes, as an RFC3339 timestamp. When set,
+    # the calibration table is logged TWICE — once for forecasts made before
+    # it, once for after — and never merged into a single number.
+    #
+    # It exists because the first refused-mode row ever produced read
+    # "n=64 brier=0.175 said 46% actual 45% pnl $12.75", which reads as the
+    # gates refusing winners, but spanned 2026-08-17T17:00Z. Before that
+    # boundary sigma was 6.6% annualized and every crypto probability was
+    # pinned at 0% or 100%. A single number across two models describes
+    # neither of them.
+    #
+    # Unset means one combined table, which is the right behaviour once the
+    # old regime has aged out of the data.
+    calibration_regime_split_at: str = os.getenv(
+        "CALIBRATION_REGIME_SPLIT_AT", "2026-08-17T17:00:00Z")
     # Keep index observations across restarts, so the volatility clock is not
     # reset by every redeploy.
     #
@@ -387,6 +402,23 @@ class RiskConfig:
     # 2,863 candidates on a typical scan, so they crowd the per-pass model
     # budget out of the 15-minute, hourly and weather families.
     skip_multi_event_shards: bool = _bool("SKIP_MULTI_EVENT_SHARDS", True)
+    # Which taxonomy categories inside the Sports group may be scanned at all.
+    #
+    # Golf is the only sport in scope, but golf and every other sport share the
+    # group "Sports", so SCOUT_CATEGORIES cannot separate them: dropping Sports
+    # would drop golf too. Without this filter, MLB player props reached the
+    # Checker — KXMLBKS-26AUG181835NYYBAL-NYYCRODON55-6 was evaluated and
+    # rejected in production on 2026-08-18 — spending model budget on a sport
+    # nobody asked to trade, with no grounding source behind it.
+    #
+    # Empty means no restriction, which is the old behaviour.
+    scout_sports_categories: list = field(
+        default_factory=lambda: [
+            c.strip().lower() for c in os.getenv(
+                "SCOUT_SPORTS_CATEGORIES", "Golf"
+            ).split(",") if c.strip()
+        ]
+    )
     spot_backoff_base_seconds: float = _float("SPOT_BACKOFF_BASE_SECONDS", 30.0)
     spot_backoff_max_seconds: float = _float("SPOT_BACKOFF_MAX_SECONDS", 900.0)
     # Contract specs in core/contract_specs.py all ship verified=False,

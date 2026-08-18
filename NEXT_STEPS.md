@@ -534,9 +534,12 @@ API key:
 | DataGolf | yes, paid | strong predictive models, not just scores |
 | GolfProjectAPI (GitHub) | no | **scrapes ESPN — inherits the same IP block. Useless here.** |
 
-So item 2 needs the operator to obtain a key before any code is worth
-writing. Recommend Slash Golf or SportsDataIO for the free tier. Set it as
-`GOLF_API_KEY` and build behind an interface with schema logging on first
+The operator has a Slash Golf key as of 2026-08-18. The variable name is
+`SLASH_GOLF_API_KEY`, and an unset placeholder for it exists in
+`.env.example`. Nothing reads it yet — no client, no config field. The real
+value is set directly in Railway.
+
+When the swap starts, build behind an interface with schema logging on first
 contact, the way `_log_golf_schema` already does.
 
 **Do not build this before there are golf markets to validate against.**

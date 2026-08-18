@@ -290,19 +290,31 @@ class Ledger:
         Emitted on settlement rather than per pass, so it appears exactly when
         it has changed.
         """
+        boundary = _regime_boundary()
         try:
-            rows = self.store.calibration_by_category()
+            if boundary is None:
+                self._emit_calibration("all", self.store.calibration_by_category())
+            else:
+                # Two tables, never one. Rows either side of the boundary came
+                # from different models, and a single number across both
+                # describes neither.
+                self._emit_calibration(
+                    "pre-fix", self.store.calibration_by_category(until=boundary))
+                self._emit_calibration(
+                    "post-fix", self.store.calibration_by_category(since=boundary))
         except Exception:
             log.exception("Could not read the calibration table — continuing")
-            return
+
+    def _emit_calibration(self, regime: str, rows: list) -> None:
         if not rows:
+            log.info("Calibration (%s): no settled rows yet", regime)
             return
         for row in sorted(rows, key=lambda r: (r["mode"], -(r["n"] or 0))):
             log.info(
-                "Calibration [%s] %s/%s: n=%d  brier=%.3f  said %.0f%% "
+                "Calibration (%s) [%s] %s/%s: n=%d  brier=%.3f  said %.0f%% "
                 "actual %.0f%%  pnl $%.2f",
-                row["mode"], row["category"] or "?", row["source"] or "?",
-                row["n"] or 0,
+                regime, row["mode"], row["category"] or "?",
+                row["source"] or "?", row["n"] or 0,
                 row["brier_score"] if row["brier_score"] is not None else -1.0,
                 (row["avg_maker_probability"] or 0.0) * 100,
                 (row["actual_yes_rate"] or 0.0) * 100,
@@ -452,6 +464,27 @@ def _counterfactual_entry(proposal) -> tuple[Optional[float], Optional[str]]:
     if price is None or not (0.0 < float(price) < CONTRACT_PAYOUT_CENTS):
         return None, None
     return float(price), side
+
+
+def _regime_boundary() -> Optional[float]:
+    """Epoch seconds of the configured model-regime boundary, or None.
+
+    An unparseable value returns None and logs, which collapses to one
+    combined table — the pre-split behaviour. Failing loudly into a wrong
+    split would be worse: two tables labelled by a boundary nobody set is
+    exactly the kind of confident-looking number this whole mechanism exists
+    to stop producing.
+    """
+    raw = (CONFIG.risk.calibration_regime_split_at or "").strip()
+    if not raw:
+        return None
+    parsed = parse_timestamp(raw)
+    if parsed is None:
+        log.warning(
+            "CALIBRATION_REGIME_SPLIT_AT=%r is not a timestamp — logging one "
+            "combined calibration table instead of a split one", raw,
+        )
+    return parsed
 
 
 def _counterfactual_pnl(row: dict, outcome: str) -> Optional[float]:

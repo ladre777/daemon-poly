@@ -105,13 +105,32 @@ def _log_vol_signature(spot_client, symbols) -> None:
         history = spot_client.history.get(symbol)
         if history is None:
             continue
+        # Measured over the configured retention window, not vol_signature's
+        # 3600s default.
+        #
+        # That default silently capped the diagnostic. MIN_VOL_OBSERVATIONS is
+        # 10, so at a one-hour lookback the 600s rung gets 6 observations and
+        # can NEVER clear it — no matter how much history the buffer holds.
+        # The 300s rung gets 12, barely over. Production logged exactly that:
+        #
+        #   btc  tick 16%  15s 26%  30s 35%  60s 48%  120s 58%  300s 62%  600s n/a
+        #
+        # and "600s n/a" read like a warm-up artifact when it was structural.
+        # The whole question the ladder exists to answer — where does the
+        # signature plateau — was unanswerable from the log, because the two
+        # rungs past the knee were the ones being suppressed.
+        #
+        # At the 14400s retention window the 600s rung gets 24 observations
+        # and the 300s rung 48. The lookback is printed alongside so this
+        # cannot quietly drift again.
+        lookback = CONFIG.risk.vol_history_retention_seconds
         rungs = []
-        for interval, vol in history.vol_signature():
+        for interval, vol in history.vol_signature(lookback):
             label = "tick" if not interval else f"{interval:.0f}s"
             rungs.append(f"{label} {vol * _SECONDS_PER_YEAR ** 0.5:.0%}"
                          if vol else f"{label} n/a")
-        log.info("Volatility signature %s (annualized): %s",
-                 symbol, "  ".join(rungs))
+        log.info("Volatility signature %s over %.0fs (annualized): %s",
+                 symbol, lookback, "  ".join(rungs))
         # The signature above is measured over one lookback. The quant path
         # picks its lookback from each contract's horizon, so the two can
         # disagree — and a diagnostic that does not report the number actually

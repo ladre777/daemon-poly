@@ -227,25 +227,85 @@ def test_scout_classifies_by_ticker_not_by_kalshis_category_string():
 
 
 def test_scout_filters_on_taxonomy_group():
+    """Uses golf rather than NFL: SCOUT_SPORTS_CATEGORIES now restricts the
+    Sports group to golf, so an NFL market would be filtered by that rather
+    than by the group filter this test is about."""
     client = CategoryClient([
         _event("KXBTCD-25AUG14", [_market("KXBTCD-25AUG14-B")]),
-        _event("KXNFLGAME-25", [_market("KXNFLGAME-25SEP07")]),
+        _event("PGATOUR-25", [_market("PGATOUR-25SEP07")]),
     ])
     CONFIG.scout_categories = ["Sports"]
 
     candidates = Scout(client).scan()
 
-    assert [c.ticker for c in candidates] == ["KXNFLGAME-25SEP07"]
+    assert [c.ticker for c in candidates] == ["PGATOUR-25SEP07"]
 
 
 def test_empty_category_config_takes_everything():
+    """"Everything" still means everything the sports filter permits — the
+    two filters are independent and both apply."""
     client = CategoryClient([
         _event("KXBTCD-25AUG14", [_market("KXBTCD-25AUG14-B")]),
-        _event("KXNFLGAME-25", [_market("KXNFLGAME-25SEP07")]),
+        _event("PGATOUR-25", [_market("PGATOUR-25SEP07")]),
     ])
     CONFIG.scout_categories = []
 
     assert len(Scout(client).scan()) == 2
+
+
+# -- sports scope ----------------------------------------------------------
+#
+# Golf is the only sport in scope, and the group cannot express that: golf and
+# MLB are both "Sports", so dropping Sports from SCOUT_CATEGORIES would drop
+# golf too. Without a category-level filter, MLB player props reached the
+# Checker in production — KXMLBKS-26AUG181835NYYBAL-NYYCRODON55-6 was
+# evaluated and rejected on 2026-08-18 — spending model budget on a sport
+# nobody asked to trade, with no grounding source behind it.
+
+
+def test_only_golf_survives_inside_the_sports_group():
+    client = CategoryClient([
+        _event("PGATOUR-25", [_market("PGATOUR-25SEP07")]),
+        _event("KXNFLGAME-25", [_market("KXNFLGAME-25SEP07")]),
+        _event("MLBGAME-25", [_market("MLBGAME-25SEP07")]),
+    ])
+    CONFIG.scout_categories = ["Sports"]
+
+    assert [c.ticker for c in Scout(client).scan()] == ["PGATOUR-25SEP07"]
+
+
+def test_non_sports_groups_are_untouched_by_it():
+    """The filter must scope only Sports — weather and crypto go through it
+    unchanged."""
+    client = CategoryClient([
+        _event("KXBTCD-25AUG14", [_market("KXBTCD-25AUG14-B")]),
+        _event("KXHIGHNY-25AUG14", [_market("KXHIGHNY-25AUG14-T90")]),
+    ])
+    CONFIG.scout_categories = []
+
+    assert len(Scout(client).scan()) == 2
+
+
+def test_the_exclusion_is_reported_as_scope_not_as_invalid_data(caplog):
+    """An out-of-scope sport is a deliberate skip, not malformed data.
+    Filing it under "invalid" would send the next reader after a parser bug."""
+    client = CategoryClient([_event("MLBGAME-25", [_market("MLBGAME-25SEP07")])])
+    CONFIG.scout_categories = ["Sports"]
+
+    with caplog.at_level("INFO", logger="daemon_kalshi.scout"):
+        Scout(client).scan()
+
+    assert "out of scope" in caplog.text
+    assert "as invalid" not in caplog.text
+
+
+def test_an_empty_allowlist_restores_the_old_behaviour():
+    """Escape hatch: SCOUT_SPORTS_CATEGORIES="" scans every sport again."""
+    CONFIG.risk.scout_sports_categories = []
+    client = CategoryClient([_event("MLBGAME-25", [_market("MLBGAME-25SEP07")])])
+    CONFIG.scout_categories = ["Sports"]
+
+    assert len(Scout(client).scan()) == 1
 
 
 def test_liquidity_floor_still_applies():
