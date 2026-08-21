@@ -1,5 +1,5 @@
 """
-The Maker's text-completion backend, with a fallback provider.
+The Maker's (and now Checker's) text-completion backend, with a fallback provider.
 
 Why this exists as its own module rather than inline in maker.py:
 
@@ -22,15 +22,18 @@ Two independent fixes, because either alone still leaves the bot mute:
    self-correction rather than a permanent outage.
 
 2. Fall back to a second provider. Anthropic is already a hard dependency of
-   this system (the Checker runs on it), so if Moonshot is unreachable,
-   unpermitted, or misconfigured, the Maker uses Anthropic rather than
-   proposing nothing at all. Slower and dearer per call, which is exactly why
-   it is the fallback and not the default — but a bot that trades on the
+   this system (historically the Checker ran on it), so if Moonshot is
+   unreachable, unpermitted, or misconfigured, the Maker uses Anthropic rather
+   than proposing nothing at all. Slower and dearer per call, which is exactly
+   why it is the fallback and not the default — but a bot that trades on the
    expensive path beats a bot that does not trade.
 
 Neither fix silently invents a probability. If both providers fail, this
 raises and the caller skips the candidate; nothing downstream ever receives a
 fabricated number.
+
+2026-08-21: Checker now also uses this module. Default Checker provider is
+Moonshot so we stop burning Claude tokens on the gate.
 """
 from __future__ import annotations
 
@@ -509,3 +512,37 @@ def build_maker_llm(models_config) -> MakerLLM:
     if preference == "anthropic":
         return MakerLLM(primary=anthropic_backend, fallback=None)
     return MakerLLM(primary=moonshot, fallback=anthropic_backend)
+
+
+def build_checker_llm(models_config) -> MakerLLM:
+    """Wire the Checker LLM.
+
+    Default is Moonshot/Kimi so the gate stops burning Claude tokens.
+    Claude remains available as an optional fallback or pinned provider.
+    """
+    preference = (getattr(models_config, "checker_provider", "moonshot") or "moonshot").lower()
+
+    moonshot = MoonshotBackend(
+        api_key=models_config.moonshot_api_key,
+        base_url=models_config.moonshot_base_url,
+        model=getattr(models_config, "checker_model", None) or models_config.moonshot_model,
+        timeout=getattr(models_config, "checker_timeout_seconds", 12.0),
+    )
+
+    anthropic_model = (
+        getattr(models_config, "checker_anthropic_model", None)
+        or getattr(models_config, "checker_fallback_model", None)
+        or "claude-haiku-4-5-20251001"
+    )
+    anthropic_backend = AnthropicBackend(
+        api_key=models_config.anthropic_api_key,
+        model=anthropic_model,
+        max_tokens=getattr(models_config, "checker_max_tokens", 1200),
+    )
+
+    if preference == "moonshot":
+        return MakerLLM(primary=moonshot, fallback=anthropic_backend if anthropic_backend.configured else None)
+    if preference == "anthropic":
+        return MakerLLM(primary=anthropic_backend, fallback=None)
+    # auto: prefer Moonshot, fall back to Anthropic
+    return MakerLLM(primary=moonshot, fallback=anthropic_backend if anthropic_backend.configured else None)
