@@ -30,6 +30,13 @@ because the inputs were the weak part:
   which duplicated observations made worse in the direction of understating
   volatility. Understated vol means overconfident probabilities.
 - **Stale and thin data are refused**, rather than being priced off.
+
+2026-08-21: volatility spike refusal
+------------------------------------
+Trailing realized vol is still not forward vol. After a sharp move the
+estimator spikes while implied does not, manufacturing phantom edge on
+out-of-the-money strikes. When short-window vol is sharply elevated versus a
+longer baseline, this path now declines rather than trading the spike.
 """
 from __future__ import annotations
 
@@ -217,6 +224,44 @@ class QuantMaker:
             )
         return True
 
+    def _vol_is_spiking(self, history, symbol: str, current_vol: float) -> bool:
+        """True when trailing realized has spiked vs a longer baseline.
+
+        After a sharp move, short-window realized vol jumps while forward
+        implied does not. Using the spiked number as a forward estimate
+        invents edge on tails. Refuse rather than trade that.
+
+        Baseline uses a longer lookback (capped by available history). If the
+        baseline cannot be measured yet, we do not treat that as a spike.
+        """
+        max_ratio = getattr(CONFIG.risk, "max_vol_spike_ratio", 1.75)
+        if max_ratio <= 1.0 or current_vol <= 0:
+            return False
+
+        # Longer baseline: prefer ~4h, but never more than available span.
+        baseline_lookback = min(max(history.span_seconds() * 0.9, 1800.0), 14400.0)
+        baseline = history.realized_vol_robust(baseline_lookback)
+        if not baseline or baseline <= 0:
+            return False
+
+        ratio = current_vol / baseline
+        if ratio <= max_ratio:
+            return False
+
+        key = f"{symbol}:vol_spike"
+        if key not in self._declined:
+            self._declined[key] = "vol_spike"
+            cur_ann = current_vol * _SECONDS_PER_YEAR ** 0.5 * 100
+            base_ann = baseline * _SECONDS_PER_YEAR ** 0.5 * 100
+            log.info(
+                "Quant path declining %s: volatility spike (short %.1f%% vs "
+                "baseline %.1f%%, ratio %.2fx > %.2fx). Trailing realized is "
+                "not a good forward estimate right now — refusing rather "
+                "than inventing edge on tails.",
+                symbol, cur_ann, base_ann, ratio, max_ratio,
+            )
+        return True
+
     # -- pricing -----------------------------------------------------------
 
     def propose(self, candidate: Candidate) -> Optional[QuantProposal]:
@@ -266,26 +311,6 @@ class QuantMaker:
 
         # A volatility measured over one window may be carried a few multiples
         # beyond it, not two orders of magnitude.
-        #
-        # This is the lesson from 2026-08-17. The estimate read 52% annualized
-        # for bitcoin while the market implied 28% on a four-day contract, and
-        # the reflex was to call the estimate wrong. It was not: 52% realized
-        # over the trailing hour and 28% implied over the coming four days are
-        # different quantities, and both were true. Volatility mean-reverts, so
-        # an hour-long spike does not persist for four days.
-        #
-        # What was wrong was carrying a one-hour measurement 96x out to a
-        # four-day contract. That is what produced "model 24.65% against a
-        # market at 9.00%" on far out-of-the-money strikes — apparent edge that
-        # is nothing but a recent move extrapolated, and exactly the kind a
-        # taker pays for and loses on.
-        #
-        # The short-dated families this bot is pointed at need no extrapolation
-        # at all: a 15-minute contract is 0.2x the observation span and an
-        # hourly one is 1.0x. At those horizons the estimate has matched the
-        # market closely — 17% measured against 18.4% implied on a ten-minute
-        # contract. So this refuses the multi-day contracts the estimate cannot
-        # honestly reach, and leaves the priority families untouched.
         span = history.span_seconds()
         horizon_ratio = seconds_to_expiry / span if span > 0 else float("inf")
         if horizon_ratio > CONFIG.risk.max_horizon_vol_span_ratio:
@@ -311,27 +336,20 @@ class QuantMaker:
         # PriceHistory.realized_vol_robust.
         vol_per_second = history.realized_vol_robust(lookback)
         if not vol_per_second or vol_per_second <= 0:
-            # Not enough history to trust a vol estimate. Improves as the bot
-            # keeps polling; until then decline rather than invent a number
-            # that would produce a false-confidence probability.
             log.info("Insufficient price history for %s — skipping quant proposal",
                      spec.symbol)
+            return None
+
+        # Spike refusal: trailing realized after a move is a bad forward
+        # estimate. Decline rather than invent edge on tails.
+        if self._vol_is_spiking(history, spec.symbol, vol_per_second):
             return None
 
         # Fail closed on an implausible estimate. This is deliberately a
         # refusal and not a clamp: a sigma this far from reality means the
         # feed or the estimator is wrong, and the honest response to "I do not
-        # know the volatility" is not to trade. Wide enough never to bind in
-        # normal conditions, tight enough to have caught the 6.6%-annualized
-        # bitcoin reading on the very first pass.
+        # know the volatility" is not to trade.
         annualized = vol_per_second * _SECONDS_PER_YEAR ** 0.5
-        # Say, once per family per pass, what sigma this path is actually
-        # pricing with. The startup signature is logged at the default
-        # lookback while this uses a horizon-dependent one, so the two can
-        # disagree — and when they did, the operator-facing number was not the
-        # number setting prices. That gap is how a 6.6%-annualized bitcoin
-        # survived a whole session: sigma was only ever visible downstream, as
-        # a probability, where a broken input looks like a disagreement.
         if spec.symbol not in self._vol_logged:
             self._vol_logged.add(spec.symbol)
             log.info(
