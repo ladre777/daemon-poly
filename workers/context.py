@@ -222,8 +222,27 @@ class ContextEnricher:
                 f"  NWS forecast high for {data.get('forecast_date') or 'that day'} "
                 f"({label}): {data['forecast_high_f']}\u00b0F"
             )
+            # Explicit error-band guidance. Production showed the Maker
+            # inventing ~3-4F same-day uncertainty, which is too wide and
+            # manufactures edge against tight thresholds (e.g. forecast 86F
+            # vs T84). Same-day NWS high errors are typically closer to 1-2F.
+            # Multi-day forecasts are less accurate; do not treat them like
+            # same-day ones.
+            lines.append(
+                "  FORECAST ERROR GUIDANCE (use this, do not invent wider bands): "
+                "same-day NWS daytime high forecasts for major US cities typically "
+                "have MAE around 1-2F, not 3-4F. If the forecast is only 1F from a "
+                "threshold, that is usually within typical same-day error — do not "
+                "claim large edge from a 1F miss. For multi-day horizons, uncertainty "
+                "is larger; state that explicitly rather than using a fixed 3-4F band."
+            )
         if data.get("current_temp_f") is not None:
             lines.append(f"  Current observed temp: {data['current_temp_f']:.1f}\u00b0F")
+            # If current already exceeds a high-threshold market, say so plainly.
+            lines.append(
+                "  If current observed temp is already near or above the market "
+                "threshold, weight that heavily — the day is no longer a pure forecast."
+            )
         if data.get("forecast_today"):
             lines.append(f"  Forecast detail: {data['forecast_today']}")
         return "\n".join(lines)
@@ -264,7 +283,6 @@ class ContextEnricher:
             f"This is the official live scoring feed for the current PGA Tour event.",
         ]
 
-        # Top of board
         for r in rows[:12]:
             lines.append(f"  {_slash_line(r)}")
 
