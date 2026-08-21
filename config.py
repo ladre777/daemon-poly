@@ -11,7 +11,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # fine on Railway, where real env vars are already injected
+    pass
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -33,12 +33,6 @@ def _int(name: str, default: int) -> int:
 
 
 def _floats(name: str, default: tuple) -> tuple:
-    """Comma-separated floats.
-
-    A malformed value falls back to the default wholesale rather than
-    silently dropping the bad entries — a vol sampling ladder with one rung
-    quietly missing is worse than one that was never changed.
-    """
     raw = os.getenv(name)
     if not raw:
         return default
@@ -49,16 +43,13 @@ def _floats(name: str, default: tuple) -> tuple:
     return parsed or default
 
 
-#: Explicitly cheap model the Maker's Anthropic fallback uses when nothing
-#: else is configured. Named here rather than inlined so config.py and
-#: core/llm_client.py resolve the same value, and so "what does the
-#: high-volume path cost when it degrades" has one answer.
 DEFAULT_MAKER_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MOONSHOT_MODEL = "kimi-k2-turbo-preview"
 
 
 @dataclass
 class KalshiConfig:
-    env: str = os.getenv("KALSHI_ENV", "demo")  # "demo" or "prod"
+    env: str = os.getenv("KALSHI_ENV", "demo")
     api_key_id: str = os.getenv("KALSHI_API_KEY_ID", "")
     private_key_path: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
     private_key_pem: str = os.getenv("KALSHI_PRIVATE_KEY_PEM", "")
@@ -95,12 +86,16 @@ class KalshiConfig:
 class ModelConfig:
     moonshot_api_key: str = os.getenv("MOONSHOT_API_KEY", "")
     moonshot_base_url: str = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1")
-    moonshot_model: str = os.getenv("MOONSHOT_MODEL", "kimi-k2-turbo-preview")
+    moonshot_model: str = os.getenv("MOONSHOT_MODEL", DEFAULT_MOONSHOT_MODEL)
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    # Checker defaults to Moonshot to avoid Claude token burn.
+    # Checker uses Moonshot by default. If CHECKER_MODEL is unset, reuse
+    # MOONSHOT_MODEL so one Railway var covers Maker + Checker.
     checker_provider: str = os.getenv("CHECKER_LLM_PROVIDER", "moonshot")
-    checker_model: str = os.getenv("CHECKER_MODEL", "kimi-k2-turbo-preview")
+    checker_model: str = os.getenv(
+        "CHECKER_MODEL",
+        os.getenv("MOONSHOT_MODEL", DEFAULT_MOONSHOT_MODEL),
+    )
     checker_anthropic_model: str = os.getenv(
         "CHECKER_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"
     )
@@ -122,7 +117,6 @@ class ModelConfig:
 class RiskConfig:
     max_position_pct: float = _float("MAX_POSITION_PCT", 0.05)
     max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 0.10)
-
     coherence_checks_enabled: bool = _bool("COHERENCE_CHECKS_ENABLED", True)
     coherence_tolerance: float = _float("COHERENCE_TOLERANCE", 0.01)
     max_log_odds_disagreement: float = _float("MAX_LOG_ODDS_DISAGREEMENT", 3.0)
@@ -135,25 +129,21 @@ class RiskConfig:
     longshot_price_threshold_cents: float = _float("LONGSHOT_PRICE_THRESHOLD_CENTS", 20)
     longshot_edge_multiplier: float = _float("LONGSHOT_EDGE_MULTIPLIER", 1.5)
     order_strategy: str = os.getenv("ORDER_STRATEGY", "taker")
-
     max_total_exposure_pct: float = _float("MAX_TOTAL_EXPOSURE_PCT", 0.50)
     max_ticker_exposure_pct: float = _float("MAX_TICKER_EXPOSURE_PCT", 0.05)
     max_event_exposure_pct: float = _float("MAX_EVENT_EXPOSURE_PCT", 0.10)
     max_category_exposure_pct: float = _float("MAX_CATEGORY_EXPOSURE_PCT", 0.25)
     fee_rate: float = _float("FEE_RATE", 0.07)
     slippage_cents: float = _float("SLIPPAGE_CENTS", 1.0)
-
     max_reconciliation_age_seconds: float = _float("MAX_RECONCILIATION_AGE_SECONDS", 90.0)
     dedupe_window_seconds: float = _float("DEDUPE_WINDOW_SECONDS", 3600.0)
     order_ttl_seconds: float = _float("ORDER_TTL_SECONDS", 300.0)
     allow_position_drift: bool = _bool("ALLOW_POSITION_DRIFT", False)
-
     max_quote_age_seconds: float = _float("MAX_QUOTE_AGE_SECONDS", 60.0)
     max_reasoning_chars: int = _int("MAX_REASONING_CHARS", 2000)
     max_playbook_chars: int = _int("MAX_PLAYBOOK_CHARS", 4000)
     max_context_chars: int = _int("MAX_CONTEXT_CHARS", 4000)
     max_title_chars: int = _int("MAX_TITLE_CHARS", 300)
-
     max_spot_age_seconds: float = _float("MAX_SPOT_AGE_SECONDS", 120.0)
     rti_feed_enabled: bool = _bool("RTI_FEED_ENABLED", True)
     rti_startup_grace_seconds: float = _float("RTI_STARTUP_GRACE_SECONDS", 90.0)
@@ -171,8 +161,6 @@ class RiskConfig:
     min_plausible_annual_vol: float = _float("MIN_PLAUSIBLE_ANNUAL_VOL", 0.10)
     max_plausible_annual_vol: float = _float("MAX_PLAUSIBLE_ANNUAL_VOL", 5.0)
     max_horizon_vol_span_ratio: float = _float("MAX_HORIZON_VOL_SPAN_RATIO", 4.0)
-    # After a sharp move, trailing realized spikes vs a longer baseline.
-    # Quant path refuses rather than inventing edge on tails.
     max_vol_spike_ratio: float = _float("MAX_VOL_SPIKE_RATIO", 1.75)
     skip_multi_event_shards: bool = _bool("SKIP_MULTI_EVENT_SHARDS", True)
     scout_sports_categories: list = field(
@@ -188,19 +176,12 @@ class RiskConfig:
     crypto_settlement_blackout_seconds: float = _float(
         "CRYPTO_SETTLEMENT_BLACKOUT_SECONDS", 90.0
     )
-
     kelly_enabled: bool = _bool("KELLY_ENABLED", True)
     kelly_fraction: float = _float("KELLY_FRACTION", 0.25)
 
 
 @dataclass
 class ArbitrageConfig:
-    """Structural locked-arb detection — see workers/arbitrage.py.
-
-    Detection-only: reports opportunities, does not place orders. Both legs
-    must fill or neither; that needs order lifecycle (same gate as maker mode).
-    """
-
     enabled: bool = _bool("ARB_ENABLED", True)
     min_profit_cents: float = _float("ARB_MIN_PROFIT_CENTS", 1.0)
     max_pairs: int = _int("ARB_MAX_PAIRS", 100)
