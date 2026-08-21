@@ -60,16 +60,8 @@ DEFAULT_MAKER_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
 class KalshiConfig:
     env: str = os.getenv("KALSHI_ENV", "demo")  # "demo" or "prod"
     api_key_id: str = os.getenv("KALSHI_API_KEY_ID", "")
-    # Prefer a mounted file locally; on Railway store the PEM contents
-    # directly in an env var since there's no persistent filesystem to mount.
     private_key_path: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
     private_key_pem: str = os.getenv("KALSHI_PRIVATE_KEY_PEM", "")
-    # Minimum spacing between outbound Kalshi requests, in seconds. 0.15s is
-    # ~6.7 requests/second. A full Scout pass is 400 paginated calls, so
-    # without a floor here the bot ran at roughly 8/s sustained and re-ran
-    # the whole scan on every container restart. Reacting to 429s afterwards
-    # does not undo a rate that was too high to begin with. Set to 0 to
-    # disable (tests do).
     min_request_interval_seconds: float = _float("KALSHI_MIN_REQUEST_INTERVAL", 0.15)
 
     @property
@@ -101,73 +93,42 @@ class KalshiConfig:
 
 @dataclass
 class ModelConfig:
-    # Maker: fast, cheap, high-volume signal proposer — Kimi/Moonshot, same
-    # role it plays in DÆMON-POLY.
     moonshot_api_key: str = os.getenv("MOONSHOT_API_KEY", "")
     moonshot_base_url: str = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1")
     moonshot_model: str = os.getenv("MOONSHOT_MODEL", "kimi-k2-turbo-preview")
 
-    # Checker: high-trust second opinion before capital moves.
-    # Default is now Moonshot/Kimi so we stop burning Claude tokens.
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    # Which backend answers Checker calls.
-    #   moonshot  (default) — cheap / free relative to Claude
-    #   anthropic — original Claude path
-    #   auto      — Moonshot primary, Anthropic fallback
+    # Checker defaults to Moonshot to avoid Claude token burn.
     checker_provider: str = os.getenv("CHECKER_LLM_PROVIDER", "moonshot")
-    # Model id for the Checker. When provider=moonshot this should be a Kimi
-    # model. When provider=anthropic it should be a Claude model.
     checker_model: str = os.getenv("CHECKER_MODEL", "kimi-k2-turbo-preview")
-    # Optional separate Anthropic model used only if Checker falls back or is
-    # pinned to anthropic. Kept cheap on purpose.
     checker_anthropic_model: str = os.getenv(
         "CHECKER_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"
     )
     checker_timeout_seconds: float = _float("CHECKER_TIMEOUT_SECONDS", 12.0)
-    # Token budget for a Checker verdict (mainly relevant for Anthropic path).
     checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 1200)
-    # How much of that budget the Checker may spend thinking (Anthropic only).
     checker_effort: str = os.getenv("CHECKER_EFFORT", "low")
 
-    # Which backend answers Maker calls. "auto" (default) uses Moonshot and
-    # falls back to Anthropic when Moonshot is unreachable, unauthorised, or
-    # has no usable model for the key — see core/llm_client.py. "moonshot" or
-    # "anthropic" pin a single provider with no failover.
     maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "auto")
-    # Per-call timeout for the Maker's primary provider. Short on purpose:
-    # this budget is paid once per candidate, and in production a hung
-    # Moonshot at 30s aged the account snapshot past its freshness limit
-    # before the first proposal ever reached risk. Failing over quickly is
-    # worth more here than waiting out a slow response.
     maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 8.0)
-    # Model used when the Maker falls back to Anthropic. NOT the Checker's
-    # model: the Maker is the high-volume path.
     maker_fallback_model: str = os.getenv(
         "MAKER_FALLBACK_MODEL", DEFAULT_MAKER_FALLBACK_MODEL
     )
 
-    # Grounding data sources (not LLMs, but live here alongside the other
-    # external-service keys for a single place to look).
     fred_api_key: str = os.getenv("FRED_API_KEY", "")
-    # Slash Golf / Live Golf Data (RapidAPI). Required for any live golf
-    # context. ESPN is permanently blocked from Railway IPs.
     slash_golf_api_key: str = os.getenv("SLASH_GOLF_API_KEY", "")
 
 
 @dataclass
 class RiskConfig:
-    # Per-trade and account-level guardrails. Tune these to your real
-    # PF-04/PF-09/PF-10 numbers — these are conservative placeholders.
-    max_position_pct: float = _float("MAX_POSITION_PCT", 0.05)       # 5% of bankroll per position
-    max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 0.10)    # kill switch trigger
+    max_position_pct: float = _float("MAX_POSITION_PCT", 0.05)
+    max_daily_loss_pct: float = _float("MAX_DAILY_LOSS_PCT", 0.10)
 
-    # -- model coherence gates (see workers/coherence.py) -------------------
     coherence_checks_enabled: bool = _bool("COHERENCE_CHECKS_ENABLED", True)
     coherence_tolerance: float = _float("COHERENCE_TOLERANCE", 0.01)
     max_log_odds_disagreement: float = _float("MAX_LOG_ODDS_DISAGREEMENT", 3.0)
     count_unrealized_gains: bool = _bool("COUNT_UNREALIZED_GAINS", False)
     max_open_positions: int = _int("MAX_OPEN_POSITIONS", 15)
-    min_edge_threshold: float = _float("MIN_EDGE_THRESHOLD", 0.04)    # 4pp min edge to act
+    min_edge_threshold: float = _float("MIN_EDGE_THRESHOLD", 0.04)
     min_liquidity_usd: float = _float("MIN_LIQUIDITY_USD", 500.0)
     checker_min_confidence: float = _float("CHECKER_MIN_CONFIDENCE", 0.65)
     dry_run: bool = _bool("DRY_RUN", True)
@@ -175,7 +136,6 @@ class RiskConfig:
     longshot_edge_multiplier: float = _float("LONGSHOT_EDGE_MULTIPLIER", 1.5)
     order_strategy: str = os.getenv("ORDER_STRATEGY", "taker")
 
-    # -- exposure caps (worst-case dollars, not position counts) -----------
     max_total_exposure_pct: float = _float("MAX_TOTAL_EXPOSURE_PCT", 0.50)
     max_ticker_exposure_pct: float = _float("MAX_TICKER_EXPOSURE_PCT", 0.05)
     max_event_exposure_pct: float = _float("MAX_EVENT_EXPOSURE_PCT", 0.10)
@@ -183,20 +143,17 @@ class RiskConfig:
     fee_rate: float = _float("FEE_RATE", 0.07)
     slippage_cents: float = _float("SLIPPAGE_CENTS", 1.0)
 
-    # -- reconciliation / lifecycle ---------------------------------------
     max_reconciliation_age_seconds: float = _float("MAX_RECONCILIATION_AGE_SECONDS", 90.0)
     dedupe_window_seconds: float = _float("DEDUPE_WINDOW_SECONDS", 3600.0)
     order_ttl_seconds: float = _float("ORDER_TTL_SECONDS", 300.0)
     allow_position_drift: bool = _bool("ALLOW_POSITION_DRIFT", False)
 
-    # -- data validation ---------------------------------------------------
     max_quote_age_seconds: float = _float("MAX_QUOTE_AGE_SECONDS", 60.0)
     max_reasoning_chars: int = _int("MAX_REASONING_CHARS", 2000)
     max_playbook_chars: int = _int("MAX_PLAYBOOK_CHARS", 4000)
     max_context_chars: int = _int("MAX_CONTEXT_CHARS", 4000)
     max_title_chars: int = _int("MAX_TITLE_CHARS", 300)
 
-    # -- quant path / spot data quality ------------------------------------
     max_spot_age_seconds: float = _float("MAX_SPOT_AGE_SECONDS", 120.0)
     rti_feed_enabled: bool = _bool("RTI_FEED_ENABLED", True)
     rti_startup_grace_seconds: float = _float("RTI_STARTUP_GRACE_SECONDS", 90.0)
@@ -214,6 +171,9 @@ class RiskConfig:
     min_plausible_annual_vol: float = _float("MIN_PLAUSIBLE_ANNUAL_VOL", 0.10)
     max_plausible_annual_vol: float = _float("MAX_PLAUSIBLE_ANNUAL_VOL", 5.0)
     max_horizon_vol_span_ratio: float = _float("MAX_HORIZON_VOL_SPAN_RATIO", 4.0)
+    # After a sharp move, trailing realized spikes vs a longer baseline.
+    # Quant path refuses rather than inventing edge on tails.
+    max_vol_spike_ratio: float = _float("MAX_VOL_SPIKE_RATIO", 1.75)
     skip_multi_event_shards: bool = _bool("SKIP_MULTI_EVENT_SHARDS", True)
     scout_sports_categories: list = field(
         default_factory=lambda: [
@@ -229,31 +189,25 @@ class RiskConfig:
         "CRYPTO_SETTLEMENT_BLACKOUT_SECONDS", 90.0
     )
 
-    # -- fractional Kelly sizing (see core/kelly.py) ------------------------
     kelly_enabled: bool = _bool("KELLY_ENABLED", True)
     kelly_fraction: float = _float("KELLY_FRACTION", 0.25)
 
 
 @dataclass
 class ArbitrageConfig:
-    """Structural (locked) arbitrage detection — see workers/arbitrage.py.
+    """Structural locked-arb detection — see workers/arbitrage.py.
 
-    Off by default. This is detection-only today: it reports opportunities
-    and does not place orders, because a two-legged trade needs both legs or
-    neither and the execution path has no order-lifecycle management yet.
+    Detection-only: reports opportunities, does not place orders. Both legs
+    must fill or neither; that needs order lifecycle (same gate as maker mode).
     """
 
-    enabled: bool = _bool("ARB_ENABLED", False)
+    enabled: bool = _bool("ARB_ENABLED", True)
     min_profit_cents: float = _float("ARB_MIN_PROFIT_CENTS", 1.0)
     max_pairs: int = _int("ARB_MAX_PAIRS", 100)
 
 
 @dataclass
 class TelegramConfig:
-    """Operator alerting. Entirely optional — with no token or chat ID the
-    client disables itself and the bot runs exactly as before, silently.
-    """
-
     bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
     timeout_seconds: float = _float("TELEGRAM_TIMEOUT_SECONDS", 10.0)
@@ -283,7 +237,7 @@ class AppConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     scout_categories: list = field(
         default_factory=lambda: os.getenv(
-            "SCOUT_CATEGORIES", "Sports,Crypto,Politics,Finance,Weather"
+            "SCOUT_CATEGORIES", "Sports,Crypto,Weather"
         ).split(",")
     )
     scout_census_families: list = field(
@@ -295,19 +249,21 @@ class AppConfig:
     llm_reasoning_categories: set = field(
         default_factory=lambda: {
             c.strip().lower() for c in os.getenv(
-                "LLM_REASONING_CATEGORIES", "sports,politics,finance,weather"
+                "LLM_REASONING_CATEGORIES", "sports,weather"
             ).split(",") if c.strip()
         }
     )
     priority_keywords: list = field(
         default_factory=lambda: [
-            k.strip().lower() for k in os.getenv("PRIORITY_KEYWORDS", "golf,pga").split(",") if k.strip()
+            k.strip().lower() for k in os.getenv(
+                "PRIORITY_KEYWORDS", "golf,pga,btc,bitcoin,eth,high,temperature"
+            ).split(",") if k.strip()
         ]
     )
     priority_categories: set = field(
         default_factory=lambda: {
             c.strip().lower() for c in os.getenv(
-                "PRIORITY_CATEGORIES", "weather"
+                "PRIORITY_CATEGORIES", "weather,crypto"
             ).split(",") if c.strip()
         }
     )
