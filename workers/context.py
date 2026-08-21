@@ -1,19 +1,10 @@
 """
 Context enrichment: gives Maker something to reason from besides the market
-price itself — pulling live ESPN state for golf/sports candidates before the
-Kimi call.
+price itself.
 
-Honest limitation: matching a Kalshi ticker/title to the *right* ESPN
-tournament or game is a real problem, not a solved one. Kalshi titles are
-plain English ("Will Scheffler win the [tournament]?") and ESPN's leaderboard
-doesn't carry Kalshi's ticker — there's no shared ID to join on. What's below
-is a keyword heuristic (tour/league guessed from the title) good enough to
-get a leaderboard or scoreboard snapshot in front of Maker; it is NOT
-guaranteed to pull the specific event the market is about when multiple
-tournaments/games are live at once. Tighten this once you're looking at real
-concurrent Kalshi golf/sports tickers side by side with ESPN's event IDs —
-that's a tuning pass that needs live data, not something to guess right from
-here.
+Golf uses Slash Golf (Live Golf Data on RapidAPI) because ESPN is permanently
+blocked from Railway IPs. Other sports still attempt ESPN. Weather uses NOAA.
+Finance uses FRED.
 """
 from __future__ import annotations
 
@@ -22,6 +13,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from core.espn_client import ESPNClient
+from core.slash_golf_client import SlashGolfClient
 from core.weather_client import NOAAClient, WEATHER_STATIONS, CITY_ALIASES
 from core.fred_client import FredClient
 from workers.scout import Candidate
@@ -36,16 +28,6 @@ _SPORT_LEAGUE_KEYWORDS = {
     "wnba": ("basketball", "wnba"),
 }
 
-# Taxonomy category (from the ticker prefix) to ESPN's sport/league slugs.
-# Keyed off the ported taxonomy rather than the title because the ticker
-# prefix is what actually identifies the league — a title like "Will the
-# Chiefs beat the Bills?" names neither the sport nor the league.
-#
-# Deliberately partial. Soccer, Tennis, UFC/Boxing and Racing all exist in
-# the taxonomy and all have ESPN endpoints, but each needs a league slug this
-# mapping cannot infer (ESPN wants eng.1 / usa.1 / uefa.champions, not
-# "soccer"). Fetching the wrong league is worse than fetching nothing: it
-# hands Maker a scoreboard for real games that are not this market's game.
 _TAXONOMY_TO_ESPN: dict[str, tuple[str, str]] = {
     "nfl": ("football", "nfl"),
     "nba": ("basketball", "nba"),
@@ -56,28 +38,16 @@ _TAXONOMY_TO_ESPN: dict[str, tuple[str, str]] = {
     "ncaa basketball": ("basketball", "mens-college-basketball"),
 }
 
-# Golf subcategory to ESPN tour slug. Everything not listed falls through to
-# the title heuristic, which defaults to the PGA tour.
-_GOLF_SUBCATEGORY_TOURS: dict[str, str] = {
-    "liv tour": "liv",
-}
+_slash_golf_schema_logged = False
 
 
 def resolve_weather_city(candidate) -> str | None:
-    """Which WEATHER_STATIONS key this market settles against, if any.
-
-    The taxonomy subcategory carries the city outright for temperature
-    markets ("New York", "Chicago", "Miami"), and variants like "NYC Rain"
-    and "NYC Snow Monthly" carry it as a prefix. That is a far stronger
-    signal than scanning the title, which is why it is tried first.
-    """
     sub = (getattr(candidate, "taxonomy_subcategory", "") or "").lower().strip()
     if sub:
         if sub in WEATHER_STATIONS:
             return sub
         if sub in CITY_ALIASES:
             return CITY_ALIASES[sub]
-        # "NYC Rain", "NYC Snow Monthly" — city is the leading token(s).
         for alias, city in CITY_ALIASES.items():
             if re.match(rf"^{re.escape(alias)}\b", sub):
                 return city
@@ -85,8 +55,6 @@ def resolve_weather_city(candidate) -> str | None:
             if re.match(rf"^{re.escape(city)}\b", sub):
                 return city
 
-    # Fall back to the title. Full station names first, then abbreviations,
-    # both on word boundaries — "la" as a bare token, not inside "atlanta".
     title_lower = candidate.title.lower()
     city = next(
         (c for c in WEATHER_STATIONS if re.search(rf"\b{re.escape(c)}\b", title_lower)),
@@ -101,156 +69,7 @@ def resolve_weather_city(candidate) -> str | None:
     return CITY_ALIASES[alias] if alias else None
 
 
-def _guess_golf_tour(title: str) -> str:
-    t = title.lower()
-    if "lpga" in t:
-        return "lpga"
-    if "champions tour" in t or "senior" in t:
-        return "champions-tour"
-    if "korn ferry" in t:
-        return "korn-ferry-tour"
-    return "pga"  # default assumption — tune once you see real market titles
-
-
-#: Set once a process has logged ESPN's golf shape, so it is reported on the
-#: first golf market of a run rather than on every one.
-_golf_schema_logged = False
-
-
-def _log_golf_schema(event: dict, competition: dict, competitor: dict) -> None:
-    """Report ESPN's actual golf field names, once per process.
-
-    Three bugs in this codebase came from assuming a field name and silently
-    defaulting when it was absent, and Scout answers that by logging the live
-    schema at INFO every scan. The golf path has never executed in
-    production — the demo catalog contains no golf markets — so every field
-    below the ones already in use here is unconfirmed. Rather than guess in
-    silence, the shape is printed the first time a real golf market arrives.
-    """
-    global _golf_schema_logged
-    if _golf_schema_logged:
-        return
-    _golf_schema_logged = True
-    log.info(
-        "ESPN golf schema — event: %s | competition: %s | competitor: %s | "
-        "competitor.status: %s",
-        ", ".join(sorted(event)), ", ".join(sorted(competition)),
-        ", ".join(sorted(competitor)),
-        ", ".join(sorted(competitor.get("status") or {})),
-    )
-
-
-def _golf_line(competitor: dict) -> str:
-    name = (competitor.get("athlete") or {}).get("displayName", "?")
-    score = competitor.get("score", "?")
-    position = ((competitor.get("status") or {}).get("position") or {}).get(
-        "displayName", ""
-    )
-    thru = _golf_thru(competitor)
-    return f"{position} {name}: {score}{thru}".strip()
-
-
-def _golf_thru(competitor: dict) -> str:
-    """How far through the round this player is, when ESPN says.
-
-    Unconfirmed field names, read defensively: absent means it renders as
-    nothing rather than as a wrong number.
-    """
-    status = competitor.get("status") or {}
-    thru = status.get("thru")
-    if status.get("type", {}).get("completed") is True:
-        return " (round complete)"
-    if isinstance(thru, (int, float)):
-        return f" (thru {thru:g})"
-    return ""
-
-
-def _find_competitor(competitors: list, player: str) -> dict | None:
-    """Locate a player on the leaderboard by name.
-
-    Kalshi's ``yes_sub_title`` and ESPN's ``displayName`` are both
-    human-typed, so an exact match is too brittle — "Scottie Scheffler" vs
-    "S. Scheffler". Falls back to surname, which is what actually
-    distinguishes players in a field, and refuses an ambiguous surname rather
-    than picking one.
-    """
-    wanted = player.strip().lower()
-    if not wanted:
-        return None
-    names = [
-        ((c.get("athlete") or {}).get("displayName") or "").strip().lower()
-        for c in competitors
-    ]
-    for competitor, name in zip(competitors, names):
-        if name and name == wanted:
-            return competitor
-
-    surname = wanted.rsplit(" ", 1)[-1]
-    if len(surname) < 3:
-        return None
-    hits = [
-        competitor for competitor, name in zip(competitors, names)
-        if name.rsplit(" ", 1)[-1] == surname
-    ]
-    # Two Kims in the field is not a reason to guess which one.
-    return hits[0] if len(hits) == 1 else None
-
-
-def _shots_back(competitors: list, competitor: dict) -> str:
-    """How far off the lead, in strokes, when both scores are numeric."""
-    def to_number(c):
-        raw = c.get("score")
-        if isinstance(raw, (int, float)):
-            return float(raw)
-        if isinstance(raw, str):
-            text = raw.strip().upper()
-            if text in ("E", "EVEN", "PAR"):
-                return 0.0
-            try:
-                return float(text.replace("+", ""))
-            except ValueError:
-                return None
-        return None
-
-    mine = to_number(competitor)
-    scores = [s for s in (to_number(c) for c in competitors) if s is not None]
-    if mine is None or not scores:
-        return ""
-    # Golf scores are relative to par: lower is better.
-    back = mine - min(scores)
-    if back <= 0:
-        return ", leading"
-    return f", {back:g} shot(s) back"
-
-
-def _golf_event_state(event: dict, competition: dict) -> str:
-    """Round and completion state, when ESPN reports it.
-
-    Everything here is unconfirmed against a live response, so each piece is
-    included only if present. An empty string means "ESPN did not say", which
-    is the honest rendering.
-    """
-    parts = []
-    status = (competition.get("status") or event.get("status") or {})
-    period = status.get("period")
-    if isinstance(period, (int, float)):
-        parts.append(f"round {period:g}")
-    detail = (status.get("type") or {}).get("shortDetail") or status.get("displayClock")
-    if isinstance(detail, str) and detail.strip():
-        parts.append(detail.strip())
-    return ", ".join(parts)
-
-
 def _settlement_date(candidate) -> str | None:
-    """The local calendar date a market settles on, from its close time.
-
-    Kalshi's close_time is UTC. A weather market closes at the end of the
-    settlement day in the station's local time, which is the small hours of
-    the following day in UTC — so taking the UTC date directly would ask for
-    tomorrow's forecast on every single market. The close is shifted back a
-    few hours before the date is read, which lands on the right local day for
-    every US time zone Kalshi runs weather markets in.
-    """
     raw = getattr(candidate, "close_time", "") or ""
     if not raw:
         return None
@@ -271,30 +90,90 @@ def _guess_sport_league(title: str) -> tuple[str, str] | None:
     return None
 
 
+def _slash_player_name(row: dict) -> str:
+    first = (row.get("firstName") or "").strip()
+    last = (row.get("lastName") or "").strip()
+    if first or last:
+        return f"{first} {last}".strip()
+    return (row.get("displayName") or row.get("name") or "?").strip()
+
+
+def _slash_line(row: dict) -> str:
+    name = _slash_player_name(row)
+    position = str(row.get("position") or "").strip()
+    total = str(row.get("total") or row.get("score") or "").strip()
+    hole = row.get("currentHole") or row.get("thru")
+    status = str(row.get("status") or "").lower()
+
+    parts = []
+    if position:
+        parts.append(position)
+    parts.append(name)
+    if total:
+        parts.append(f": {total}")
+    if status in ("cut", "wd", "dq"):
+        parts.append(f" ({status.upper()})")
+    elif isinstance(hole, (int, float)) and hole > 0:
+        parts.append(f" (thru {hole:g})")
+    elif status == "complete" or row.get("roundComplete") is True:
+        parts.append(" (round complete)")
+    return "".join(parts).strip()
+
+
+def _find_slash_player(rows: list, player: str) -> dict | None:
+    wanted = player.strip().lower()
+    if not wanted:
+        return None
+    names = [_slash_player_name(r).lower() for r in rows]
+    for row, name in zip(rows, names):
+        if name and name == wanted:
+            return row
+    surname = wanted.rsplit(" ", 1)[-1]
+    if len(surname) < 3:
+        return None
+    hits = [row for row, name in zip(rows, names) if name.rsplit(" ", 1)[-1] == surname]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _slash_shots_back(rows: list, row: dict) -> str:
+    def to_number(r):
+        raw = r.get("total") or r.get("score")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if isinstance(raw, str):
+            text = raw.strip().upper()
+            if text in ("E", "EVEN", "PAR"):
+                return 0.0
+            try:
+                return float(text.replace("+", ""))
+            except ValueError:
+                return None
+        return None
+
+    mine = to_number(row)
+    scores = [s for s in (to_number(r) for r in rows) if s is not None]
+    if mine is None or not scores:
+        return ""
+    back = mine - min(scores)
+    if back <= 0:
+        return ", leading"
+    return f", {back:g} shot(s) back"
+
+
 class ContextEnricher:
-    def __init__(self, espn: ESPNClient = None, weather: NOAAClient = None, fred: FredClient = None):
+    def __init__(
+        self,
+        espn: ESPNClient = None,
+        slash_golf: SlashGolfClient = None,
+        weather: NOAAClient = None,
+        fred: FredClient = None,
+    ):
         self.espn = espn or ESPNClient()
+        self.slash_golf = slash_golf
         self.weather = weather
         self.fred = fred
 
     def enrich(self, candidate: Candidate) -> str | None:
-        """Returns a short text block to prepend to Maker's prompt, or None
-        if no relevant/reachable data for this candidate's category.
-
-        Routing is off the ported taxonomy (`category` = group,
-        `taxonomy_category`, `taxonomy_subcategory`), not off free text.
-        Those fields are derived from the ticker prefix, so they are stable
-        in a way market titles are not.
-
-        This dispatch was previously written against category names that no
-        longer exist. It tested for "climate" and "economics"; the taxonomy
-        emits "Weather" and "Finance". Neither branch could ever be taken, so
-        NOAA and FRED were wired up, constructed at startup, and never once
-        called in production — the Maker priced every temperature market with
-        no forecast in front of it. Golf was reachable only by the
-        `"golf" in title` fallback, which misses tickers like KXUSOPEN whose
-        titles don't say "golf".
-        """
         group = candidate.category.lower()
         sub = (candidate.taxonomy_category or "").lower()
         try:
@@ -311,14 +190,6 @@ class ContextEnricher:
         return None
 
     def _weather_context(self, candidate: Candidate) -> str | None:
-        """Forecast for the day this market settles, not for today.
-
-        A temperature market names a date, and the forecast handed to the
-        Maker has to be for that date. The previous version always read the
-        nearest NWS period, so an evening scan produced no high at all (the
-        nearest period is "Tonight") and a market two days out was given
-        today's numbers as though they were its own.
-        """
         city = resolve_weather_city(candidate)
         if not city:
             log.debug("No NWS station matched %s (%s / %s)", candidate.ticker,
@@ -340,10 +211,6 @@ class ContextEnricher:
         if target:
             lines.append(f"  This market settles on {target}.")
         if data.get("forecast_high_f") is None:
-            # Stated, not omitted. A missing high on a market that turns on
-            # the high is the single most important thing to know about this
-            # context, and leaving it out reads like the forecast said
-            # nothing rather than like we could not find the right day.
             lines.append(
                 f"  NO NWS daytime forecast is available for "
                 f"{target or 'the requested day'} — NWS publishes about a week "
@@ -373,65 +240,50 @@ class ContextEnricher:
         )
 
     def _golf_context(self, candidate: Candidate) -> str | None:
-        """Leaderboard context, anchored on the player this market is about.
-
-        A golf market asks "does *this player* win", and every market in the
-        event carries the same title — "PGA Championship winner" — so the
-        player is only in ``yes_sub_title``. The previous version returned the
-        top ten and nothing else, which meant that for any player outside the
-        top ten (i.e. most of the field, and most of the markets with an
-        interesting price) the model was handed a leaderboard with no mention
-        of the contract it was pricing, and had to guess.
-
-        Now the named player's own line is always included, along with how
-        far off the lead they are and how much golf is left — a three-shot
-        deficit in round one and the same deficit with four holes to play are
-        not the same bet, and nothing in the old context distinguished them.
-        """
-        sub = (candidate.taxonomy_subcategory or "").lower().strip()
-        tour = _GOLF_SUBCATEGORY_TOURS.get(sub) or _guess_golf_tour(candidate.title)
-        data = self.espn.golf_leaderboard(tour)
-        events = data.get("events", [])
-        if not events:
+        """Leaderboard context via Slash Golf, anchored on the named player."""
+        if not self.slash_golf or not self.slash_golf.available:
+            log.debug("Slash Golf unavailable — no golf context for %s", candidate.ticker)
             return None
-        event = events[0]
-        competition = (event.get("competitions") or [{}])[0]
-        competitors = competition.get("competitors") or []
-        if not competitors:
-            return None
-        _log_golf_schema(event, competition, competitors[0])
 
+        data = self.slash_golf.leaderboard()
+        if not data:
+            return None
+
+        rows = data.get("rows") or []
+        if not rows:
+            return None
+
+        global _slash_golf_schema_logged
+        if not _slash_golf_schema_logged and rows:
+            _slash_golf_schema_logged = True
+            log.info("Slash Golf leaderboard schema keys: %s", ", ".join(sorted(rows[0].keys())))
+
+        event_name = data.get("name") or "current PGA event"
         lines = [
-            f"SOURCE: ESPN {tour.upper()} leaderboard — {event.get('name', 'current event')}. "
-            f"ESPN may not be reporting the same event this market settles on; "
-            f"check the event name matches before weighting this heavily.",
+            f"SOURCE: Slash Golf live leaderboard — {event_name}. "
+            f"This is the official live scoring feed for the current PGA Tour event.",
         ]
-        state = _golf_event_state(event, competition)
-        if state:
-            lines.append(f"  Tournament state: {state}")
 
-        for c in competitors[:10]:
-            lines.append(f"  {_golf_line(c)}")
+        # Top of board
+        for r in rows[:12]:
+            lines.append(f"  {_slash_line(r)}")
 
         player = (candidate.yes_sub_title or "").strip()
         if player:
-            match = _find_competitor(competitors, player)
+            match = _find_slash_player(rows, player)
             if match is None:
-                # Said plainly rather than left as an absence. "This player is
-                # not on the leaderboard" is real information — withdrawn,
-                # missed the cut, or not in the field — and it is very
-                # different from "we did not look".
                 lines.append(
                     f"  NOTE: {player} — the player this market is about — does "
-                    f"not appear in ESPN's field for this event. Treat any "
-                    f"leaderboard inference about them as unsupported."
+                    f"not appear on the current leaderboard. Treat any "
+                    f"leaderboard inference about them as unsupported "
+                    f"(withdrawn, missed cut, or not in field)."
                 )
             else:
-                rank = competitors.index(match) + 1
+                rank = rows.index(match) + 1
                 lines.append(
-                    f"  THIS MARKET IS ABOUT {player}: {_golf_line(match)} "
-                    f"(position {rank} of {len(competitors)} in ESPN's field"
-                    f"{_shots_back(competitors, match)})"
+                    f"  THIS MARKET IS ABOUT {player}: {_slash_line(match)} "
+                    f"(position {rank} of {len(rows)} on the board"
+                    f"{_slash_shots_back(rows, match)})"
                 )
         return "\n".join(lines)
 
