@@ -1,39 +1,9 @@
 """
 The Maker's (and now Checker's) text-completion backend, with a fallback provider.
 
-Why this exists as its own module rather than inline in maker.py:
-
-Production run 2026-08-15 found 2,914 tradeable candidates and proposed on
-none of them, because every Maker call returned:
-
-    HTTP 404 for https://api.moonshot.ai/v1/chat/completions
-
-A 404 on a chat-completions endpoint that exists almost always means the
-*model* is not available to the calling account (Moonshot returns 404, not
-400, for an unknown or unpermitted model id). The configured default was
-`kimi-k2-turbo-preview`, which is not necessarily enabled on every account or
-on both of Moonshot's regional platforms.
-
-Two independent fixes, because either alone still leaves the bot mute:
-
-1. Resolve the model instead of asserting it. On a 404 we ask the provider
-   what models the key actually has (`GET /models`), pick the best match, and
-   retry once — then remember it. A wrong model name becomes a logged
-   self-correction rather than a permanent outage.
-
-2. Fall back to a second provider. Anthropic is already a hard dependency of
-   this system (historically the Checker ran on it), so if Moonshot is
-   unreachable, unpermitted, or misconfigured, the Maker uses Anthropic rather
-   than proposing nothing at all. Slower and dearer per call, which is exactly
-   why it is the fallback and not the default — but a bot that trades on the
-   expensive path beats a bot that does not trade.
-
-Neither fix silently invents a probability. If both providers fail, this
-raises and the caller skips the candidate; nothing downstream ever receives a
-fabricated number.
-
-2026-08-21: Checker now also uses this module. Default Checker provider is
-Moonshot so we stop burning Claude tokens on the gate.
+2026-08-21: Checker uses this module. Moonshot model preference updated —
+kimi-k2-turbo-preview and related k2-preview ids were discontinued; current
+accounts use kimi-k2.6 / kimi-k3 family names.
 """
 from __future__ import annotations
 
@@ -47,34 +17,26 @@ from core.errors import CircuitBreaker, Severity, SystemicError, classify
 
 log = logging.getLogger("daemon_kalshi.llm")
 
-# Ordered preference when the configured Moonshot model turns out not to
-# exist for this key. Kimi K2 first (what the system was designed around),
-# then the general-purpose Moonshot models. Any model the account actually
-# has is better than no Maker at all.
+# Ordered preference when the configured Moonshot model is not available.
+# Current platform names first (Aug 2026); legacy preview ids last.
 _MOONSHOT_MODEL_PREFERENCE = (
-    "kimi-k2-turbo-preview",
-    "kimi-k2-0711-preview",
+    "kimi-k2.6",
+    "kimi-k3",
+    "kimi-k2.5",
+    "kimi-k2.7-code",
     "kimi-k2",
     "kimi-latest",
     "moonshot-v1-128k",
     "moonshot-v1-32k",
     "moonshot-v1-8k",
+    # Deprecated — kept only so old configs still rank if the key still has them
+    "kimi-k2-turbo-preview",
+    "kimi-k2-0711-preview",
+    "kimi-k2-0905-preview",
 )
 
-# Substrings marking models that are the wrong tool for this job even when
-# the account has them. Code-specialised checkpoints answer a probability
-# question worse than the general chat models do, so they are tried last
-# rather than first when falling back to whatever the key actually has.
 _DEPRIORITISED_MODEL_MARKERS = ("code", "vision", "audio", "embed")
-
-# How many distinct model ids to try before giving up and letting the caller
-# fail over to the other provider. Bounded so a key with thirty models cannot
-# turn one candidate into thirty API calls.
 _MAX_MODEL_ATTEMPTS = 4
-
-# Truncation for provider error bodies in logs. The body is where the actual
-# reason lives ("model not found", "unsupported parameter"), and not logging
-# it is what turned a one-line diagnosis into two deploy cycles.
 _ERROR_BODY_CHARS = 400
 
 
@@ -83,22 +45,6 @@ class LLMUnavailable(SystemicError):
 
 
 def first_text_block(response) -> str:
-    """The first text block of an Anthropic response, skipping the rest.
-
-    `response.content[0].text` is wrong and production proved it:
-
-        Checker failed on KXRAINSHARD2-26AUG15-SATX (systemic):
-        'ThinkingBlock' object has no attribute 'text'
-
-    A response's content is a *list of blocks*, and only some of them are
-    text. When the model thinks, block 0 is a ThinkingBlock and the answer is
-    further down the list; a tool call or a redacted-thinking block does the
-    same thing. Indexing position 0 and reaching for `.text` works right up
-    until the model does something entirely normal.
-
-    Returns "" when there is no text block at all, which callers already
-    treat as "no usable answer" — that is a refusal, not a crash.
-    """
     for block in getattr(response, "content", None) or []:
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
@@ -107,8 +53,6 @@ def first_text_block(response) -> str:
 
 
 class MoonshotBackend:
-    """OpenAI-compatible chat completions against Moonshot."""
-
     name = "moonshot"
 
     def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 15.0):
@@ -130,21 +74,6 @@ class MoonshotBackend:
         return bool(self._api_key)
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
-        """Post a completion, walking the account's model list if need be.
-
-        Both rejections we have actually seen in production are handled here,
-        because either one alone still leaves the Maker silent:
-
-          404 — the configured model is not on this key at all.
-          400 — the model exists but rejects the request as sent. Observed on
-                a newer checkpoint that will not accept `temperature`.
-
-        A 400 is therefore retried once on the same model without the
-        sampling parameter before moving on, and only then is the model
-        treated as unusable. Anything other than 400/404 propagates: a 401 is
-        a credential problem and trying four models with a bad key is four
-        ways to fail.
-        """
         model = self.model
         last_error: Optional[httpx.HTTPStatusError] = None
 
@@ -156,7 +85,6 @@ class MoonshotBackend:
                 if status not in (400, 404):
                     raise
                 if status == 400 and model not in self._no_temperature:
-                    # Try once without `temperature` before blaming the model.
                     self._no_temperature.add(model)
                     try:
                         text = self._post(model, system, user, None)
@@ -166,7 +94,7 @@ class MoonshotBackend:
                         self._reject(model, retry_error)
                         model = self._next_model()
                         if model is None:
-                            raise                 # re-raise the active 400
+                            raise
                         continue
                     else:
                         log.warning(
@@ -179,7 +107,7 @@ class MoonshotBackend:
                 self._reject(model, e)
                 model = self._next_model()
                 if model is None:
-                    raise                         # re-raise the active 4xx
+                    raise
                 continue
             else:
                 self._adopt(model)
@@ -200,7 +128,7 @@ class MoonshotBackend:
         body = ""
         try:
             body = error.response.text[:_ERROR_BODY_CHARS]
-        except Exception:                           # noqa: BLE001 - diagnostic only
+        except Exception:
             pass
         log.warning("Moonshot rejected model %r with HTTP %d: %s",
                     model, error.response.status_code, body or "(no body)")
@@ -224,7 +152,6 @@ class MoonshotBackend:
             raise SystemicError(f"Moonshot response had no message content: {e}") from e
 
     def _next_model(self) -> Optional[str]:
-        """The next model id worth trying, probing the account once if needed."""
         if not self._probed:
             self._probed = True
             self._available = self._list_models()
@@ -241,7 +168,7 @@ class MoonshotBackend:
                 m.get("id") for m in resp.json().get("data", [])
                 if isinstance(m, dict) and m.get("id")
             ]
-        except Exception as e:                      # noqa: BLE001 - diagnostic path
+        except Exception as e:
             log.warning("Could not list Moonshot models: %s", e)
             return []
 
@@ -254,7 +181,6 @@ class MoonshotBackend:
 
     @staticmethod
     def _ranked(available: list[str]) -> list[str]:
-        """Known-good names first, then general models, then specialised ones."""
         ranked = [m for m in _MOONSHOT_MODEL_PREFERENCE if m in available]
         rest = [m for m in available if m not in ranked]
 
@@ -263,16 +189,12 @@ class MoonshotBackend:
             return any(marker in lowered for marker in _DEPRIORITISED_MODEL_MARKERS)
 
         general = sorted(m for m in rest if not specialised(m))
-        # Newest-looking general model first: "kimi-k3" should be tried before
-        # "kimi-k2.6" when neither is on the known-good list.
         ranked += sorted(general, reverse=True)
         ranked += sorted(m for m in rest if specialised(m))
         return ranked
 
 
 class AnthropicBackend:
-    """Fallback provider. Same prompt, same contract: return raw text."""
-
     name = "anthropic"
 
     def __init__(self, api_key: str, model: str, max_tokens: int = 500):
@@ -287,7 +209,7 @@ class AnthropicBackend:
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
         if self._client is None:
-            import anthropic                        # imported lazily: optional path
+            import anthropic
             self._client = anthropic.Anthropic(api_key=self._api_key)
         resp = self._client.messages.create(
             model=self.model,
@@ -299,9 +221,6 @@ class AnthropicBackend:
         return first_text_block(resp)
 
 
-#: Exception type names that mean "the provider was too slow", as opposed to
-#: "the provider said no". Matched on the class name so this needs no import
-#: of every client library's private exception hierarchy.
 _TIMEOUT_NAMES = frozenset({
     "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout",
     "TimeoutException", "APITimeoutError", "Timeout", "TimeoutError",
@@ -309,13 +228,6 @@ _TIMEOUT_NAMES = frozenset({
 
 
 def _is_timeout(exc: BaseException) -> bool:
-    """True when the exception is a latency failure rather than a refusal.
-
-    Also matches the message, because httpx surfaces socket timeouts as
-    ``ReadTimeout("The read operation timed out")`` but some stacks wrap them
-    in a generic error whose only distinguishing feature is that text — which
-    is exactly what production logged.
-    """
     for cls in type(exc).__mro__:
         if cls.__name__ in _TIMEOUT_NAMES:
             return True
@@ -323,14 +235,6 @@ def _is_timeout(exc: BaseException) -> bool:
 
 
 class MakerLLM:
-    """Primary provider with automatic failover to the secondary.
-
-    Failover is sticky within a cooldown window rather than per-call: once
-    Moonshot has failed `threshold` times in a row we stop calling it for a
-    while, instead of paying its latency on every single candidate before
-    falling back. It heals itself when the cooldown expires.
-    """
-
     def __init__(
         self,
         primary,
@@ -346,21 +250,6 @@ class MakerLLM:
             threshold=failure_threshold,
             cooldown_seconds=cooldown_seconds,
         )
-        #: Timeouts are counted separately from ordinary failures, and are NOT
-        #: reset by an interleaved success.
-        #:
-        #: The consecutive-failure breaker is right for a provider that is
-        #: down and wrong for one that is merely slow. Production showed
-        #: Moonshot timing out roughly once per pass with successes in
-        #: between, so the consecutive counter never reached 3, the breaker
-        #: never opened, and the bot paid the full timeout every pass before
-        #: succeeding on the fallback anyway. That latency is the direct cause
-        #: of quotes ageing past MAX_QUOTE_AGE_SECONDS before risk sees them.
-        #:
-        #: A success after a timeout does not mean the provider is healthy —
-        #: it means it is flaky, and a flaky provider with a multi-second
-        #: timeout is worse than a cleanly dead one, because the cost lands on
-        #: the critical path instead of surfacing as an error.
         self.timeout_threshold = timeout_threshold
         self.timeouts_seen = 0
         self.last_provider = ""
@@ -371,12 +260,6 @@ class MakerLLM:
 
     @property
     def on_fallback(self) -> bool:
-        """True when calls are currently going to the secondary provider.
-
-        The caller uses this to tighten its per-pass call budget: the fallback
-        is there to keep the bot alive through an outage, and running full
-        volume through it is a cost decision nobody made.
-        """
         if not self.fallback:
             return False
         if not self.primary:
@@ -395,14 +278,6 @@ class MakerLLM:
             )
 
         errors: list[str] = []
-
-        # `is_open` clears opened_at as a side effect once the cooldown
-        # elapses, letting one probe through. Clear the timeout tally on that
-        # same transition — and ONLY on that transition. Clearing it whenever
-        # the breaker merely happens to be closed would zero the counter at
-        # the top of every call, so it could never reach its threshold: the
-        # exact "never accumulates" bug this replaces, reintroduced one level
-        # down.
         was_open = self.breaker.opened_at is not None
         breaker_open = self.breaker.is_open
         if was_open and not breaker_open:
@@ -412,29 +287,19 @@ class MakerLLM:
             try:
                 text = self.primary.complete(system, user, temperature)
                 self.breaker.record_success()
-                # Deliberately does NOT clear timeouts_seen: one fast answer
-                # does not undo a pattern of slow ones. The cooldown clears
-                # it, on the same clock as the breaker.
                 self.last_provider = self.primary.name
                 return text
-            except Exception as e:                  # noqa: BLE001 - failover point
+            except Exception as e:
                 severity = classify(e)
                 errors.append(f"{self.primary.name}: {e}")
                 tripped = self.breaker.record_failure(str(e))
                 if severity is Severity.FATAL:
-                    # Wrong key or wrong endpoint: no number of retries fixes
-                    # it, so open the breaker immediately and let the fallback
-                    # carry the load rather than failing every candidate first.
                     self.breaker.consecutive_failures = max(
                         self.breaker.consecutive_failures, self.breaker.threshold
                     )
                     if not tripped and self.breaker.opened_at is None:
                         self.breaker.record_failure(str(e))
                 elif _is_timeout(e):
-                    # Slowness is its own failure mode. Counted across
-                    # successes, because a provider that intermittently costs
-                    # a full timeout is one we should stop calling even though
-                    # it sometimes answers.
                     self.timeouts_seen += 1
                     if self.timeouts_seen >= self.timeout_threshold:
                         self.breaker.consecutive_failures = max(
@@ -445,9 +310,7 @@ class MakerLLM:
                             self.breaker.record_failure(str(e))
                         log.warning(
                             "Maker primary %s has timed out %d time(s) — "
-                            "opening the breaker for %.0fs rather than paying "
-                            "its timeout on every candidate. The fallback "
-                            "answers these anyway.",
+                            "opening the breaker for %.0fs.",
                             self.primary.name, self.timeouts_seen,
                             self.breaker.cooldown_seconds,
                         )
@@ -462,14 +325,13 @@ class MakerLLM:
                 text = self.fallback.complete(system, user, temperature)
                 self.last_provider = self.fallback.name
                 return text
-            except Exception as e:                  # noqa: BLE001 - last resort
+            except Exception as e:
                 errors.append(f"{self.fallback.name}: {e}")
 
         raise LLMUnavailable("; ".join(errors) or "all providers failed")
 
 
 def build_maker_llm(models_config) -> MakerLLM:
-    """Wire a MakerLLM from ModelConfig, honouring MAKER_LLM_PROVIDER."""
     preference = (getattr(models_config, "maker_provider", "auto") or "auto").lower()
 
     moonshot = MoonshotBackend(
@@ -478,29 +340,12 @@ def build_maker_llm(models_config) -> MakerLLM:
         model=models_config.moonshot_model,
         timeout=getattr(models_config, "maker_timeout_seconds", 15.0),
     )
-    # Never checker_model.
-    #
-    # This used to read `... or models_config.checker_model`, so an empty
-    # MAKER_FALLBACK_MODEL silently routed the Maker's high-volume path — tens
-    # of calls per pass — onto whatever the Checker happened to be configured
-    # with. The Checker is the low-volume path and is chosen for judgement
-    # quality, not unit cost, so that inheritance points the expensive model at
-    # the expensive workload. config.py has warned about exactly this in prose
-    # since the fallback was added; the code one file over did it anyway.
-    #
-    # It now degrades to a fixed, explicitly cheap model and says so, rather
-    # than raising. A cost guardrail should not be able to take an unattended
-    # trading bot offline — but it must not be silent either, so the warning
-    # names both the variable and the model actually in use.
     fallback_model = (getattr(models_config, "maker_fallback_model", "") or "").strip()
     if not fallback_model:
         fallback_model = DEFAULT_MAKER_FALLBACK_MODEL
         log.warning(
-            "MAKER_FALLBACK_MODEL is empty — the Maker's Anthropic fallback "
-            "will use %s. It will NOT inherit CHECKER_MODEL (%s): the Maker "
-            "runs tens of calls per pass and the Checker only a handful, so "
-            "that inheritance puts the costlier model on the heavier path.",
-            fallback_model, getattr(models_config, "checker_model", "unset"),
+            "MAKER_FALLBACK_MODEL is empty — using %s for Anthropic fallback.",
+            fallback_model,
         )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,
@@ -515,11 +360,6 @@ def build_maker_llm(models_config) -> MakerLLM:
 
 
 def build_checker_llm(models_config) -> MakerLLM:
-    """Wire the Checker LLM.
-
-    Default is Moonshot/Kimi so the gate stops burning Claude tokens.
-    Claude remains available as an optional fallback or pinned provider.
-    """
     preference = (getattr(models_config, "checker_provider", "moonshot") or "moonshot").lower()
 
     moonshot = MoonshotBackend(
@@ -531,7 +371,6 @@ def build_checker_llm(models_config) -> MakerLLM:
 
     anthropic_model = (
         getattr(models_config, "checker_anthropic_model", None)
-        or getattr(models_config, "checker_fallback_model", None)
         or "claude-haiku-4-5-20251001"
     )
     anthropic_backend = AnthropicBackend(
@@ -541,8 +380,10 @@ def build_checker_llm(models_config) -> MakerLLM:
     )
 
     if preference == "moonshot":
-        return MakerLLM(primary=moonshot, fallback=anthropic_backend if anthropic_backend.configured else None)
+        return MakerLLM(primary=moonshot, fallback=None)
     if preference == "anthropic":
         return MakerLLM(primary=anthropic_backend, fallback=None)
-    # auto: prefer Moonshot, fall back to Anthropic
-    return MakerLLM(primary=moonshot, fallback=anthropic_backend if anthropic_backend.configured else None)
+    return MakerLLM(
+        primary=moonshot,
+        fallback=anthropic_backend if anthropic_backend.configured else None,
+    )
