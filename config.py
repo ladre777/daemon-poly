@@ -165,6 +165,9 @@ class ModelConfig:
     # Grounding data sources (not LLMs, but live here alongside the other
     # external-service keys for a single place to look).
     fred_api_key: str = os.getenv("FRED_API_KEY", "")
+    # Slash Golf / Live Golf Data (RapidAPI). Required for any live golf
+    # context. ESPN is permanently blocked from Railway IPs.
+    slash_golf_api_key: str = os.getenv("SLASH_GOLF_API_KEY", "")
 
 
 @dataclass
