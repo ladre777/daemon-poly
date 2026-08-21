@@ -1,14 +1,9 @@
 """
 DÆMON-KALSHI orchestrator. One pass = Scout -> Maker -> Checker -> Risk
-Guardrail -> Execution -> Ledger, looped on SCOUT_POLL_SECONDS. Run with
---dry-run to force paper mode regardless of the DRY_RUN env var (useful for
-a first live test against demo-api.kalshi.co without editing env vars).
+Guardrail -> Execution -> Ledger, looped on SCOUT_POLL_SECONDS.
 
-Startup order is a safety property, not a convenience: the bot reconciles
-with Kalshi before the first scan and refuses to run if that fails. Every
-pass re-reconciles before evaluating any candidate, and risk is evaluated
-against that reconciled snapshot rather than a process-local counter. If
-account state cannot be verified, the pass places no orders.
+2026-08-21: Consecutive Maker LLM failures no longer abort the entire pass.
+They only disable further LLM calls so quant (crypto) keeps running.
 """
 from __future__ import annotations
 
@@ -68,7 +63,6 @@ _SECONDS_PER_YEAR = 365.0 * 24.0 * 3600.0
 
 
 def _log_vol_signature(spot_client, symbols) -> None:
-    """Print realized vol at each sampling interval, in annualized terms."""
     for symbol in symbols:
         history = spot_client.history.get(symbol)
         if history is None:
@@ -81,18 +75,9 @@ def _log_vol_signature(spot_client, symbols) -> None:
                          if vol else f"{label} n/a")
         log.info("Volatility signature %s over %.0fs (annualized): %s",
                  symbol, lookback, "  ".join(rungs))
-        used = []
-        for lookback in sorted({3600.0, CONFIG.risk.vol_history_retention_seconds,
-                                86400.0}):
-            vol = history.realized_vol_robust(lookback)
-            used.append(f"{lookback:.0f}s -> "
-                        + (f"{vol * _SECONDS_PER_YEAR ** 0.5:.0%}" if vol else "n/a"))
-        log.info("Volatility used %s by lookback (annualized): %s",
-                 symbol, "  ".join(used))
 
 
 def _alert(notifier, method: str, *args, **kwargs) -> None:
-    """Call a notifier method, swallowing anything it throws."""
     if notifier is None:
         return
     try:
@@ -102,8 +87,6 @@ def _alert(notifier, method: str, *args, **kwargs) -> None:
 
 
 class Health:
-    """Tracks whether the bot is actually making progress."""
-
     def __init__(self, notifier=None):
         started = time.time()
         self.notifier = notifier
@@ -176,7 +159,6 @@ def install_shutdown_handlers() -> dict:
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
              notifier=None, health=None, alert_store=None, arb_scanner=None,
              coherence_gate=None):
-    """One scan pass. Returns the number of orders that actually filled."""
     try:
         snapshot = account.reconcile()
         if health is not None:
@@ -221,6 +203,10 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     model_breaker = CircuitBreaker(
         name="model-calls", threshold=CONFIG.model_failure_threshold, cooldown_seconds=0
     )
+    # When the LLM path is broken, keep pricing quant markets instead of
+    # ending the whole pass.
+    llm_disabled = False
+
     for candidate in candidates:
         proposal = None
         if quant_maker.can_handle(candidate):
@@ -233,6 +219,10 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             else:
                 stats["quant_no_proposal"] += 1
         elif candidate.category.lower() in CONFIG.llm_reasoning_categories:
+            if llm_disabled:
+                stats["llm_disabled"] += 1
+                continue
+
             is_priority = _is_priority(candidate)
             call_cap = (
                 CONFIG.max_fallback_llm_calls_per_pass
@@ -248,28 +238,30 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             if (not is_priority and per_event_cap
                     and llm_calls_by_event[event_key] >= per_event_cap):
                 stats["llm_capped_per_event"] += 1
-                log.debug("Event %s already used its %d call(s) this pass — "
-                          "skipping %s", event_key, per_event_cap, candidate.ticker)
                 continue
 
             if not is_priority and call_cap and llm_calls_this_pass >= call_cap:
                 stats["llm_capped"] += 1
-                log.debug("LLM call cap (%d) reached this pass — skipping non-priority %s",
-                          call_cap, candidate.ticker)
                 continue
             try:
                 proposal = maker.propose(candidate)
-            except Exception as e:                  # noqa: BLE001 - contained per candidate
+            except Exception as e:
                 severity = classify(e)
                 stats["maker_failed"] += 1
                 log.warning("Maker failed on %s (%s): %s", candidate.ticker, severity.value, e)
                 if model_breaker.record_failure(f"{type(e).__name__}: {e}"):
-                    _alert(notifier, "notify_systemic_error", "maker",
-                           f"{model_breaker.consecutive_failures} consecutive Maker "
-                           f"failures — ending pass. Last error: {e}")
-                    log.error("Maker has failed %d times in a row — ending pass",
-                              model_breaker.consecutive_failures)
-                    break
+                    llm_disabled = True
+                    _alert(
+                        notifier, "notify_systemic_error", "maker",
+                        f"{model_breaker.consecutive_failures} consecutive Maker "
+                        f"failures — LLM path paused for this pass (quant continues). "
+                        f"Last error: {e}"
+                    )
+                    log.error(
+                        "Maker failed %d times — pausing LLM for rest of pass; "
+                        "quant path still runs",
+                        model_breaker.consecutive_failures,
+                    )
                 continue
             model_breaker.record_success()
             llm_calls_this_pass += 1
@@ -278,11 +270,6 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             if proposal is None:
                 stats["llm_below_edge_threshold"] += 1
         else:
-            log.debug(
-                "Skipping %s [%s] — no quant path and category isn't in "
-                "LLM_REASONING_CATEGORIES (no grounding data source)",
-                candidate.ticker, candidate.category,
-            )
             stats["no_grounding_source"] += 1
             continue
 
@@ -304,17 +291,17 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
 
         try:
             verdict = checker.check(proposal)
-        except Exception as e:                      # noqa: BLE001 - contained per candidate
+        except Exception as e:
             severity = classify(e)
             stats["checker_failed"] += 1
             log.warning("Checker failed on %s (%s): %s", candidate.ticker, severity.value, e)
             if model_breaker.record_failure(f"{type(e).__name__}: {e}"):
-                _alert(notifier, "notify_systemic_error", "checker",
-                       f"{model_breaker.consecutive_failures} consecutive Checker "
-                       f"failures — ending pass. Last error: {e}")
-                log.error("Checker has failed %d times in a row — ending pass",
-                          model_breaker.consecutive_failures)
-                break
+                llm_disabled = True
+                _alert(
+                    notifier, "notify_systemic_error", "checker",
+                    f"{model_breaker.consecutive_failures} consecutive Checker "
+                    f"failures — LLM path paused for this pass. Last error: {e}"
+                )
             continue
         model_breaker.record_success()
         stats["checked"] += 1
@@ -392,7 +379,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 _alert(notifier, "notify_trade", record, decision, reason=reason)
             else:
                 stats["alert_suppressed"] += 1
-                log.info("Not re-alerting %s: %s", record.ticker, reason)
+
         if record.filled_count > 0:
             filled_this_pass += 1
             if health is not None:
@@ -407,7 +394,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     log.info(
         "Pass funnel: %d candidate(s) -> quant %d (no proposal %d, below edge "
         "%d), llm %d "
-        "(below edge %d, failed %d, capped %d, per-event %d, tainted %d), "
+        "(below edge %d, failed %d, capped %d, per-event %d, tainted %d, disabled %d), "
         "no grounding source %d | "
         "proposed %d -> checked %d (rejected %d, failed %d) -> approved %d "
         "-> filled %d",
@@ -417,6 +404,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         stats["llm_called"], stats["llm_below_edge_threshold"],
         stats["maker_failed"], stats["llm_capped"],
         stats["llm_capped_per_event"], stats["llm_skipped_tainted"],
+        stats["llm_disabled"],
         stats["no_grounding_source"],
         stats["proposed"], stats["checked"], stats["checker_rejected"],
         stats["checker_failed"], stats["approved"], filled_this_pass,
@@ -441,10 +429,7 @@ def main():
     if notifier.enabled:
         log.info("Telegram alerting enabled")
     else:
-        log.info(
-            "Telegram alerting disabled (set TELEGRAM_BOT_TOKEN and "
-            "TELEGRAM_CHAT_ID to enable)"
-        )
+        log.info("Telegram alerting disabled")
 
     try:
         assert_order_strategy_supported()
@@ -472,8 +457,7 @@ def main():
             raise SystemExit(
                 f"{message}\n\n"
                 f"Refusing to trade real money without durable storage.\n"
-                f"Fix: attach a Railway Volume mounted at /data to this "
-                f"service, then redeploy. See docs/SAFETY.md."
+                f"Fix: attach a Railway Volume mounted at /data."
             )
         log.warning("%s Continuing because env=%s dry_run=%s.",
                     message, CONFIG.kalshi.env, CONFIG.risk.dry_run)
@@ -496,9 +480,6 @@ def main():
     account = AccountState(client, order_store)
 
     scout = Scout(client)
-    # Slash Golf must be passed explicitly. The client and context path already
-    # existed; without this wiring golf grounding was always empty even when
-    # SLASH_GOLF_API_KEY was set.
     enricher = ContextEnricher(
         espn=ESPNClient(),
         slash_golf=(
@@ -524,15 +505,12 @@ def main():
                  ", ".join(f"{sym} {n} point(s)" for sym, n in sorted(restored.items())))
         _log_vol_signature(spot_client, sorted(restored))
     else:
-        log.info("No stored volatility history — the quant path starts cold "
-                 "and needs ~%.0fs of feed before it can price crypto.",
-                 CONFIG.risk.min_vol_span_seconds)
+        log.info("No stored volatility history — quant path starts cold")
     if rti_runner is not None:
         rti_runner.on_quote = spot_client.record_tick
         rti_runner.start()
     else:
-        log.warning("RTI_FEED_ENABLED is off — crypto families will not be "
-                    "priced. This suppresses trades; it does not risk any.")
+        log.warning("RTI_FEED_ENABLED is off — crypto families will not be priced")
     quant_maker = QuantMaker(spot_client)
     arb_scanner = ArbitrageScanner(notifier=notifier)
     coherence_gate = CoherenceGate()
@@ -556,12 +534,8 @@ def main():
         _alert(notifier, "notify_systemic_error", "reconciliation",
                f"Startup reconciliation failed, refusing to start: {e}{hint}")
         notifier.flush()
-        if hint:
-            log.error("%s", hint.strip())
         hold = CONFIG.startup_failure_hold_seconds
         if hold > 0:
-            log.error("Startup reconciliation failed; holding %ds before exit so "
-                      "the restart loop does not hammer the exchange", hold)
             time.sleep(hold)
         raise SystemExit(
             f"Startup reconciliation with Kalshi failed: {e}{hint}\n"
@@ -573,8 +547,7 @@ def main():
         notifier.flush()
         raise SystemExit(
             f"Startup reconciliation succeeded but the account is not safe to "
-            f"trade: {snapshot.blocking_reason()}\n"
-            f"Resolve this before starting (see docs/SAFETY.md)."
+            f"trade: {snapshot.blocking_reason()}"
         )
     log.info(
         "Startup state: $%.2f balance, %d open position(s), %d live order(s), "

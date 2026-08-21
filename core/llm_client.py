@@ -1,9 +1,8 @@
 """
-The Maker's (and now Checker's) text-completion backend, with a fallback provider.
+Maker/Checker LLM backend with optional failover.
 
-2026-08-21: Checker uses this module. Moonshot model preference updated —
-kimi-k2-turbo-preview and related k2-preview ids were discontinued; current
-accounts use kimi-k2.6 / kimi-k3 family names.
+2026-08-21: Model preference updated to current Kimi ids. Clearer failure
+when MOONSHOT_API_KEY is missing (was surfacing as opaque "all providers failed").
 """
 from __future__ import annotations
 
@@ -17,8 +16,6 @@ from core.errors import CircuitBreaker, Severity, SystemicError, classify
 
 log = logging.getLogger("daemon_kalshi.llm")
 
-# Ordered preference when the configured Moonshot model is not available.
-# Current platform names first (Aug 2026); legacy preview ids last.
 _MOONSHOT_MODEL_PREFERENCE = (
     "kimi-k2.6",
     "kimi-k3",
@@ -29,7 +26,6 @@ _MOONSHOT_MODEL_PREFERENCE = (
     "moonshot-v1-128k",
     "moonshot-v1-32k",
     "moonshot-v1-8k",
-    # Deprecated — kept only so old configs still rank if the key still has them
     "kimi-k2-turbo-preview",
     "kimi-k2-0711-preview",
     "kimi-k2-0905-preview",
@@ -56,12 +52,12 @@ class MoonshotBackend:
     name = "moonshot"
 
     def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 15.0):
-        self._api_key = api_key
-        self._base_url = base_url
+        self._api_key = (api_key or "").strip()
+        self._base_url = (base_url or "").rstrip("/")
         self.model = model
         self._client = httpx.Client(
-            base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
+            base_url=self._base_url or "https://api.moonshot.ai/v1",
+            headers={"Authorization": f"Bearer {self._api_key}"} if self._api_key else {},
             timeout=timeout,
         )
         self._probed = False
@@ -74,6 +70,10 @@ class MoonshotBackend:
         return bool(self._api_key)
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        if not self._api_key:
+            raise LLMUnavailable(
+                "Moonshot API key is empty. Set MOONSHOT_API_KEY in Railway."
+            )
         model = self.model
         last_error: Optional[httpx.HTTPStatusError] = None
 
@@ -118,8 +118,8 @@ class MoonshotBackend:
     def _adopt(self, model: str) -> None:
         if model != self.model:
             log.warning(
-                "Moonshot: switched to model %r for the rest of this process. "
-                "Set MOONSHOT_MODEL=%s to make this permanent.", model, model,
+                "Moonshot: switched to model %r. Set MOONSHOT_MODEL=%s permanently.",
+                model, model,
             )
             self.model = model
 
@@ -198,7 +198,7 @@ class AnthropicBackend:
     name = "anthropic"
 
     def __init__(self, api_key: str, model: str, max_tokens: int = 500):
-        self._api_key = api_key
+        self._api_key = (api_key or "").strip()
         self.model = model
         self._max_tokens = max_tokens
         self._client = None
@@ -208,6 +208,8 @@ class AnthropicBackend:
         return bool(self._api_key)
 
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        if not self._api_key:
+            raise LLMUnavailable("Anthropic API key is empty.")
         if self._client is None:
             import anthropic
             self._client = anthropic.Anthropic(api_key=self._api_key)
@@ -274,7 +276,8 @@ class MakerLLM:
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
         if not self.configured:
             raise LLMUnavailable(
-                "No Maker LLM configured. Set MOONSHOT_API_KEY or ANTHROPIC_API_KEY."
+                "No Maker LLM configured. Set MOONSHOT_API_KEY "
+                "(exact name) in Railway Variables."
             )
 
         errors: list[str] = []
@@ -308,14 +311,8 @@ class MakerLLM:
                         )
                         if self.breaker.opened_at is None:
                             self.breaker.record_failure(str(e))
-                        log.warning(
-                            "Maker primary %s has timed out %d time(s) — "
-                            "opening the breaker for %.0fs.",
-                            self.primary.name, self.timeouts_seen,
-                            self.breaker.cooldown_seconds,
-                        )
                 log.warning(
-                    "Maker primary provider %s failed (%s): %s%s",
+                    "Maker primary %s failed (%s): %s%s",
                     self.primary.name, severity.value, e,
                     " — falling back" if self.fallback else "",
                 )
@@ -328,11 +325,14 @@ class MakerLLM:
             except Exception as e:
                 errors.append(f"{self.fallback.name}: {e}")
 
-        raise LLMUnavailable("; ".join(errors) or "all providers failed")
+        detail = "; ".join(errors) if errors else (
+            "no provider answered (check MOONSHOT_API_KEY and MOONSHOT_MODEL)"
+        )
+        raise LLMUnavailable(detail)
 
 
 def build_maker_llm(models_config) -> MakerLLM:
-    preference = (getattr(models_config, "maker_provider", "auto") or "auto").lower()
+    preference = (getattr(models_config, "maker_provider", "moonshot") or "moonshot").lower()
 
     moonshot = MoonshotBackend(
         api_key=models_config.moonshot_api_key,
@@ -343,16 +343,17 @@ def build_maker_llm(models_config) -> MakerLLM:
     fallback_model = (getattr(models_config, "maker_fallback_model", "") or "").strip()
     if not fallback_model:
         fallback_model = DEFAULT_MAKER_FALLBACK_MODEL
-        log.warning(
-            "MAKER_FALLBACK_MODEL is empty — using %s for Anthropic fallback.",
-            fallback_model,
-        )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,
         model=fallback_model,
     )
 
     if preference == "moonshot":
+        if not moonshot.configured:
+            log.error(
+                "MAKER_LLM_PROVIDER=moonshot but MOONSHOT_API_KEY is empty. "
+                "LLM Maker will fail until the key is set."
+            )
         return MakerLLM(primary=moonshot, fallback=None)
     if preference == "anthropic":
         return MakerLLM(primary=anthropic_backend, fallback=None)
@@ -368,14 +369,10 @@ def build_checker_llm(models_config) -> MakerLLM:
         model=getattr(models_config, "checker_model", None) or models_config.moonshot_model,
         timeout=getattr(models_config, "checker_timeout_seconds", 12.0),
     )
-
-    anthropic_model = (
-        getattr(models_config, "checker_anthropic_model", None)
-        or "claude-haiku-4-5-20251001"
-    )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,
-        model=anthropic_model,
+        model=getattr(models_config, "checker_anthropic_model", None)
+        or "claude-haiku-4-5-20251001",
         max_tokens=getattr(models_config, "checker_max_tokens", 1200),
     )
 
