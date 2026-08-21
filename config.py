@@ -44,7 +44,8 @@ def _floats(name: str, default: tuple) -> tuple:
 
 
 DEFAULT_MAKER_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
-DEFAULT_MOONSHOT_MODEL = "kimi-k2-turbo-preview"
+# kimi-k2-turbo-preview was discontinued; current general model is kimi-k2.6
+DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
 
 
 @dataclass
@@ -89,8 +90,6 @@ class ModelConfig:
     moonshot_model: str = os.getenv("MOONSHOT_MODEL", DEFAULT_MOONSHOT_MODEL)
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    # Checker uses Moonshot by default. If CHECKER_MODEL is unset, reuse
-    # MOONSHOT_MODEL so one Railway var covers Maker + Checker.
     checker_provider: str = os.getenv("CHECKER_LLM_PROVIDER", "moonshot")
     checker_model: str = os.getenv(
         "CHECKER_MODEL",
@@ -103,7 +102,7 @@ class ModelConfig:
     checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 1200)
     checker_effort: str = os.getenv("CHECKER_EFFORT", "low")
 
-    maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "auto")
+    maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "moonshot")
     maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 8.0)
     maker_fallback_model: str = os.getenv(
         "MAKER_FALLBACK_MODEL", DEFAULT_MAKER_FALLBACK_MODEL
