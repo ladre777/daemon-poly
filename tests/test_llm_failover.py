@@ -172,8 +172,21 @@ def test_kimi_payload_is_bounded_structured_and_cache_aware(caplog):
     assert seen_payload["max_tokens"] == 321
     assert seen_payload["response_format"] == {"type": "json_object"}
     assert seen_payload["prompt_cache_key"] == "test-kalshi-maker-v1"
+    assert seen_payload["thinking"] == {"type": "disabled"}
     assert "temperature" not in seen_payload
     assert "cached_tokens=360" in caplog.text
+
+
+def test_kimi_empty_content_is_not_treated_as_a_valid_completion():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"prompt_tokens": 420, "completion_tokens": 800},
+        })
+
+    backend = _moonshot_with_transport(handler, model="kimi-k2.6")
+    with pytest.raises(SystemicError, match="empty message content"):
+        backend.complete("stable rules", "current market")
 
 
 def test_moonshot_404_with_no_usable_model_still_raises():

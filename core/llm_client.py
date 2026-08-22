@@ -64,12 +64,14 @@ class MoonshotBackend:
         timeout: float = 15.0,
         max_tokens: int = 800,
         prompt_cache_key: str = "",
+        disable_thinking: bool = True,
     ):
         self._api_key = (api_key or "").strip()
         self._base_url = (base_url or "").rstrip("/")
         self.model = model
         self._max_tokens = max(1, int(max_tokens))
         self._prompt_cache_key = (prompt_cache_key or "").strip()
+        self._disable_thinking = bool(disable_thinking)
         self._client = httpx.Client(
             base_url=self._base_url or "https://api.moonshot.ai/v1",
             headers={"Authorization": f"Bearer {self._api_key}"} if self._api_key else {},
@@ -169,6 +171,11 @@ class MoonshotBackend:
             payload["temperature"] = temperature
         if self._prompt_cache_key:
             payload["prompt_cache_key"] = self._prompt_cache_key
+        # K2.6 defaults to deep thinking, whose internal reasoning shares the
+        # max_tokens budget with content. These one-shot, source-grounded
+        # JSON decisions need a complete bounded answer, not a tool loop.
+        if self._disable_thinking and model.startswith("kimi-k2.6"):
+            payload["thinking"] = {"type": "disabled"}
 
         started = time.perf_counter()
         resp = self._client.post("/chat/completions", json=payload)
@@ -176,19 +183,28 @@ class MoonshotBackend:
         resp.raise_for_status()
         body = resp.json()
         usage = body.get("usage") or {}
+        prompt_details = usage.get("prompt_tokens_details") or {}
+        cached_tokens = usage.get(
+            "cached_tokens", prompt_details.get("cached_tokens", 0)
+        )
+        try:
+            choice = body["choices"][0]
+            content = choice["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            raise SystemicError(f"Moonshot response had no message content: {e}") from e
+        if not isinstance(content, str) or not content.strip():
+            raise SystemicError("Moonshot response had empty message content")
         log.info(
             "Kimi completion model=%s elapsed_ms=%.0f prompt_tokens=%s "
-            "cached_tokens=%s completion_tokens=%s",
+            "cached_tokens=%s completion_tokens=%s finish_reason=%s",
             model,
             elapsed_ms,
             usage.get("prompt_tokens", "?"),
-            usage.get("cached_tokens", "?"),
+            cached_tokens,
             usage.get("completion_tokens", "?"),
+            choice.get("finish_reason", "?"),
         )
-        try:
-            return body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, ValueError) as e:
-            raise SystemicError(f"Moonshot response had no message content: {e}") from e
+        return content
 
     def _next_model(self) -> Optional[str]:
         if not self._probed:
@@ -451,6 +467,7 @@ def build_maker_llm(models_config) -> MakerLLM:
         timeout=getattr(models_config, "maker_timeout_seconds", 15.0),
         max_tokens=getattr(models_config, "moonshot_max_tokens", 800),
         prompt_cache_key=getattr(models_config, "moonshot_prompt_cache_key", ""),
+        disable_thinking=getattr(models_config, "moonshot_disable_thinking", True),
     )
     gemini = GeminiBackend(
         api_key=getattr(models_config, "gemini_api_key", ""),
@@ -504,6 +521,7 @@ def build_checker_llm(models_config) -> MakerLLM:
         timeout=getattr(models_config, "checker_timeout_seconds", 12.0),
         max_tokens=getattr(models_config, "moonshot_max_tokens", 800),
         prompt_cache_key=getattr(models_config, "moonshot_prompt_cache_key", ""),
+        disable_thinking=getattr(models_config, "moonshot_disable_thinking", True),
     )
     gemini = GeminiBackend(
         api_key=getattr(models_config, "gemini_api_key", ""),

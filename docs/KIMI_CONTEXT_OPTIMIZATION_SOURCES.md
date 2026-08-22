@@ -19,3 +19,10 @@ Source: https://platform.kimi.ai/docs/guide/utilize-the-streaming-output-feature
 Streaming reduces time-to-first-token but does not reduce total inference work. It is therefore useful for user-facing progress, not as the core fix for a bot that must parse a completed structured response before acting.
 
 Retrieved: 2026-08-22.
+
+## K2.6 thinking-mode decision
+
+Kimi K2.6 enables thinking by default, and its `reasoning_content` and final `content` share one `max_tokens` budget. Official guidance recommends a much larger budget for deep, multi-step reasoning. For this bot's one-shot, source-grounded JSON probability decisions, default thinking consumed the 800-token output cap before emitting any final content in the 2026-08-22 deployment. The bot therefore sends `thinking: {"type": "disabled"}` only for `kimi-k2.6`; this preserves the complete bounded answer and avoids substituting a lower-quality model. This setting is configurable through `MOONSHOT_DISABLE_THINKING`.
+
+Source: https://platform.kimi.ai/docs/guide/use-thinking-models
+Source: https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart

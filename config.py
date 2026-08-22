@@ -105,6 +105,10 @@ class ModelConfig:
     moonshot_prompt_cache_key: str = os.getenv(
         "MOONSHOT_PROMPT_CACHE_KEY", "daemon-kalshi-maker-v1"
     )
+    # K2.6 thinking consumes the same max_tokens budget as final content.
+    # Disable it for short, source-grounded one-shot probability decisions so
+    # the required JSON response is not truncated before it is emitted.
+    moonshot_disable_thinking: bool = _bool("MOONSHOT_DISABLE_THINKING", True)
 
     # Gemini is an optional failover provider. The key remains in Railway,
     # never in source control or logs.
