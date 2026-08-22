@@ -4,6 +4,7 @@ Central config for DÆMON-KALSHI.
 Scope: Golf, Crypto, Weather, Finance/commodities.
 Moonshot: longer timeouts — production saw successful calls then read timeouts.
 """
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,7 @@ def _first_env(*names: str, default: str = "") -> str:
 
 DEFAULT_MAKER_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
 @dataclass
@@ -99,6 +101,15 @@ class ModelConfig:
     moonshot_model: str = _first_env(
         "MOONSHOT_MODEL", "KIMI_MODEL", default=DEFAULT_MOONSHOT_MODEL
     )
+
+    # Gemini is an optional failover provider. The key remains in Railway,
+    # never in source control or logs.
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_base_url: str = os.getenv(
+        "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+    )
+    gemini_model: str = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    gemini_timeout_seconds: float = _float("GEMINI_TIMEOUT_SECONDS", 12.0)
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     checker_provider: str = os.getenv("CHECKER_LLM_PROVIDER", "moonshot")
@@ -278,8 +289,7 @@ class AppConfig:
 
 CONFIG = AppConfig()
 
-import logging as _logging
-_log = _logging.getLogger("daemon_kalshi.config")
+_log = logging.getLogger("daemon_kalshi.config")
 _log.info(
     "Config scope categories=%s sports=%s llm_cats=%s moonshot_key=%s model=%s timeouts=%.0fs",
     CONFIG.scout_categories,

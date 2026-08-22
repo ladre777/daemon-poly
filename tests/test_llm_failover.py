@@ -12,9 +12,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from core.errors import CircuitBreaker, FatalError, Severity, TransientError, classify
+from core.errors import CircuitBreaker, FatalError, Severity, SystemicError, TransientError, classify
 from core.llm_client import (
     AnthropicBackend,
+    GeminiBackend,
     LLMUnavailable,
     MakerLLM,
     MoonshotBackend,
@@ -162,6 +163,51 @@ def test_moonshot_does_not_reprobe_models_on_every_call():
 
 
 # --------------------------------------------------------------------------
+# Gemini REST backend
+# --------------------------------------------------------------------------
+
+def _gemini_with_transport(handler, model="gemini-test"):
+    backend = GeminiBackend(
+        api_key="g-key", base_url="https://gemini.test/v1beta", model=model
+    )
+    backend._client = httpx.Client(
+        base_url="https://gemini.test/v1beta",
+        headers={"x-goog-api-key": "g-key"},
+        transport=httpx.MockTransport(handler),
+    )
+    return backend
+
+
+def test_gemini_backend_sends_system_instruction_and_parses_text():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-goog-api-key"] == "g-key"
+        assert request.url.path.endswith("/models/gemini-test:generateContent")
+        import json
+        payload = json.loads(request.content)
+        assert payload["systemInstruction"]["parts"][0]["text"] == "sys"
+        assert payload["contents"][0]["parts"][0]["text"] == "user"
+        assert payload["generationConfig"]["responseMimeType"] == "application/json"
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [
+                {"text": '{"probability_yes": '}, {"text": "0.6}"}
+            ]}}]
+        })
+
+    backend = _gemini_with_transport(handler)
+    assert backend.complete("sys", "user") == '{"probability_yes": 0.6}'
+
+
+def test_gemini_backend_rejects_empty_candidate_text():
+    backend = _gemini_with_transport(
+        lambda request: httpx.Response(200, json={
+            "candidates": [{"content": {"parts": []}}]
+        })
+    )
+    with pytest.raises(SystemicError, match="empty text"):
+        backend.complete("sys", "user")
+
+
+# --------------------------------------------------------------------------
 # failover
 # --------------------------------------------------------------------------
 
@@ -198,6 +244,41 @@ def test_failover_to_anthropic_when_primary_404s():
 
     assert llm.complete("s", "u") == "fallback answer"
     assert llm.last_provider == "anthropic"
+
+
+def test_failover_to_gemini_when_moonshot_times_out():
+    primary = _StubBackend("moonshot", error=httpx.ReadTimeout("slow"))
+    fallback = _StubBackend("gemini", result="fallback answer")
+    llm = MakerLLM(primary=primary, fallback=fallback)
+
+    assert llm.complete("s", "u") == "fallback answer"
+    assert llm.last_provider == "gemini"
+    assert primary.calls == 1
+    assert fallback.calls == 1
+
+
+def test_moonshot_gemini_mode_keeps_moonshot_primary():
+    from types import SimpleNamespace
+    from core.llm_client import build_maker_llm
+
+    models = SimpleNamespace(
+        maker_provider="moonshot_gemini",
+        moonshot_api_key="moonshot-key",
+        moonshot_base_url="https://moon.test/v1",
+        moonshot_model="kimi-test",
+        maker_timeout_seconds=10.0,
+        gemini_api_key="gemini-key",
+        gemini_base_url="https://gemini.test/v1beta",
+        gemini_model="gemini-test",
+        gemini_timeout_seconds=8.0,
+        maker_fallback_model="",
+        anthropic_api_key="",
+    )
+
+    llm = build_maker_llm(models)
+
+    assert llm.primary.name == "moonshot"
+    assert llm.fallback.name == "gemini"
 
 
 def test_fatal_primary_error_opens_the_breaker_immediately():

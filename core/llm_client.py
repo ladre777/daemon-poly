@@ -194,6 +194,48 @@ class MoonshotBackend:
         return ranked
 
 
+class GeminiBackend:
+    """Gemini REST backend used only as an optional fallback provider."""
+
+    name = "gemini"
+
+    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 12.0):
+        self._api_key = (api_key or "").strip()
+        self._base_url = (base_url or "").rstrip("/")
+        self.model = model
+        self._client = httpx.Client(
+            base_url=self._base_url or "https://generativelanguage.googleapis.com/v1beta",
+            headers={"x-goog-api-key": self._api_key} if self._api_key else {},
+            timeout=timeout,
+        )
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._api_key)
+
+    def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        if not self._api_key:
+            raise LLMUnavailable("Gemini API key is empty. Set GEMINI_API_KEY in Railway.")
+        payload = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {
+                "temperature": temperature,
+                "responseMimeType": "application/json",
+            },
+        }
+        resp = self._client.post(f"/models/{self.model}:generateContent", json=payload)
+        resp.raise_for_status()
+        try:
+            parts = resp.json()["candidates"][0]["content"]["parts"]
+            text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            raise SystemicError(f"Gemini response had no text content: {e}") from e
+        if not text.strip():
+            raise SystemicError("Gemini response had empty text content")
+        return text
+
+
 class AnthropicBackend:
     name = "anthropic"
 
@@ -340,6 +382,12 @@ def build_maker_llm(models_config) -> MakerLLM:
         model=models_config.moonshot_model,
         timeout=getattr(models_config, "maker_timeout_seconds", 15.0),
     )
+    gemini = GeminiBackend(
+        api_key=getattr(models_config, "gemini_api_key", ""),
+        base_url=getattr(models_config, "gemini_base_url", ""),
+        model=getattr(models_config, "gemini_model", "gemini-3.5-flash-lite"),
+        timeout=getattr(models_config, "gemini_timeout_seconds", 12.0),
+    )
     fallback_model = (getattr(models_config, "maker_fallback_model", "") or "").strip()
     if not fallback_model:
         fallback_model = DEFAULT_MAKER_FALLBACK_MODEL
@@ -355,6 +403,10 @@ def build_maker_llm(models_config) -> MakerLLM:
                 "LLM Maker will fail until the key is set."
             )
         return MakerLLM(primary=moonshot, fallback=None)
+    if preference == "moonshot_gemini":
+        return MakerLLM(primary=moonshot, fallback=gemini)
+    if preference == "gemini":
+        return MakerLLM(primary=gemini, fallback=None)
     if preference == "anthropic":
         return MakerLLM(primary=anthropic_backend, fallback=None)
     return MakerLLM(primary=moonshot, fallback=anthropic_backend)
@@ -369,6 +421,12 @@ def build_checker_llm(models_config) -> MakerLLM:
         model=getattr(models_config, "checker_model", None) or models_config.moonshot_model,
         timeout=getattr(models_config, "checker_timeout_seconds", 12.0),
     )
+    gemini = GeminiBackend(
+        api_key=getattr(models_config, "gemini_api_key", ""),
+        base_url=getattr(models_config, "gemini_base_url", ""),
+        model=getattr(models_config, "gemini_model", "gemini-3.5-flash-lite"),
+        timeout=getattr(models_config, "gemini_timeout_seconds", 12.0),
+    )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,
         model=getattr(models_config, "checker_anthropic_model", None)
@@ -378,6 +436,10 @@ def build_checker_llm(models_config) -> MakerLLM:
 
     if preference == "moonshot":
         return MakerLLM(primary=moonshot, fallback=None)
+    if preference == "moonshot_gemini":
+        return MakerLLM(primary=moonshot, fallback=gemini)
+    if preference == "gemini":
+        return MakerLLM(primary=gemini, fallback=None)
     if preference == "anthropic":
         return MakerLLM(primary=anthropic_backend, fallback=None)
     return MakerLLM(
