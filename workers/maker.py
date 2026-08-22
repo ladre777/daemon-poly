@@ -32,6 +32,50 @@ heuristic and can be wrong when multiple tournaments/games are live at once. \
 Respond ONLY with JSON: \
 {"probability_yes": 0.0-1.0, "confidence": 0.0-1.0, "reasoning": "2-4 sentences"}"""
 
+# This fixed protocol and the accumulated playbook are intentionally kept ahead
+# of market-specific facts. Kimi caches stable prompt prefixes; the dynamic
+# evidence card below therefore changes without invalidating this guidance.
+DECISION_PROTOCOL = """Decision protocol:
+1. Price the settlement condition itself, not the displayed Kalshi price.
+2. Treat source provenance and settlement-rule mismatches as uncertainty, not edge.
+3. Do not invent missing facts, a wider error band, or an unverified event match.
+4. Use the available evidence proportionally; low confidence is preferable to
+   false precision.
+5. Return the required JSON object only, with concise decision-relevant reasoning."""
+
+
+def stable_system_prompt(playbook: str) -> str:
+    """Build a cacheable, market-independent system prefix."""
+    prompt = f"{SYSTEM_PROMPT}\n\n{DECISION_PROTOCOL}"
+    if playbook:
+        prompt += (
+            "\n\nLessons from past trades (use as a prior, not gospel):\n"
+            + clamp_text(playbook, CONFIG.risk.max_playbook_chars)
+        )
+    return prompt
+
+
+def bounded_evidence_card(value: str, limit: int) -> str:
+    """Bound live input without discarding either provenance or target facts.
+
+    Source adapters place provenance and broad conditions first, while market-
+    specific findings often land last. For uncommon oversized cards, retain
+    both ends rather than applying a head-only cut that can remove the very
+    player, city, or fixture being priced.
+    """
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    marker = "[… middle of evidence card compacted …]"
+    available = max(0, limit - len(marker) - 2)
+    head_budget = available * 3 // 5
+    tail_budget = available - head_budget
+    head = text[:head_budget].rsplit("\n", 1)[0].rstrip()
+    tail = text[-tail_budget:].split("\n", 1)[-1].lstrip()
+    if not head or not tail:
+        return clamp_text(text, limit)
+    return f"{head}\n{marker}\n{tail}"
+
 
 @dataclass
 class Proposal:
@@ -113,22 +157,19 @@ class Maker:
         if self.enricher:
             extra = self.enricher.enrich(candidate)
             if extra:
+                # The evidence card contains only current, source-attributed
+                # facts. Its bounded size protects latency without dropping
+                # the stable decision rules or historical playbook.
                 user_msg += (
-                    "\n\nLive grounding data. Each source states its own "
-                    "provenance and how far it should be trusted — read that "
-                    "before weighing it:\n"
-                    + clamp_text(extra, CONFIG.risk.max_context_chars)
+                    "\n\nLIVE EVIDENCE CARD (current facts; verify market match):\n"
+                    + bounded_evidence_card(extra, CONFIG.risk.max_context_chars)
                 )
 
         playbook = Reflector.load_playbook()
-        if playbook:
-            user_msg += (
-                "\n\nLessons from past trades (use as a prior, not gospel):\n"
-                + clamp_text(playbook, CONFIG.risk.max_playbook_chars)
-            )
+        system_prompt = stable_system_prompt(playbook)
 
         try:
-            content = self._llm.complete(SYSTEM_PROMPT, user_msg, temperature=0.3)
+            content = self._llm.complete(system_prompt, user_msg, temperature=0.3)
         except LLMUnavailable as e:
             if _is_missing_key_error(e):
                 self._disabled = True

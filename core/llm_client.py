@@ -56,10 +56,20 @@ def first_text_block(response) -> str:
 class MoonshotBackend:
     name = "moonshot"
 
-    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 15.0):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout: float = 15.0,
+        max_tokens: int = 800,
+        prompt_cache_key: str = "",
+    ):
         self._api_key = (api_key or "").strip()
         self._base_url = (base_url or "").rstrip("/")
         self.model = model
+        self._max_tokens = max(1, int(max_tokens))
+        self._prompt_cache_key = (prompt_cache_key or "").strip()
         self._client = httpx.Client(
             base_url=self._base_url or "https://api.moonshot.ai/v1",
             headers={"Authorization": f"Bearer {self._api_key}"} if self._api_key else {},
@@ -146,13 +156,37 @@ class MoonshotBackend:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            "max_tokens": self._max_tokens,
+            "response_format": {"type": "json_object"},
         }
-        if temperature is not None and model not in self._no_temperature:
+        # Kimi K2.6 rejects the 0.3 value used by other OpenAI-compatible
+        # providers. Omitting temperature retains the model's supported default.
+        if (
+            temperature is not None
+            and not model.startswith("kimi-k2.6")
+            and model not in self._no_temperature
+        ):
             payload["temperature"] = temperature
+        if self._prompt_cache_key:
+            payload["prompt_cache_key"] = self._prompt_cache_key
+
+        started = time.perf_counter()
         resp = self._client.post("/chat/completions", json=payload)
+        elapsed_ms = (time.perf_counter() - started) * 1000
         resp.raise_for_status()
+        body = resp.json()
+        usage = body.get("usage") or {}
+        log.info(
+            "Kimi completion model=%s elapsed_ms=%.0f prompt_tokens=%s "
+            "cached_tokens=%s completion_tokens=%s",
+            model,
+            elapsed_ms,
+            usage.get("prompt_tokens", "?"),
+            usage.get("cached_tokens", "?"),
+            usage.get("completion_tokens", "?"),
+        )
         try:
-            return resp.json()["choices"][0]["message"]["content"]
+            return body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as e:
             raise SystemicError(f"Moonshot response had no message content: {e}") from e
 
@@ -415,6 +449,8 @@ def build_maker_llm(models_config) -> MakerLLM:
         base_url=models_config.moonshot_base_url,
         model=models_config.moonshot_model,
         timeout=getattr(models_config, "maker_timeout_seconds", 15.0),
+        max_tokens=getattr(models_config, "moonshot_max_tokens", 800),
+        prompt_cache_key=getattr(models_config, "moonshot_prompt_cache_key", ""),
     )
     gemini = GeminiBackend(
         api_key=getattr(models_config, "gemini_api_key", ""),
@@ -425,6 +461,12 @@ def build_maker_llm(models_config) -> MakerLLM:
     fallback_model = (getattr(models_config, "maker_fallback_model", "") or "").strip()
     if not fallback_model:
         fallback_model = DEFAULT_MAKER_FALLBACK_MODEL
+        log.warning(
+            "MAKER_FALLBACK_MODEL is empty; using cheap default %r rather than "
+            "CHECKER_MODEL=%r.",
+            fallback_model,
+            getattr(models_config, "checker_model", ""),
+        )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,
         model=fallback_model,
@@ -460,6 +502,8 @@ def build_checker_llm(models_config) -> MakerLLM:
         base_url=models_config.moonshot_base_url,
         model=getattr(models_config, "checker_model", None) or models_config.moonshot_model,
         timeout=getattr(models_config, "checker_timeout_seconds", 12.0),
+        max_tokens=getattr(models_config, "moonshot_max_tokens", 800),
+        prompt_cache_key=getattr(models_config, "moonshot_prompt_cache_key", ""),
     )
     gemini = GeminiBackend(
         api_key=getattr(models_config, "gemini_api_key", ""),

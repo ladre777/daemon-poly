@@ -101,6 +101,10 @@ class ModelConfig:
     moonshot_model: str = _first_env(
         "MOONSHOT_MODEL", "KIMI_MODEL", default=DEFAULT_MOONSHOT_MODEL
     )
+    moonshot_max_tokens: int = _int("MOONSHOT_MAX_TOKENS", 800)
+    moonshot_prompt_cache_key: str = os.getenv(
+        "MOONSHOT_PROMPT_CACHE_KEY", "daemon-kalshi-maker-v1"
+    )
 
     # Gemini is an optional failover provider. The key remains in Railway,
     # never in source control or logs.
@@ -169,7 +173,7 @@ class RiskConfig:
     max_quote_age_seconds: float = _float("MAX_QUOTE_AGE_SECONDS", 60.0)
     max_reasoning_chars: int = _int("MAX_REASONING_CHARS", 2000)
     max_playbook_chars: int = _int("MAX_PLAYBOOK_CHARS", 4000)
-    max_context_chars: int = _int("MAX_CONTEXT_CHARS", 4000)
+    max_context_chars: int = _int("MAX_CONTEXT_CHARS", 2400)
     max_title_chars: int = _int("MAX_TITLE_CHARS", 300)
     max_spot_age_seconds: float = _float("MAX_SPOT_AGE_SECONDS", 120.0)
     rti_feed_enabled: bool = _bool("RTI_FEED_ENABLED", True)

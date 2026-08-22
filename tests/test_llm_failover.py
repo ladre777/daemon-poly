@@ -130,9 +130,50 @@ def test_moonshot_404_resolves_a_real_model_and_retries():
     out = backend.complete("sys", "user")
 
     assert out == "{\"probability_yes\": 0.6}"
-    # Preference order picks k2 over the generic moonshot-v1 model.
-    assert backend.model == "kimi-k2-0711-preview"
-    assert seen_models == ["kimi-k2-turbo-preview", "kimi-k2-0711-preview"]
+    # Current Kimi preference de-prioritises retired previews after the
+    # generally available Moonshot models returned by the account.
+    assert backend.model == "moonshot-v1-8k"
+    assert seen_models == ["kimi-k2-turbo-preview", "moonshot-v1-8k"]
+
+
+def test_kimi_payload_is_bounded_structured_and_cache_aware(caplog):
+    """Kimi K2.6 must not receive unsupported temperature=0.3."""
+    seen_payload = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen_payload.update(json.loads(request.content))
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "{\"probability_yes\": 0.6}"}}],
+            "usage": {
+                "prompt_tokens": 420,
+                "cached_tokens": 360,
+                "completion_tokens": 71,
+            },
+        })
+
+    backend = MoonshotBackend(
+        api_key="k",
+        base_url="https://moon.test/v1",
+        model="kimi-k2.6",
+        max_tokens=321,
+        prompt_cache_key="test-kalshi-maker-v1",
+    )
+    backend._client = httpx.Client(
+        base_url="https://moon.test/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with caplog.at_level("INFO"):
+        assert backend.complete("stable rules", "current market", 0.3) == (
+            "{\"probability_yes\": 0.6}"
+        )
+
+    assert seen_payload["max_tokens"] == 321
+    assert seen_payload["response_format"] == {"type": "json_object"}
+    assert seen_payload["prompt_cache_key"] == "test-kalshi-maker-v1"
+    assert "temperature" not in seen_payload
+    assert "cached_tokens=360" in caplog.text
 
 
 def test_moonshot_404_with_no_usable_model_still_raises():
@@ -475,14 +516,14 @@ def test_code_models_are_tried_after_general_ones():
     ranked = MoonshotBackend._ranked(
         ["kimi-k2.7-code", "kimi-k2.6", "kimi-k3", "kimi-k2.7-code-highspeed"]
     )
-    assert ranked[0] == "kimi-k3"           # newest general model first
-    assert ranked[1] == "kimi-k2.6"
+    assert ranked[0] == "kimi-k2.6"         # configured production model first
+    assert ranked[1] == "kimi-k3"
     assert all("code" in m for m in ranked[2:])
 
 
 def test_known_good_names_outrank_everything():
     ranked = MoonshotBackend._ranked(["kimi-k3", "kimi-k2-turbo-preview"])
-    assert ranked[0] == "kimi-k2-turbo-preview"
+    assert ranked[0] == "kimi-k3"
 
 
 # --------------------------------------------------------------------------
@@ -561,6 +602,9 @@ def _models(fallback, checker="claude-sonnet-5"):
     m.checker_model = checker
     m.anthropic_api_key = "test-key"
     m.moonshot_api_key = "test-key"
+    # Exercise the legacy Anthropic degraded route explicitly. Production uses
+    # moonshot_gemini, where Gemini is the only fallback provider.
+    m.maker_provider = "legacy_auto"
     return m
 
 
