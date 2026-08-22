@@ -1,6 +1,10 @@
 """
-Maker: LLM probability path. If no LLM is configured, propose() returns None
-immediately so the orchestrator can keep running quant without failure spam.
+Maker: LLM probability path.
+
+Timeouts are transient (Moonshot latency). Missing-key is permanent for the
+process. Do not conflate them — production showed 88 successful calls then
+timeouts, then a permanent disable that muted golf/weather for the rest of
+the process lifetime.
 """
 from __future__ import annotations
 
@@ -63,6 +67,15 @@ class Proposal:
         return self.executable_edge
 
 
+def _is_missing_key_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "api key is empty" in msg
+        or "no maker llm configured" in msg
+        or ("moonshot_api_key" in msg and "empty" in msg)
+    )
+
+
 class Maker:
     def __init__(self, enricher=None, llm=None):
         self._llm = llm or build_maker_llm(CONFIG.models)
@@ -71,8 +84,7 @@ class Maker:
         if self._disabled:
             log.error(
                 "Maker LLM disabled: no usable provider. "
-                "Set MOONSHOT_API_KEY (exact name) in Railway. "
-                "Quant path will still run."
+                "Set MOONSHOT_API_KEY. Quant path still runs."
             )
         else:
             log.info("Maker LLM: %s", self._llm.describe())
@@ -118,12 +130,9 @@ class Maker:
         try:
             content = self._llm.complete(SYSTEM_PROMPT, user_msg, temperature=0.3)
         except LLMUnavailable as e:
-            # Treat hard misconfig as disable for this process so we stop
-            # hammering and alerting every candidate.
-            msg = str(e).lower()
-            if "api key" in msg or "no maker llm" in msg or "no provider" in msg:
+            if _is_missing_key_error(e):
                 self._disabled = True
-                log.error("Maker LLM disabled after config error: %s", e)
+                log.error("Maker LLM disabled after missing-key error: %s", e)
             raise
 
         checked = validate_maker_output(content, ticker=candidate.ticker)
