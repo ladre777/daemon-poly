@@ -410,6 +410,17 @@ class TelegramClient:
             key=f"systemic:{kind}",
         )
 
+    def notify_provider_rate_limited(self, provider: str, detail: str) -> None:
+        """A temporary optional-provider quota event; quant remains active."""
+        self.send(
+            f"⚠️ LLM PROVIDER RATE-LIMITED — quant continues\n"
+            f"Provider: {provider}\n"
+            f"The LLM path is paused for this scan and will retry later.\n"
+            f"Detail: {detail}",
+            key=f"provider-rate-limit:{provider}",
+            throttle_seconds=CONFIG.telegram.throttle_seconds,
+        )
+
     def notify_stalled(self, what: str, seconds: float) -> None:
         """The brief's watchdog: alert when no successful scan or
         reconciliation has happened within a defined interval.

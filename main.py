@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from config import CONFIG
 from core.account_state import AccountState, ReconciliationError
 from core.errors import CircuitBreaker, classify
-from core.kalshi_client import KalshiClient, diagnose_auth_failure
+from core.llm_client import LLMRateLimited
+from core.kalshi_client import KalshiClient
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore, SignalAlertStore, signal_key
@@ -40,7 +41,6 @@ from core.weather_client import NOAAClient
 from core.fred_client import FredClient
 from core.rti_runner import RTIFeedRunner
 from core.spot_price_client import SpotPriceClient
-from core.validation import clamp_text
 from core.telegram_client import TelegramClient
 from workers.quant_maker import QuantMaker
 from workers.arbitrage import ArbitrageScanner
@@ -239,6 +239,15 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 continue
             try:
                 proposal = maker.propose(candidate)
+            except LLMRateLimited as e:
+                stats["llm_rate_limited"] += 1
+                llm_disabled = True
+                log.warning(
+                    "LLM provider rate-limited; skipping remaining LLM candidates "
+                    "for this pass: %s", e
+                )
+                _alert(notifier, "notify_provider_rate_limited", "gemini", str(e))
+                continue
             except Exception as e:
                 severity = classify(e)
                 stats["maker_failed"] += 1

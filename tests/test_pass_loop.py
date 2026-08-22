@@ -13,6 +13,7 @@ import pytest
 import main
 from config import CONFIG
 from core.account_state import ReconciliationError
+from core.llm_client import LLMRateLimited
 from workers.execution import UnmanagedMakerMode, assert_order_strategy_supported
 from workers.maker import Proposal
 
@@ -83,11 +84,12 @@ class StubChecker:
 def pass_parts(client, order_store, edge_store, account, execution, risk, ledger):
     CONFIG.risk.dry_run = False
 
-    def run(candidates, checker=None, maker=None):
+    def run(candidates, checker=None, maker=None, notifier=None):
         scout = StubScout(candidates)
         return main.run_once(
             scout, maker or StubMaker(), StubQuantMaker(),
             checker or StubChecker(), risk, execution, ledger, account,
+            notifier=notifier,
         ), scout
 
     return run
@@ -335,6 +337,42 @@ def test_one_maker_failure_does_not_discard_the_rest_of_the_pass(pass_parts, cli
     assert maker.calls == ["KXA-1", "KXB-2", "KXC-3"], "pass must continue past the failure"
     assert filled == 2
     assert len(client.place_order_calls) == 2
+
+
+def test_rate_limited_maker_pauses_llm_without_systemic_alert(pass_parts, client):
+    class RateLimitedMaker:
+        def __init__(self):
+            self.calls = []
+
+        def propose(self, candidate):
+            self.calls.append(candidate.ticker)
+            raise LLMRateLimited("gemini: quota exhausted")
+
+    class Notifier:
+        def __init__(self):
+            self.rate_limited = []
+            self.systemic = []
+
+        def notify_provider_rate_limited(self, provider, detail):
+            self.rate_limited.append((provider, detail))
+
+        def notify_systemic_error(self, kind, detail):
+            self.systemic.append((kind, detail))
+
+    candidates = [
+        make_candidate(ticker="KXA-1", event_ticker="KXA"),
+        make_candidate(ticker="KXB-2", event_ticker="KXB"),
+    ]
+    maker = RateLimitedMaker()
+    notifier = Notifier()
+
+    filled, _ = pass_parts(candidates, maker=maker, notifier=notifier)
+
+    assert filled == 0
+    assert maker.calls == ["KXA-1"]
+    assert notifier.rate_limited == [("gemini", "gemini: quota exhausted")]
+    assert notifier.systemic == []
+    assert client.place_order_calls == []
 
 
 def test_a_run_of_maker_failures_ends_the_pass(pass_parts, client):

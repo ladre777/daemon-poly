@@ -12,7 +12,7 @@ from typing import Optional
 import httpx
 
 from config import DEFAULT_MAKER_FALLBACK_MODEL
-from core.errors import CircuitBreaker, Severity, SystemicError, classify
+from core.errors import CircuitBreaker, Severity, SystemicError, TransientError, classify
 
 log = logging.getLogger("daemon_kalshi.llm")
 
@@ -38,6 +38,10 @@ _ERROR_BODY_CHARS = 400
 
 class LLMUnavailable(SystemicError):
     """No configured provider could produce a completion."""
+
+
+class LLMRateLimited(TransientError):
+    """An optional provider rejected the request due to a temporary quota."""
 
 
 def first_text_block(response) -> str:
@@ -278,6 +282,13 @@ def _is_timeout(exc: BaseException) -> bool:
     return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
 
 
+def _is_rate_limited(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 429
+
+
 class MakerLLM:
     def __init__(
         self,
@@ -323,6 +334,7 @@ class MakerLLM:
             )
 
         errors: list[str] = []
+        rate_limited_error: Optional[BaseException] = None
         was_open = self.breaker.opened_at is not None
         breaker_open = self.breaker.is_open
         if was_open and not breaker_open:
@@ -337,6 +349,8 @@ class MakerLLM:
             except Exception as e:
                 severity = classify(e)
                 errors.append(f"{self.primary.name}: {e}")
+                if _is_rate_limited(e):
+                    rate_limited_error = e
                 tripped = self.breaker.record_failure(str(e))
                 if severity is Severity.FATAL:
                     self.breaker.consecutive_failures = max(
@@ -366,6 +380,12 @@ class MakerLLM:
                 return text
             except Exception as e:
                 errors.append(f"{self.fallback.name}: {e}")
+                if _is_rate_limited(e):
+                    raise LLMRateLimited(f"{self.fallback.name}: {e}") from e
+
+        if rate_limited_error is not None:
+            provider = self.primary.name if self.primary else "LLM"
+            raise LLMRateLimited(f"{provider}: {rate_limited_error}") from rate_limited_error
 
         detail = "; ".join(errors) if errors else (
             "no provider answered (check MOONSHOT_API_KEY and MOONSHOT_MODEL)"

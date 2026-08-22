@@ -16,6 +16,7 @@ from core.errors import CircuitBreaker, FatalError, Severity, SystemicError, Tra
 from core.llm_client import (
     AnthropicBackend,
     GeminiBackend,
+    LLMRateLimited,
     LLMUnavailable,
     MakerLLM,
     MoonshotBackend,
@@ -255,6 +256,17 @@ def test_failover_to_gemini_when_moonshot_times_out():
     assert llm.last_provider == "gemini"
     assert primary.calls == 1
     assert fallback.calls == 1
+
+
+def test_rate_limited_gemini_fallback_is_transient_not_systemic():
+    primary = _StubBackend("moonshot", error=httpx.ReadTimeout("slow"))
+    fallback = _StubBackend("gemini", error=_http_error(429))
+    llm = MakerLLM(primary=primary, fallback=fallback)
+
+    with pytest.raises(LLMRateLimited, match="gemini") as exc_info:
+        llm.complete("s", "u")
+
+    assert classify(exc_info.value) is Severity.TRANSIENT
 
 
 def test_moonshot_gemini_mode_keeps_moonshot_primary():
