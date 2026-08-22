@@ -1,7 +1,9 @@
 """
-Central config for DÆMON-KALSHI. Everything comes from the environment so the
-same code runs locally (.env) and on Railway (dashboard-set vars) with no
-edits. Never hardcode secrets here.
+Central config for DÆMON-KALSHI.
+
+Scope (operator intent 2026-08-21):
+  Golf (only sport), Crypto, Weather, Finance/commodities.
+  Politics and other sports are out of scope.
 """
 import os
 from dataclasses import dataclass, field
@@ -43,8 +45,16 @@ def _floats(name: str, default: tuple) -> tuple:
     return parsed or default
 
 
+def _first_env(*names: str, default: str = "") -> str:
+    """First non-empty env var among aliases (Railway naming is easy to mistype)."""
+    for name in names:
+        val = os.getenv(name)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return default
+
+
 DEFAULT_MAKER_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
-# kimi-k2-turbo-preview was discontinued; current general model is kimi-k2.6
 DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
 
 
@@ -79,21 +89,30 @@ class KalshiConfig:
             return Path(self.private_key_path).read_bytes()
         raise RuntimeError(
             "No Kalshi private key configured. Set KALSHI_PRIVATE_KEY_PEM "
-            "(recommended for Railway) or KALSHI_PRIVATE_KEY_PATH (local)."
+            "or KALSHI_PRIVATE_KEY_PATH."
         )
 
 
 @dataclass
 class ModelConfig:
-    moonshot_api_key: str = os.getenv("MOONSHOT_API_KEY", "")
+    # Aliases: operators often type MOONSHOT_KEY / KIMI_API_KEY by habit.
+    moonshot_api_key: str = field(
+        default_factory=lambda: _first_env(
+            "MOONSHOT_API_KEY", "KIMI_API_KEY", "MOONSHOT_KEY"
+        )
+    )
     moonshot_base_url: str = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.ai/v1")
-    moonshot_model: str = os.getenv("MOONSHOT_MODEL", DEFAULT_MOONSHOT_MODEL)
+    moonshot_model: str = _first_env(
+        "MOONSHOT_MODEL", "KIMI_MODEL", default=DEFAULT_MOONSHOT_MODEL
+    )
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     checker_provider: str = os.getenv("CHECKER_LLM_PROVIDER", "moonshot")
-    checker_model: str = os.getenv(
-        "CHECKER_MODEL",
-        os.getenv("MOONSHOT_MODEL", DEFAULT_MOONSHOT_MODEL),
+    checker_model: str = field(
+        default_factory=lambda: _first_env(
+            "CHECKER_MODEL", "MOONSHOT_MODEL", "KIMI_MODEL",
+            default=DEFAULT_MOONSHOT_MODEL,
+        )
     )
     checker_anthropic_model: str = os.getenv(
         "CHECKER_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"
@@ -103,7 +122,7 @@ class ModelConfig:
     checker_effort: str = os.getenv("CHECKER_EFFORT", "low")
 
     maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "moonshot")
-    maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 8.0)
+    maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 12.0)
     maker_fallback_model: str = os.getenv(
         "MAKER_FALLBACK_MODEL", DEFAULT_MAKER_FALLBACK_MODEL
     )
@@ -215,35 +234,39 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    # Operator focus: Golf (via Sports filter), Crypto, Weather, Finance
+    # (commodities / oil / gas / indices live under Finance on Kalshi).
     scout_categories: list = field(
         default_factory=lambda: os.getenv(
-            "SCOUT_CATEGORIES", "Sports,Crypto,Weather"
+            "SCOUT_CATEGORIES", "Sports,Crypto,Weather,Finance"
         ).split(",")
     )
     scout_census_families: list = field(
         default_factory=lambda: os.getenv(
             "SCOUT_CENSUS_FAMILIES",
-            "KXBTC15M,KXETH,KXBTCD,KXBTC,KXETHD,PGATOUR,KXHIGHNY,KXHIGHCHI",
+            "KXBTC15M,KXETH,KXBTCD,KXBTC,KXETHD,PGATOUR,KXHIGHNY,KXHIGHCHI,KXWTI",
         ).split(",")
     )
     llm_reasoning_categories: set = field(
         default_factory=lambda: {
             c.strip().lower() for c in os.getenv(
-                "LLM_REASONING_CATEGORIES", "sports,weather"
+                "LLM_REASONING_CATEGORIES", "sports,weather,finance"
             ).split(",") if c.strip()
         }
     )
     priority_keywords: list = field(
         default_factory=lambda: [
             k.strip().lower() for k in os.getenv(
-                "PRIORITY_KEYWORDS", "golf,pga,btc,bitcoin,eth,high,temperature"
+                "PRIORITY_KEYWORDS",
+                "golf,pga,masters,liv,btc,bitcoin,eth,high,temperature,rain,"
+                "wti,oil,gas,gold,silver,fed,cpi",
             ).split(",") if k.strip()
         ]
     )
     priority_categories: set = field(
         default_factory=lambda: {
             c.strip().lower() for c in os.getenv(
-                "PRIORITY_CATEGORIES", "weather,crypto"
+                "PRIORITY_CATEGORIES", "weather,crypto,finance"
             ).split(",") if c.strip()
         }
     )
@@ -260,3 +283,15 @@ class AppConfig:
 
 
 CONFIG = AppConfig()
+
+# One-line startup diagnostics (no secrets): helps Railway env debugging.
+import logging as _logging
+_log = _logging.getLogger("daemon_kalshi.config")
+_log.info(
+    "Config scope categories=%s sports=%s llm_cats=%s moonshot_key=%s model=%s",
+    CONFIG.scout_categories,
+    CONFIG.risk.scout_sports_categories,
+    sorted(CONFIG.llm_reasoning_categories),
+    "set" if CONFIG.models.moonshot_api_key else "MISSING",
+    CONFIG.models.moonshot_model,
+)
