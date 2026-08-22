@@ -1,9 +1,8 @@
 """
 Central config for DÆMON-KALSHI.
 
-Scope (operator intent 2026-08-21):
-  Golf (only sport), Crypto, Weather, Finance/commodities.
-  Politics and other sports are out of scope.
+Scope: Golf, Crypto, Weather, Finance/commodities.
+Moonshot: longer timeouts — production saw successful calls then read timeouts.
 """
 import os
 from dataclasses import dataclass, field
@@ -46,7 +45,6 @@ def _floats(name: str, default: tuple) -> tuple:
 
 
 def _first_env(*names: str, default: str = "") -> str:
-    """First non-empty env var among aliases (Railway naming is easy to mistype)."""
     for name in names:
         val = os.getenv(name)
         if val is not None and str(val).strip():
@@ -87,15 +85,11 @@ class KalshiConfig:
             return self.private_key_pem.encode("utf-8")
         if self.private_key_path:
             return Path(self.private_key_path).read_bytes()
-        raise RuntimeError(
-            "No Kalshi private key configured. Set KALSHI_PRIVATE_KEY_PEM "
-            "or KALSHI_PRIVATE_KEY_PATH."
-        )
+        raise RuntimeError("No Kalshi private key configured.")
 
 
 @dataclass
 class ModelConfig:
-    # Aliases: operators often type MOONSHOT_KEY / KIMI_API_KEY by habit.
     moonshot_api_key: str = field(
         default_factory=lambda: _first_env(
             "MOONSHOT_API_KEY", "KIMI_API_KEY", "MOONSHOT_KEY"
@@ -117,12 +111,13 @@ class ModelConfig:
     checker_anthropic_model: str = os.getenv(
         "CHECKER_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"
     )
-    checker_timeout_seconds: float = _float("CHECKER_TIMEOUT_SECONDS", 12.0)
+    # 25s — Moonshot often answers after 12s under load; short timeout = false failure.
+    checker_timeout_seconds: float = _float("CHECKER_TIMEOUT_SECONDS", 25.0)
     checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 1200)
     checker_effort: str = os.getenv("CHECKER_EFFORT", "low")
 
     maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "moonshot")
-    maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 12.0)
+    maker_timeout_seconds: float = _float("MAKER_TIMEOUT_SECONDS", 25.0)
     maker_fallback_model: str = os.getenv(
         "MAKER_FALLBACK_MODEL", DEFAULT_MAKER_FALLBACK_MODEL
     )
@@ -234,8 +229,6 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
-    # Operator focus: Golf (via Sports filter), Crypto, Weather, Finance
-    # (commodities / oil / gas / indices live under Finance on Kalshi).
     scout_categories: list = field(
         default_factory=lambda: os.getenv(
             "SCOUT_CATEGORIES", "Sports,Crypto,Weather,Finance"
@@ -270,9 +263,10 @@ class AppConfig:
             ).split(",") if c.strip()
         }
     )
-    max_llm_calls_per_pass: int = _int("MAX_LLM_CALLS_PER_PASS", 40)
+    # Fewer calls/pass → less timeout pressure on Moonshot.
+    max_llm_calls_per_pass: int = _int("MAX_LLM_CALLS_PER_PASS", 25)
     max_llm_calls_per_event: int = _int("MAX_LLM_CALLS_PER_EVENT", 2)
-    max_fallback_llm_calls_per_pass: int = _int("MAX_FALLBACK_LLM_CALLS_PER_PASS", 10)
+    max_fallback_llm_calls_per_pass: int = _int("MAX_FALLBACK_LLM_CALLS_PER_PASS", 8)
     model_failure_threshold: int = _int("MODEL_FAILURE_THRESHOLD", 5)
     startup_failure_hold_seconds: int = _int("STARTUP_FAILURE_HOLD_SECONDS", 60)
     scout_poll_seconds: int = _int("SCOUT_POLL_SECONDS", 180)
@@ -284,14 +278,14 @@ class AppConfig:
 
 CONFIG = AppConfig()
 
-# One-line startup diagnostics (no secrets): helps Railway env debugging.
 import logging as _logging
 _log = _logging.getLogger("daemon_kalshi.config")
 _log.info(
-    "Config scope categories=%s sports=%s llm_cats=%s moonshot_key=%s model=%s",
+    "Config scope categories=%s sports=%s llm_cats=%s moonshot_key=%s model=%s timeouts=%.0fs",
     CONFIG.scout_categories,
     CONFIG.risk.scout_sports_categories,
     sorted(CONFIG.llm_reasoning_categories),
     "set" if CONFIG.models.moonshot_api_key else "MISSING",
     CONFIG.models.moonshot_model,
+    CONFIG.models.maker_timeout_seconds,
 )
