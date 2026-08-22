@@ -110,6 +110,9 @@ class ModelConfig:
     )
     gemini_model: str = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
     gemini_timeout_seconds: float = _float("GEMINI_TIMEOUT_SECONDS", 12.0)
+    gemini_rate_limit_cooldown_seconds: float = _float(
+        "GEMINI_RATE_LIMIT_COOLDOWN_SECONDS", 900.0
+    )
 
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     checker_provider: str = os.getenv("CHECKER_LLM_PROVIDER", "moonshot")

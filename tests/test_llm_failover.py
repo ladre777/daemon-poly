@@ -269,6 +269,24 @@ def test_rate_limited_gemini_fallback_is_transient_not_systemic():
     assert classify(exc_info.value) is Severity.TRANSIENT
 
 
+def test_gemini_rate_limit_starts_a_cooldown_before_the_next_fallback_call():
+    primary = _StubBackend("moonshot", error=httpx.ReadTimeout("slow"))
+    fallback = _StubBackend("gemini", error=_http_error(429))
+    llm = MakerLLM(
+        primary=primary,
+        fallback=fallback,
+        fallback_rate_limit_cooldown_seconds=60,
+    )
+
+    with pytest.raises(LLMRateLimited, match="gemini"):
+        llm.complete("s", "u")
+    with pytest.raises(LLMRateLimited, match="cooldown active"):
+        llm.complete("s", "u")
+
+    assert fallback.calls == 1
+    assert primary.calls == 2
+
+
 def test_moonshot_gemini_mode_keeps_moonshot_primary():
     from types import SimpleNamespace
     from core.llm_client import build_maker_llm

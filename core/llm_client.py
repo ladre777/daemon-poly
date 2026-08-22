@@ -7,6 +7,7 @@ when MOONSHOT_API_KEY is missing (was surfacing as opaque "all providers failed"
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -297,6 +298,7 @@ class MakerLLM:
         failure_threshold: int = 3,
         cooldown_seconds: float = 600.0,
         timeout_threshold: int = 2,
+        fallback_rate_limit_cooldown_seconds: float = 900.0,
     ):
         self.primary = primary if (primary and primary.configured) else None
         self.fallback = fallback if (fallback and fallback.configured) else None
@@ -306,6 +308,10 @@ class MakerLLM:
             cooldown_seconds=cooldown_seconds,
         )
         self.timeout_threshold = timeout_threshold
+        self.fallback_rate_limit_cooldown_seconds = max(
+            0.0, fallback_rate_limit_cooldown_seconds
+        )
+        self._fallback_rate_limited_until = 0.0
         self.timeouts_seen = 0
         self.last_provider = ""
 
@@ -374,6 +380,11 @@ class MakerLLM:
                 )
 
         if self.fallback:
+            remaining = self._fallback_rate_limited_until - time.monotonic()
+            if remaining > 0:
+                raise LLMRateLimited(
+                    f"{self.fallback.name}: cooldown active for {remaining:.0f}s after quota exhaustion"
+                )
             try:
                 text = self.fallback.complete(system, user, temperature)
                 self.last_provider = self.fallback.name
@@ -381,6 +392,9 @@ class MakerLLM:
             except Exception as e:
                 errors.append(f"{self.fallback.name}: {e}")
                 if _is_rate_limited(e):
+                    self._fallback_rate_limited_until = (
+                        time.monotonic() + self.fallback_rate_limit_cooldown_seconds
+                    )
                     raise LLMRateLimited(f"{self.fallback.name}: {e}") from e
 
         if rate_limited_error is not None:
@@ -424,7 +438,13 @@ def build_maker_llm(models_config) -> MakerLLM:
             )
         return MakerLLM(primary=moonshot, fallback=None)
     if preference == "moonshot_gemini":
-        return MakerLLM(primary=moonshot, fallback=gemini)
+        return MakerLLM(
+            primary=moonshot,
+            fallback=gemini,
+            fallback_rate_limit_cooldown_seconds=getattr(
+                models_config, "gemini_rate_limit_cooldown_seconds", 900.0
+            ),
+        )
     if preference == "gemini":
         return MakerLLM(primary=gemini, fallback=None)
     if preference == "anthropic":
@@ -457,7 +477,13 @@ def build_checker_llm(models_config) -> MakerLLM:
     if preference == "moonshot":
         return MakerLLM(primary=moonshot, fallback=None)
     if preference == "moonshot_gemini":
-        return MakerLLM(primary=moonshot, fallback=gemini)
+        return MakerLLM(
+            primary=moonshot,
+            fallback=gemini,
+            fallback_rate_limit_cooldown_seconds=getattr(
+                models_config, "gemini_rate_limit_cooldown_seconds", 900.0
+            ),
+        )
     if preference == "gemini":
         return MakerLLM(primary=gemini, fallback=None)
     if preference == "anthropic":
