@@ -280,6 +280,21 @@ class GeminiBackend:
             },
         }
         resp = self._client.post(f"/models/{self.model}:generateContent", json=payload)
+        if resp.status_code >= 400:
+            # httpx's default HTTPStatusError message is just the status line
+            # ("Client error '429 Too Many Requests' for url ...") — it drops
+            # the JSON body, which for Gemini is the only place that says
+            # *which* quota was hit: per-minute request count, daily request
+            # count, and token-count quotas are all reported as a plain 429
+            # with no other signal, and only the body's QuotaFailure detail
+            # (or RetryInfo.retryDelay) distinguishes "wait a few seconds"
+            # from "wait until tomorrow" from "this key has no quota at all".
+            # Logged once here, at the only point the body is still in hand —
+            # raise_for_status() below discards it.
+            log.warning(
+                "Gemini HTTP %s on %s: %s",
+                resp.status_code, self.model, resp.text[:800],
+            )
         resp.raise_for_status()
         try:
             parts = resp.json()["candidates"][0]["content"]["parts"]
@@ -547,7 +562,24 @@ def build_checker_llm(models_config) -> MakerLLM:
             ),
         )
     if preference == "gemini":
-        return MakerLLM(primary=gemini, fallback=None)
+        # Gemini alone, no fallback, is what produced a Checker that
+        # abstains on every call rather than on judgment: the free tier's
+        # 429s hit before three-and-a-half hours of paper trading logged a
+        # single successful Checker verdict, and MakerLLM has nothing to
+        # fall through to.
+        #
+        # Anthropic, not Moonshot. Falling back to Moonshot would put the
+        # Checker back on Kimi the moment Gemini rate-limits — the exact
+        # same-model problem independence was restored to fix, just moved
+        # from "always" to "whenever Gemini is under load". Claude Haiku is
+        # a distinct vendor from both Kimi (Maker's primary) and Gemini
+        # (Checker's primary), and anthropic_backend is already built above
+        # for the default branch below — this reuses it rather than paying
+        # for a second cheap model nobody asked for.
+        return MakerLLM(
+            primary=gemini,
+            fallback=anthropic_backend if anthropic_backend.configured else None,
+        )
     if preference == "anthropic":
         return MakerLLM(primary=anthropic_backend, fallback=None)
     return MakerLLM(

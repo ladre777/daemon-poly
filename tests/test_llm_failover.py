@@ -674,3 +674,132 @@ def test_config_and_client_share_one_default():
     from config import DEFAULT_MAKER_FALLBACK_MODEL, ModelConfig
 
     assert ModelConfig().maker_fallback_model == DEFAULT_MAKER_FALLBACK_MODEL
+
+
+# --------------------------------------------------------------------------
+# the Checker's gemini-primary path: fallback and error visibility
+# --------------------------------------------------------------------------
+#
+# CHECKER_LLM_PROVIDER=gemini went live in production with fallback=None.
+# Every Checker call that hit Gemini's free-tier 429 abstained outright —
+# not a judgment call, a missing fallback. Three real calls, three
+# abstentions, over 22 minutes. These pin the fix: the gemini branch of
+# build_checker_llm gets a fallback, and it is Anthropic, not Moonshot —
+# falling back to Kimi would recreate the same-model problem independence
+# was restored to fix, just moved from "always" to "whenever Gemini is
+# under load".
+
+
+def _checker_models(provider="gemini"):
+    from config import ModelConfig
+
+    m = ModelConfig()
+    m.checker_provider = provider
+    m.moonshot_api_key = "test-key"
+    m.gemini_api_key = "test-key"
+    m.anthropic_api_key = "test-key"
+    m.checker_anthropic_model = "claude-haiku-4-5-20251001"
+    return m
+
+
+def test_gemini_preference_wires_an_anthropic_fallback_not_moonshot():
+    from core.llm_client import build_checker_llm
+
+    llm = build_checker_llm(_checker_models())
+
+    assert llm.primary.name == "gemini"
+    assert llm.fallback is not None
+    assert llm.fallback.name == "anthropic"
+    assert llm.fallback.model == "claude-haiku-4-5-20251001"
+
+
+def test_gemini_preference_without_an_anthropic_key_has_no_fallback():
+    """The fallback is opportunistic, not assumed — the same rule every
+    other branch in this function already follows."""
+    from core.llm_client import build_checker_llm
+
+    models = _checker_models()
+    models.anthropic_api_key = ""
+
+    llm = build_checker_llm(models)
+
+    assert llm.primary.name == "gemini"
+    assert llm.fallback is None
+
+
+def test_a_gemini_rate_limit_falls_through_to_anthropic_not_an_abstention():
+    """The actual production failure, reproduced: Gemini 429s, and the call
+    still completes instead of raising."""
+    from core.llm_client import build_checker_llm
+
+    models = _checker_models()
+    llm = build_checker_llm(models)
+    llm.primary = _StubBackend("gemini", error=_http_error(429))
+    llm.fallback = _StubBackend("anthropic", result="fallback verdict")
+
+    assert llm.complete("sys", "user") == "fallback verdict"
+    assert llm.last_provider == "anthropic"
+
+
+def test_three_consecutive_gemini_limits_open_the_breaker_onto_anthropic():
+    """After the threshold, Gemini is skipped entirely rather than paying a
+    doomed-attempt tax on every single call."""
+    from core.llm_client import build_checker_llm
+
+    models = _checker_models()
+    llm = build_checker_llm(models)
+    gemini_calls = []
+
+    class CountingGemini:
+        name = "gemini"
+        model = "gemini-3.5-flash-lite"
+        configured = True
+
+        def complete(self, *a, **kw):
+            gemini_calls.append(1)
+            raise _http_error(429)
+
+    llm.primary = CountingGemini()
+    llm.fallback = _StubBackend("anthropic", result="ok")
+
+    for _ in range(4):
+        assert llm.complete("sys", "user") == "ok"
+
+    assert llm.breaker.is_open
+    assert len(gemini_calls) == 3, "the 4th call must skip a breaker-open primary"
+
+
+def test_gemini_error_body_is_logged_not_discarded(caplog):
+    """httpx's default 429 message is just the status line. Google's actual
+    quota-metric detail — which quota, and the suggested retry delay — lives
+    only in the JSON body, and only at this call site is it still in hand."""
+    body = (
+        '{"error": {"code": 429, "message": "Quota exceeded", "status": '
+        '"RESOURCE_EXHAUSTED", "details": [{"@type": "type.googleapis.com/'
+        'google.rpc.QuotaFailure", "violations": [{"quotaMetric": '
+        '"generativelanguage.googleapis.com/generate_content_free_tier_'
+        'requests", "quotaId": "GenerateRequestsPerDayPerProjectPerModel-'
+        'FreeTier"}]}]}}'
+    )
+    backend = _gemini_with_transport(
+        lambda request: httpx.Response(429, content=body.encode())
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(httpx.HTTPStatusError):
+        backend.complete("sys", "user")
+
+    assert "429" in caplog.text
+    assert "GenerateRequestsPerDayPerProjectPerModel" in caplog.text
+
+
+def test_a_healthy_gemini_response_never_touches_the_error_log(caplog):
+    backend = _gemini_with_transport(
+        lambda request: httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}]
+        })
+    )
+
+    with caplog.at_level("WARNING"):
+        backend.complete("sys", "user")
+
+    assert "Gemini HTTP" not in caplog.text
