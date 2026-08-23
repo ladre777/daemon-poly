@@ -273,10 +273,31 @@ class AppConfig:
             "SCOUT_CATEGORIES", "Sports,Crypto,Weather,Finance"
         ).split(",")
     )
+    # Families Scout reports on individually every pass, and asks Kalshi for
+    # by name via the targeted per-series fetch. A zero count is a reportable
+    # answer, which is the whole point — but only if the name is one Kalshi
+    # still uses.
+    #
+    # KXPGATOUR, not PGATOUR. VERIFIED AGAINST PRODUCTION, 2026-08-23: the
+    # targeted fetch for series "PGATOUR" ran every pass, succeeded, and
+    # returned zero markets, so the census reported "family absent from the
+    # scanned catalog" and no golf market ever reached the pipeline. Kalshi's
+    # golf series is KXPGATOUR (their own market URLs read
+    # kalshi.com/markets/kxpgatour/...), and tests/test_categories.py has
+    # asserted that spelling since the taxonomy was ported. The census watch
+    # list was the one place still on the pre-KX name.
+    #
+    # Both names are carried deliberately. KXPGATOUR could not be confirmed
+    # against the live API from the session that found this — the evidence is
+    # Kalshi's public URLs plus our own tests — so the legacy name stays until
+    # a pass logs real KXPGATOUR markets. A series that does not exist costs
+    # one bounded, empty request per pass; guessing wrong and dropping the
+    # only working name costs the whole category.
     scout_census_families: list = field(
         default_factory=lambda: os.getenv(
             "SCOUT_CENSUS_FAMILIES",
-            "KXBTC15M,KXETH,KXBTCD,KXBTC,KXETHD,PGATOUR,KXHIGHNY,KXHIGHCHI,KXWTI",
+            "KXBTC15M,KXETH,KXBTCD,KXBTC,KXETHD,KXPGATOUR,PGATOUR,"
+            "KXHIGHNY,KXHIGHCHI,KXWTI",
         ).split(",")
     )
     llm_reasoning_categories: set = field(

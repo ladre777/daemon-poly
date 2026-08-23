@@ -68,7 +68,10 @@ def test_a_family_that_never_appears_still_reports(caplog):
     _, text = scan(client, caplog)
 
     assert "Family census KXBTC15M: 0 seen" in text
-    assert "family absent from the scanned catalog" in text
+    # The message now says which kind of absence this is: Kalshi was asked
+    # for the series by name and answered with nothing.
+    assert "by name" in text
+    assert "0 open markets" in text
 
 
 def test_a_family_that_appears_reports_its_candidates(caplog):
@@ -195,7 +198,12 @@ def test_lowercase_config_entries_still_match(caplog):
 
 
 def test_summary_of_an_untouched_family_names_the_absence():
-    assert "absent" in FamilyCensus().summary()
+    """A bare tally means nothing asked for this family — say that, and do
+    not imply Kalshi was consulted and came back empty."""
+    summary = FamilyCensus().summary()
+
+    assert "0 seen" in summary
+    assert "no targeted fetch" in summary
 
 
 def test_summary_omits_dispositions_that_did_not_happen():
@@ -203,8 +211,9 @@ def test_summary_omits_dispositions_that_did_not_happen():
 
     summary = tally.summary()
 
-    assert summary == "3 seen -> 3 candidate(s)"
+    assert summary.startswith("3 seen -> 3 candidate(s)")
     assert "invalid" not in summary
+    assert "below the $" not in summary
 
 
 # -- self-discovery: what is actually there --------------------------------
@@ -349,3 +358,105 @@ def test_shards_still_count_as_seen_in_the_census(watch_everything, caplog):
     _, text = scan(client, caplog)
 
     assert "KXBTCD: 2 seen" in text
+
+
+# -- telling "absent" apart from "never asked" -----------------------------
+#
+# The flat "0 seen (family absent from the scanned catalog)" hid the golf
+# outage for days. The targeted fetch for series "PGATOUR" ran every pass,
+# succeeded, and returned nothing, because Kalshi's golf series is
+# KXPGATOUR — but the message reads as "no tournament this week". These pin
+# the three states apart.
+
+
+def test_zero_seen_after_a_successful_empty_fetch_says_the_name_may_be_wrong():
+    """The state that hid the golf miss: asked by name, answered, nothing."""
+    tally = FamilyCensus()
+    tally.targeted_fetch_ran = True
+    tally.targeted_fetch_markets = 0
+
+    summary = tally.summary()
+
+    assert "0 seen" in summary
+    assert "by name" in summary
+    assert "0 open markets" in summary
+    # The actionable half — this is the sentence that would have caught it.
+    assert "name may be wrong" in summary
+
+
+def test_zero_seen_without_a_targeted_fetch_says_so():
+    """A family only ever sought in the page-capped sweep is a different bug."""
+    summary = FamilyCensus().summary()
+
+    assert "0 seen" in summary
+    assert "no targeted fetch" in summary
+    # Must NOT claim Kalshi was asked and answered — it wasn't asked.
+    assert "name may be wrong" not in summary
+
+
+def test_zero_seen_after_a_failed_fetch_reports_the_error():
+    tally = FamilyCensus()
+    tally.targeted_fetch_error = "KalshiTimeoutError: read timed out"
+
+    summary = tally.summary()
+
+    assert "targeted fetch failed" in summary
+    assert "read timed out" in summary
+    assert "name may be wrong" not in summary
+
+
+def test_a_family_with_markets_still_reports_how_the_fetch_went():
+    """Non-zero counts carry the note too, so the two lines are comparable."""
+    tally = FamilyCensus()
+    tally.seen = 12
+    tally.accepted = 11
+    tally.targeted_fetch_ran = True
+    tally.targeted_fetch_markets = 12
+
+    summary = tally.summary()
+
+    assert "12 seen -> 11 candidate(s)" in summary
+    assert "targeted fetch returned 12 open market(s)" in summary
+
+
+def test_scan_records_the_targeted_fetch_outcome_per_family(caplog):
+    """End to end: a watched family Kalshi has nothing for says which state."""
+    CONFIG.scout_census_families = ["KXBTCD", "KXPGATOUR"]
+    CONFIG.scout_categories = ["Crypto"]
+    client = CategoryClient([
+        _event("KXBTCD-26AUG23", [_market("KXBTCD-26AUG23-T64000")]),
+    ])
+
+    _, text = scan(client, caplog)
+
+    # KXPGATOUR is in the watch list and the fake catalog has none of it, so
+    # the targeted fetch runs, succeeds and comes back empty.
+    assert "Family census KXPGATOUR:" in text
+    assert "name may be wrong" in text
+    # KXBTCD is really there, so it must NOT get the naming warning.
+    btcd_line = next(ln for ln in text.splitlines()
+                     if "Family census KXBTCD:" in ln)
+    assert "name may be wrong" not in btcd_line
+
+
+def test_the_golf_series_is_watched_under_its_kx_name(monkeypatch):
+    """Regression guard for the one-word defect that blocked golf entirely.
+
+    Reads the shipped default straight out of the dataclass field rather than
+    reloading the config module: reloading swaps the CONFIG singleton that
+    every other test holds a reference to, and the breakage surfaces
+    somewhere unrelated three files later.
+    """
+    import dataclasses
+
+    from config import AppConfig
+
+    monkeypatch.delenv("SCOUT_CENSUS_FAMILIES", raising=False)
+    field = next(f for f in dataclasses.fields(AppConfig)
+                 if f.name == "scout_census_families")
+    families = [f.strip().upper() for f in field.default_factory()]
+
+    assert "KXPGATOUR" in families
+    # Legacy name deliberately retained until a pass confirms the KX spelling
+    # against the live API.
+    assert "PGATOUR" in families

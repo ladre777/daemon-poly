@@ -48,7 +48,7 @@ from typing import Optional
 from config import CONFIG
 from core.contract_specs import ContractSpec, spec_for, usable
 from core.spot_price_client import SpotPriceClient
-from workers.scout import Candidate
+from workers.scout import Candidate, family_of
 from workers.maker import Proposal
 
 log = logging.getLogger("daemon_kalshi.quant_maker")
@@ -174,7 +174,23 @@ class QuantMaker:
         if not ok:
             # Logged once per family per pass rather than per market — a
             # thousand BTC strikes should not produce a thousand lines.
-            key = spec.prefix if spec else candidate.ticker[:8]
+            #
+            # family_of, not ticker[:8]. The fixed slice was a label and a
+            # dedup key at once, and it was wrong at both jobs. It printed
+            # KXETHD-26AUG1823-T4299.99 as "KXETHD-2", KXHIGHCHI-... as
+            # "KXHIGHCH" and KXWTI-... as "KXWTI-26" — three of the four
+            # families in the decline log were names that do not exist, so
+            # reading the log meant guessing which real family each stood
+            # for. KXHIGHNY only looked right by being exactly eight
+            # characters long.
+            #
+            # As a dedup key it is worse than cosmetic: two distinct families
+            # sharing their first eight characters collapse into one entry,
+            # and the second one is then never logged at all. spec_for()
+            # already derives the family correctly by splitting on the first
+            # dash; this uses the same rule via the helper scout exports, so
+            # the label, the key and the lookup can no longer disagree.
+            key = spec.prefix if spec else family_of(candidate.ticker)
             if key not in self._declined:
                 self._declined[key] = why
                 log.info("Quant path declining %s: %s", key, why)
