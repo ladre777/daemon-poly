@@ -595,3 +595,53 @@ def test_an_unparseable_boundary_falls_back_to_one_table(ledger, edge_store,
 
     assert "Calibration (all)" in caplog.text
     assert "pre-fix" not in caplog.text
+
+
+# -- the boundary the config actually ships ---------------------------------
+
+
+def test_the_shipped_boundary_is_the_weather_prompt_rewrite_not_the_sigma_fix():
+    """CALIBRATION_REGIME_SPLIT_AT defaulted to 2026-08-17T17:00:00Z (the
+    sigma fix, #41) from the day it was introduced until this test existed.
+    In between, e4cade6 (2026-08-21T19:01 UTC) rewrote the weather prompt's
+    error-band guidance from an invented 3-4F to a measured 1-2F — a second
+    change to what the Maker's own numbers mean — and the boundary never
+    moved to follow it. Every calibration table logged since 2026-08-21 has
+    been silently pooling rows written under both prompts into one "post-fix"
+    number.
+
+    This pins the boundary at the later date so a future edit that reverts it
+    (or moves it to some other commit) fails loudly here instead of silently
+    contaminating the calibration table again.
+    """
+    import dataclasses
+
+    from config import RiskConfig
+
+    field = next(f for f in dataclasses.fields(RiskConfig)
+                 if f.name == "calibration_regime_split_at")
+    default = field.default
+
+    assert default == "2026-08-21T19:01:00Z"
+
+
+def test_the_shipped_boundary_parses_and_sits_after_the_prompt_rewrite():
+    """Pins the boundary as a working timestamp rather than a string that
+    happens to match the test above — a typo that still equality-matched
+    would pass the previous test and silently collapse to one table."""
+    from datetime import datetime, timezone
+
+    from config import RiskConfig
+    from core.validation import parse_timestamp
+
+    field_default = next(
+        f.default for f in __import__("dataclasses").fields(RiskConfig)
+        if f.name == "calibration_regime_split_at"
+    )
+    parsed = parse_timestamp(field_default)
+    e4cade6_deployed_at = datetime(
+        2026, 8, 21, 19, 0, 48, tzinfo=timezone.utc
+    ).timestamp()
+
+    assert parsed is not None
+    assert parsed > e4cade6_deployed_at

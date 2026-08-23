@@ -184,8 +184,25 @@ class RiskConfig:
     rti_startup_grace_seconds: float = _float("RTI_STARTUP_GRACE_SECONDS", 90.0)
     rti_tick_sample_seconds: float = _float("RTI_TICK_SAMPLE_SECONDS", 5.0)
     forecast_reconcile_max_tickers: int = _int("FORECAST_RECONCILE_MAX_TICKERS", 25)
+    # Single boundary only — _regime_boundary() in workers/ledger.py splits
+    # calibration into exactly two tables (pre-fix / post-fix), and there is
+    # no mechanism for a third. Moved from 2026-08-17T17:00:00Z (the sigma
+    # fix, #41) to 2026-08-21T19:01:00Z: the deploy of e4cade6, which rewrote
+    # the weather prompt's error-band guidance from an invented 3-4F to a
+    # measured 1-2F. Rows on either side of that prompt change are not
+    # comparable, and the old boundary was pooling them into one "post-fix"
+    # table.
+    #
+    # This is a real loss of resolution, stated plainly rather than hidden: a
+    # third regime existed between the two boundaries — sigma-fixed but still
+    # on the old weather prompt, 2026-08-17T17:00 to 2026-08-21T19:01 — and
+    # moving the single boundary forward merges those rows into "pre-fix"
+    # rather than giving them their own table. That is the correct side to
+    # err on: a two-table split needs one boundary per open question, and the
+    # question live right now is what the current prompt's calibration looks
+    # like, not how the middle period compared to either edge.
     calibration_regime_split_at: str = os.getenv(
-        "CALIBRATION_REGIME_SPLIT_AT", "2026-08-17T17:00:00Z")
+        "CALIBRATION_REGIME_SPLIT_AT", "2026-08-21T19:01:00Z")
     persist_vol_history: bool = _bool("PERSIST_VOL_HISTORY", True)
     vol_history_retention_seconds: float = _float("VOL_HISTORY_RETENTION_SECONDS", 14400.0)
     spot_outlier_ratio: float = _float("SPOT_OUTLIER_RATIO", 1.5)
