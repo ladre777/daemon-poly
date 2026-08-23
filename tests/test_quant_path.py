@@ -461,3 +461,51 @@ def test_the_corrected_btcd_spec_records_the_real_settlement_mechanism():
     # the two moved together rather than the flag moving alone.
     assert spec.source == "kalshi_rti"
     assert spec.verified is True
+
+
+# -- the decline log names real families -----------------------------------
+#
+# The label and the once-per-pass dedup key were a fixed eight-character
+# slice of the ticker. Three of the four families in a production decline log
+# were therefore names that do not exist — "KXETHD-2", "KXHIGHCH",
+# "KXWTI-26" — and reading the log meant reverse-engineering which real
+# family each stood for. That ambiguity is what hid the golf scan miss.
+
+
+@pytest.mark.parametrize("ticker,expected", [
+    ("KXETHD-26AUG1823-T4299.99", "KXETHD"),
+    ("KXHIGHCHI-26AUG17-T78", "KXHIGHCHI"),
+    ("KXWTI-26SEP-B70", "KXWTI"),
+    # Exactly eight characters: this one was right under the old slice too,
+    # by coincidence rather than by rule.
+    ("KXHIGHNY-26AUG17-T84", "KXHIGHNY"),
+])
+def test_declined_families_are_logged_under_their_real_name(
+    ticker, expected, caplog
+):
+    quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
+    quant.begin_pass()
+
+    with caplog.at_level("INFO", logger="daemon_kalshi.quant_maker"):
+        assert quant.can_handle(candidate(ticker=ticker)) is False
+
+    assert f"Quant path declining {expected}:" in caplog.text
+    # The truncated form must not appear anywhere in the line.
+    assert f"declining {ticker[:8]}:" not in caplog.text or ticker[:8] == expected
+
+
+def test_two_families_sharing_eight_characters_both_get_logged(caplog):
+    """The dedup key must not collapse distinct families.
+
+    Under the old slice both of these keyed on "KXHIGHCH", so the first one
+    logged and the second was silently swallowed for the rest of the pass.
+    """
+    quant = QuantMaker(SpotPriceClient(http=FakeHTTP()))
+    quant.begin_pass()
+
+    with caplog.at_level("INFO", logger="daemon_kalshi.quant_maker"):
+        quant.can_handle(candidate(ticker="KXHIGHCHI-26AUG17-T78"))
+        quant.can_handle(candidate(ticker="KXHIGHCHX-26AUG17-T80"))
+
+    assert "declining KXHIGHCHI:" in caplog.text
+    assert "declining KXHIGHCHX:" in caplog.text

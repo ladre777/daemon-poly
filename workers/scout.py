@@ -71,10 +71,47 @@ class FamilyCensus:
     #: Best liquidity seen on a market this family had rejected for being too
     #: thin. Says whether the floor is marginally or wildly too high.
     best_rejected_liquidity: float = 0.0
+    #: Whether the targeted per-series fetch ran for this family this pass,
+    #: and what Kalshi returned to it.
+    #:
+    #: Without these, "0 seen" spans three different failures with three
+    #: different fixes, and the flat message names none of them: the fetch
+    #: returned markets that were all filtered out; the fetch succeeded and
+    #: Kalshi has no such open market; or the fetch never ran or errored, so
+    #: the family was only ever sought in the page-capped sweep.
+    #:
+    #: That ambiguity is not hypothetical. It hid the golf outage: the fetch
+    #: for series "PGATOUR" ran and returned nothing every pass for days,
+    #: and the log said "family absent from the scanned catalog" — which
+    #: reads as "no tournament this week", not "that series name is wrong".
+    targeted_fetch_ran: bool = False
+    targeted_fetch_markets: int = 0
+    targeted_fetch_error: str = ""
+
+    def _targeted_note(self) -> str:
+        """How the by-name request for this series went, in one clause."""
+        if self.targeted_fetch_error:
+            return f"targeted fetch failed: {self.targeted_fetch_error}"
+        if not self.targeted_fetch_ran:
+            return "no targeted fetch — found only via the page-capped sweep"
+        return (
+            f"targeted fetch returned {self.targeted_fetch_markets} "
+            f"open market(s)"
+        )
 
     def summary(self) -> str:
         if not self.seen:
-            return "0 seen (family absent from the scanned catalog)"
+            if self.targeted_fetch_ran and not self.targeted_fetch_markets \
+                    and not self.targeted_fetch_error:
+                # The one case that looks like absence but is usually a
+                # naming error: we asked Kalshi for this series by name and
+                # it answered, with nothing.
+                return (
+                    "0 seen (asked Kalshi for this series by name; it "
+                    "returned 0 open markets — the series name may be wrong, "
+                    "or there may genuinely be no open market right now)"
+                )
+            return f"0 seen ({self._targeted_note()})"
         parts = [f"{self.seen} seen -> {self.accepted} candidate(s)"]
         if self.below_liquidity:
             parts.append(
@@ -88,6 +125,7 @@ class FamilyCensus:
             parts.append(f"{self.no_liquidity_data} with no liquidity field")
         if self.skipped_group:
             parts.append(f"{self.skipped_group} outside SCOUT_CATEGORIES")
+        parts.append(self._targeted_note())
         return ", ".join(parts)
 
 
@@ -494,11 +532,22 @@ class Scout:
         # ordering stays outside our control. Asking for a series by name is
         # bounded, cheap and deterministic.
         for family in sorted(watched):
+            tally = census.get(family)
             try:
-                pages += self._fetch_series(family, _consider)
+                fetched_pages, fetched_markets = self._fetch_series(family, _consider)
             except (KalshiAPIError, KalshiTimeoutError) as e:
                 # One unreachable series must not cost the rest of the scan.
                 log.warning("Targeted fetch for series %s failed: %s", family, e)
+                if tally is not None:
+                    # Recorded, not just logged: a failed fetch and an empty
+                    # one both end at "0 seen", and only the census line is
+                    # read routinely.
+                    tally.targeted_fetch_error = f"{type(e).__name__}: {e}"
+                continue
+            pages += fetched_pages
+            if tally is not None:
+                tally.targeted_fetch_ran = True
+                tally.targeted_fetch_markets = fetched_markets
 
         self._log_unclassified(candidates)
         if rejected:
@@ -556,10 +605,13 @@ class Scout:
             )
         return candidates
 
-    def _fetch_series(self, series_ticker: str, consider) -> int:
+    def _fetch_series(self, series_ticker: str, consider) -> tuple[int, int]:
         """Pull every open market in one series, handing each to `consider`.
 
-        Returns pages fetched, so the scan's page count stays honest.
+        Returns (pages fetched, markets returned). Pages keeps the scan's page
+        count honest; the market count is what separates "Kalshi has nothing
+        under this name" from "the sweep never got here", which the census
+        message could not previously express.
 
         Bounded independently of SCOUT_MAX_PAGES: a single series is small
         (the largest crypto family observed was under a thousand markets), and
@@ -568,18 +620,20 @@ class Scout:
         """
         cursor = None
         pages = 0
+        markets_seen = 0
         while pages < _MAX_SERIES_PAGES:
             page = self.client.list_markets(
                 series_ticker=series_ticker, status="open", limit=200, cursor=cursor
             )
             pages += 1
             markets = page.get("markets", []) or []
+            markets_seen += len(markets)
             for m in markets:
                 consider(m)
             cursor = page.get("cursor")
             if not cursor:
                 break
-        return pages
+        return pages, markets_seen
 
     @staticmethod
     def unknown_configured_categories() -> set[str]:
