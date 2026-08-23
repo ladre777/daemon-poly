@@ -1,18 +1,28 @@
 """
 Golf context, anchored on the player the market is actually about.
 
-Golf is the one sport the operator named as a priority, and its grounding
-path has never executed in production — the demo catalog contains no golf
-markets at all, so ESPN has been called zero times in the entire deployment.
-That makes these tests the only thing standing behind it.
+Golf is the one sport the operator named as a priority. The grounding path
+was rewritten on 2026-08-21 (a58802e / cce7b72 / e4cade6): ESPN's
+scoreboard — which never carried PGA leaderboards, only game scores — was
+replaced with Slash Golf's live leaderboard feed. That rewrite renamed every
+function this file imported (``_find_competitor`` -> ``_find_slash_player``,
+``_golf_line`` -> ``_slash_line``, ``_shots_back`` -> ``_slash_shots_back``,
+and ``_golf_event_state`` was dropped entirely) without updating this file,
+so it has failed to import — not failed a test, failed to *collect* — on
+every push since. The whole suite has been unable to run for two days as a
+result.
 
-The shape of the problem: a golf market asks "does *this player* win", and
-every market in one event carries the same title — "PGA Championship winner".
-The player appears only in Kalshi's ``yes_sub_title``, which nothing captured.
-So the context returned the top ten and stopped, and for any player outside
-it — most of the field, and most of the markets with an interesting price —
-the model was handed a leaderboard that never mentioned the contract it was
-pricing.
+This is a full rewrite against the shipped implementation, not a rename.
+Slash Golf's leaderboard is flatter than ESPN's competition object: rows
+carry name/position/total/thru/status directly, with no separate
+"event state" (round number, round description) to parse — so the
+round-progress assertions from the old file are dropped along with the
+function they tested. What survives is the shape of the original problem:
+a golf market asks "does *this player* win", every market in one event
+carries the same title, and the player appears only in Kalshi's
+``yes_sub_title``. That is still true, and Slash Golf still has to answer
+it for players outside whatever page of the leaderboard the feed returns
+first.
 """
 from __future__ import annotations
 
@@ -20,77 +30,84 @@ import pytest
 
 from workers.context import (
     ContextEnricher,
-    _find_competitor,
-    _golf_event_state,
-    _golf_line,
-    _shots_back,
+    _find_slash_player,
+    _slash_line,
+    _slash_player_name,
+    _slash_shots_back,
 )
 
 from tests.conftest import make_candidate
 
 
-def competitor(name, score, position="", thru=None, completed=None):
-    status = {"position": {"displayName": position}}
-    if thru is not None:
-        status["thru"] = thru
-    if completed is not None:
-        status["type"] = {"completed": completed}
-    return {"athlete": {"displayName": name}, "score": score, "status": status}
+def row(name, total, position="", thru=None, status=""):
+    first, _, last = name.partition(" ")
+    return {
+        "firstName": first,
+        "lastName": last,
+        "position": position,
+        "total": total,
+        "currentHole": thru,
+        "status": status,
+    }
 
 
 FIELD = [
-    competitor("Rory McIlroy", -12, "1"),
-    competitor("Scottie Scheffler", -10, "T2"),
-    competitor("Jon Rahm", -10, "T2"),
-    competitor("Xander Schauffele", -8, "4"),
-    competitor("Collin Morikawa", -7, "5"),
-    competitor("Viktor Hovland", -6, "6"),
-    competitor("Ludvig Aberg", -5, "7"),
-    competitor("Tommy Fleetwood", -4, "8"),
-    competitor("Justin Thomas", -3, "9"),
-    competitor("Patrick Cantlay", -2, "10"),
-    # Outside the top ten — the case the old context could not express.
-    competitor("Wyndham Clark", 3, "T41"),
+    row("Rory McIlroy", -12, "1"),
+    row("Scottie Scheffler", -10, "T2"),
+    row("Jon Rahm", -10, "T2"),
+    row("Xander Schauffele", -8, "4"),
+    row("Collin Morikawa", -7, "5"),
+    row("Viktor Hovland", -6, "6"),
+    row("Ludvig Aberg", -5, "7"),
+    row("Tommy Fleetwood", -4, "8"),
+    row("Justin Thomas", -3, "9"),
+    row("Patrick Cantlay", -2, "10"),
+    row("Min Woo Lee", -1, "11"),
+    row("Tyrrell Hatton", 0, "12"),
+    # Outside the 12 lines the context prints — the case the leaderboard
+    # excerpt cannot express on its own, and the reason yes_sub_title
+    # matching exists at all.
+    row("Wyndham Clark", 3, "T41"),
 ]
 
 
-class FakeESPN:
-    def __init__(self, competitors=None, event_extra=None):
-        self.calls: list[str] = []
-        self._competitors = FIELD if competitors is None else competitors
-        self._event_extra = event_extra or {}
+class FakeSlashGolf:
+    available = True
 
-    def golf_leaderboard(self, tour="pga"):
-        self.calls.append(tour)
-        event = {
-            "name": "The Open Championship",
-            "competitions": [{
-                "competitors": self._competitors,
-                "status": {"period": 3, "type": {"shortDetail": "Round 3 In Progress"}},
-            }],
-        }
-        event.update(self._event_extra)
-        return {"events": [event]}
+    def __init__(self, rows=None, event_name="The Open Championship"):
+        self.calls = 0
+        self._rows = FIELD if rows is None else rows
+        self._event_name = event_name
+
+    def leaderboard(self, **kwargs):
+        self.calls += 1
+        return {"tournId": "1", "year": 2026, "name": self._event_name, "rows": self._rows}
+
+
+class UnavailableSlashGolf:
+    available = False
+
+    def leaderboard(self, **kwargs):
+        raise AssertionError("must not be called when unavailable")
 
 
 @pytest.fixture
 def enricher():
-    return ContextEnricher(espn=FakeESPN())
+    return ContextEnricher(slash_golf=FakeSlashGolf())
 
 
 def golf_candidate(player="", title="The Open Championship winner"):
-    return make_candidate(
+    candidate = make_candidate(
         ticker="KXTHEOPEN-26-X", title=title, category="Sports",
         event_ticker="KXTHEOPEN-26",
+        taxonomy_category="Golf", taxonomy_subcategory="The Open",
     )
+    candidate.yes_sub_title = player
+    return candidate
 
 
 def context_for(enricher, player):
-    candidate = golf_candidate()
-    candidate.taxonomy_category = "Golf"
-    candidate.taxonomy_subcategory = "The Open"
-    candidate.yes_sub_title = player
-    return enricher.enrich(candidate)
+    return enricher.enrich(golf_candidate(player))
 
 
 # -- the player the market is about ----------------------------------------
@@ -102,9 +119,10 @@ def test_the_named_player_is_called_out_explicitly(enricher):
     assert "THIS MARKET IS ABOUT Scottie Scheffler" in text
 
 
-def test_a_player_outside_the_top_ten_is_still_reported(enricher):
-    """The whole point. Wyndham Clark sits 41st; the old context returned ten
-    names and left the model to price a contract it had no data on."""
+def test_a_player_outside_the_printed_leaderboard_is_still_reported(enricher):
+    """The whole point. Wyndham Clark sits 41st, past the 12 rows the context
+    prints — a leaderboard excerpt alone would leave the model pricing a
+    contract it had no data on."""
     text = context_for(enricher, "Wyndham Clark")
 
     assert "Wyndham Clark" in text
@@ -124,11 +142,11 @@ def test_the_leader_is_described_as_leading(enricher):
 
 
 def test_a_player_not_in_the_field_is_said_so_plainly(enricher):
-    """Withdrawn, missed the cut, or never entered — all real information, and
-    all very different from "we did not look"."""
+    """Withdrawn, missed the cut, or never entered — all real information,
+    and all very different from "we did not look"."""
     text = context_for(enricher, "Tiger Woods")
 
-    assert "does not appear in ESPN's field" in text
+    assert "does not appear on the current leaderboard" in text
     assert "unsupported" in text
 
 
@@ -140,85 +158,105 @@ def test_a_market_with_no_named_player_still_gets_the_leaderboard(enricher):
     assert "THIS MARKET IS ABOUT" not in text
 
 
-# -- how much golf is left -------------------------------------------------
+def test_slash_golf_is_named_as_the_source(enricher):
+    """The old ESPN source line must not survive the rewrite by accident —
+    ESPN never carried PGA leaderboards, only game scores."""
+    text = context_for(enricher, "Rory McIlroy")
+
+    assert "Slash Golf" in text
+    assert "ESPN" not in text
 
 
-def test_the_round_is_reported(enricher):
-    """A three-shot deficit in round one and the same deficit with four holes
-    to play are not the same bet."""
-    text = context_for(enricher, "Scottie Scheffler")
+def test_unavailable_slash_golf_yields_no_context_and_no_call():
+    enricher = ContextEnricher(slash_golf=UnavailableSlashGolf())
 
-    assert "round 3" in text
-    assert "Round 3 In Progress" in text
+    assert context_for(enricher, "Rory McIlroy") is None
 
 
-def test_holes_played_appear_when_espn_says():
-    assert "thru 14" in _golf_line(competitor("A B", -4, "T3", thru=14))
+def test_no_slash_golf_client_at_all_yields_no_context():
+    """The pre-e4cade6 state: the client existed but was never wired into
+    main.py, so every golf candidate silently got no grounding."""
+    enricher = ContextEnricher()
+
+    assert context_for(enricher, "Rory McIlroy") is None
+
+
+# -- leaderboard line rendering ----------------------------------------------
+
+
+def test_holes_played_appear_when_the_feed_says():
+    assert "thru 14" in _slash_line(row("A B", -4, "T3", thru=14))
 
 
 def test_a_completed_round_says_so():
-    assert "round complete" in _golf_line(
-        competitor("A B", -4, "T3", completed=True)
-    )
+    assert "round complete" in _slash_line(row("A B", -4, "T3", status="complete"))
 
 
-def test_missing_state_renders_as_nothing_not_as_a_guess():
-    assert _golf_event_state({}, {}) == ""
-    assert _golf_line(competitor("A B", -4)).endswith("A B: -4")
+def test_a_cut_status_is_reported_not_hidden():
+    assert "(CUT)" in _slash_line(row("A B", 5, "T60", status="cut"))
 
 
-# -- name matching ---------------------------------------------------------
+def test_missing_state_renders_as_the_name_alone_not_as_a_guess():
+    assert _slash_line({"firstName": "A", "lastName": "B", "total": -4}).endswith("A B: -4")
+
+
+def test_player_name_falls_back_to_display_name_when_split_is_absent():
+    assert _slash_player_name({"displayName": "A B"}) == "A B"
+    assert _slash_player_name({}) == "?"
+
+
+# -- name matching -----------------------------------------------------------
 
 
 def test_an_exact_name_matches():
-    assert _find_competitor(FIELD, "Jon Rahm")["athlete"]["displayName"] == "Jon Rahm"
+    assert _slash_player_name(_find_slash_player(FIELD, "Jon Rahm")) == "Jon Rahm"
 
 
 def test_matching_is_case_and_space_insensitive():
-    assert _find_competitor(FIELD, "  jon rahm ") is not None
+    assert _find_slash_player(FIELD, "  jon rahm ") is not None
 
 
 def test_a_surname_matches_when_the_full_name_differs():
-    """Kalshi and ESPN both carry human-typed names: "S. Scheffler" against
-    "Scottie Scheffler"."""
-    found = _find_competitor(FIELD, "S. Scheffler")
+    """Kalshi and the feed both carry human-typed names: "S. Scheffler"
+    against "Scottie Scheffler"."""
+    found = _find_slash_player(FIELD, "S. Scheffler")
 
-    assert found["athlete"]["displayName"] == "Scottie Scheffler"
+    assert _slash_player_name(found) == "Scottie Scheffler"
 
 
 def test_an_ambiguous_surname_refuses_rather_than_picking_one():
-    field = [competitor("Si Woo Kim", -4), competitor("Tom Kim", -3)]
+    field = [row("Si Woo Kim", -4), row("Tom Kim", -3)]
 
-    assert _find_competitor(field, "Kim") is None
+    assert _find_slash_player(field, "Kim") is None
 
 
 def test_a_very_short_surname_is_not_used_to_match():
-    assert _find_competitor([competitor("Bob Li", -4)], "Xu") is None
+    assert _find_slash_player([row("Bob Li", -4)], "Xu") is None
 
 
 def test_an_unknown_player_returns_nothing():
-    assert _find_competitor(FIELD, "Nobody At All") is None
-    assert _find_competitor(FIELD, "") is None
+    assert _find_slash_player(FIELD, "Nobody At All") is None
+    assert _find_slash_player(FIELD, "") is None
 
 
-# -- shots back arithmetic -------------------------------------------------
+# -- shots back arithmetic ---------------------------------------------------
 
 
 def test_even_par_is_read_as_zero():
-    field = [competitor("A", "E"), competitor("B", "+3")]
+    field = [row("A", "E"), row("B", "+3")]
 
-    assert _shots_back(field, field[1]) == ", 3 shot(s) back"
+    assert _slash_shots_back(field, field[1]) == ", 3 shot(s) back"
 
 
 def test_a_non_numeric_score_yields_no_claim():
     """"CUT" or "WD" is not a number, and inventing one would be worse than
     saying nothing."""
-    field = [competitor("A", -5), competitor("B", "CUT")]
+    field = [row("A", -5), row("B", "CUT")]
 
-    assert _shots_back(field, field[1]) == ""
+    assert _slash_shots_back(field, field[1]) == ""
 
 
-# -- the field is still captured from Kalshi -------------------------------
+# -- the field is still captured from Kalshi ---------------------------------
 
 
 def test_yes_sub_title_survives_validation():
