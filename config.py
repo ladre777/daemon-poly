@@ -242,6 +242,14 @@ class TelegramConfig:
     notify_trades: bool = _bool("TELEGRAM_NOTIFY_TRADES", True)
     daily_summary_hour_utc: int = _int("TELEGRAM_DAILY_SUMMARY_HOUR_UTC", -1)
     stall_alert_seconds: float = _float("TELEGRAM_STALL_ALERT_SECONDS", 900.0)
+    #: Alert when the exchange balance moves by at least this much, in either
+    #: direction. $49.98 left the account and nothing said so; a deposit
+    #: arriving is equally worth knowing, because it is what re-enables
+    #: trading after risk has been refusing everything on a $0 bankroll.
+    balance_alert_threshold_usd: float = _float("BALANCE_ALERT_THRESHOLD_USD", 1.0)
+    balance_alert_throttle_seconds: float = _float(
+        "TELEGRAM_BALANCE_ALERT_THROTTLE_SECONDS", 300.0
+    )
 
 
 @dataclass

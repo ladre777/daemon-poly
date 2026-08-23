@@ -66,7 +66,13 @@ CREATE TABLE IF NOT EXISTS bot_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     kill_switch_tripped INTEGER DEFAULT 0,
     kill_switch_tripped_at REAL,
-    kill_switch_reason TEXT
+    kill_switch_reason TEXT,
+    -- Last balance the bot observed, so a change can be detected across
+    -- restarts. Held here rather than in memory because Railway restarts on
+    -- every push: an in-memory baseline would re-alert on the first
+    -- reconcile after each deploy, and the alert that cried wolf gets muted.
+    last_balance_cents REAL,
+    last_balance_at REAL
 );
 """
 
@@ -120,6 +126,12 @@ class EdgeStore:
             conn.execute("ALTER TABLE edges ADD COLUMN counterfactual_direction TEXT")
         if "close_time" not in have:
             conn.execute("ALTER TABLE edges ADD COLUMN close_time REAL")
+
+        state = {r["name"] for r in conn.execute("PRAGMA table_info(bot_state)")}
+        if "last_balance_cents" not in state:
+            conn.execute("ALTER TABLE bot_state ADD COLUMN last_balance_cents REAL")
+        if "last_balance_at" not in state:
+            conn.execute("ALTER TABLE bot_state ADD COLUMN last_balance_at REAL")
 
     @contextmanager
     def _conn(self):
@@ -365,6 +377,45 @@ class EdgeStore:
                 "tripped_at": row["kill_switch_tripped_at"],
                 "reason": row["kill_switch_reason"],
             }
+
+    # -- persisted balance baseline ----------------------------------------
+
+    def load_last_balance(self) -> Optional[float]:
+        """Last balance the bot saw, in cents, or None if it has never looked.
+
+        None is meaningfully different from 0.0: a zero balance is a fact
+        worth alerting against, and "no baseline yet" must not be reported as
+        a drop to zero on the very first reconcile.
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT last_balance_cents FROM bot_state WHERE id = 1"
+            ).fetchone()
+            if not row or row["last_balance_cents"] is None:
+                return None
+            return float(row["last_balance_cents"])
+
+    def load_last_balance_at(self) -> Optional[float]:
+        """When the baseline above was recorded. Bounds the fill count that
+        explains a balance change to the same window as the change itself."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT last_balance_at FROM bot_state WHERE id = 1"
+            ).fetchone()
+            if not row or row["last_balance_at"] is None:
+                return None
+            return float(row["last_balance_at"])
+
+    def set_last_balance(self, balance_cents: float):
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO bot_state (id, last_balance_cents, last_balance_at)
+                   VALUES (1, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     last_balance_cents = excluded.last_balance_cents,
+                     last_balance_at = excluded.last_balance_at""",
+                (float(balance_cents), time.time()),
+            )
 
     def set_kill_switch(self, tripped: bool, reason: str = None):
         with self._conn() as c:

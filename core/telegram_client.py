@@ -400,6 +400,38 @@ class TelegramClient:
             throttle_seconds=CONFIG.telegram.kill_switch_throttle_seconds,
         )
 
+    def notify_balance_change(self, previous_usd: float, current_usd: float,
+                              bot_fills_since: int) -> None:
+        """The exchange balance moved. Say by how much, and whether we did it.
+
+        `bot_fills_since` is the point of the message. A balance change the
+        bot caused is bookkeeping; one it did not cause is either a deposit,
+        a withdrawal, or something wrong — and only the fill count separates
+        them at a glance. The $49.98 that left the account was invisible for
+        days precisely because nothing compared the two.
+        """
+        delta = current_usd - previous_usd
+        direction = "increased" if delta > 0 else "decreased"
+        icon = "💰" if delta > 0 else "⚠️"
+        if bot_fills_since:
+            cause = (
+                f"The bot recorded {bot_fills_since} fill(s) since the last "
+                f"check, so some or all of this is likely its own trading."
+            )
+        else:
+            cause = (
+                "The bot has recorded NO fills since the last check, so it "
+                "did not cause this. Deposit, withdrawal, settlement, or "
+                "something worth looking at."
+            )
+        self.send(
+            f"{icon} Balance {direction} by ${abs(delta):,.2f}\n"
+            f"${previous_usd:,.2f} → ${current_usd:,.2f}\n"
+            f"{cause}",
+            key="balance_change",
+            throttle_seconds=CONFIG.telegram.balance_alert_throttle_seconds,
+        )
+
     def notify_systemic_error(self, kind: str, detail: str) -> None:
         """Auth, config, database, invariant and reconciliation failures —
         the classes that stop trading rather than being retried."""

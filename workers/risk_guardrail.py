@@ -246,6 +246,25 @@ class RiskGuardrail:
         """
         if self._killed:
             return True
+        # Re-read the persisted flag every pass, not just at construction.
+        #
+        # The flag was loaded once in __init__ and never looked at again, so
+        # anything that tripped it from outside this process — an operator
+        # halting the bot — was invisible until the next restart. That defeats
+        # the point of a kill switch you can reach without a redeploy.
+        #
+        # OR, never assignment. A plain read would let a stale or hand-edited
+        # False in the database un-trip a switch that fired on drawdown
+        # earlier in this same session. The switch latches on; only
+        # reset_kill_switch() clears it, and that is a deliberate human act.
+        if not self._killed and self._load_persisted_kill_switch():
+            self._killed = True
+            log.error(
+                "KILL SWITCH is set in persisted state — halting. This was "
+                "tripped outside this process (operator halt, or an earlier "
+                "run). It requires a manual reset to clear."
+            )
+            return True
         pnl_today, basis = self.drawdown_today(account)
         loss_limit = -abs(CONFIG.risk.max_daily_loss_pct * bankroll_usd)
         if pnl_today <= loss_limit:
@@ -264,6 +283,19 @@ class RiskGuardrail:
                     log.exception("Kill-switch alert failed — the halt still stands")
             return True
         return False
+
+    def _load_persisted_kill_switch(self) -> bool:
+        """The stored flag, or False if it cannot be read.
+
+        A database that will not answer must not fake a halt, and must not
+        raise out of the risk check either — the drawdown rule below is the
+        one that still works when storage is sick, and it has to run.
+        """
+        try:
+            return bool(self.store.load_kill_switch()["tripped"])
+        except Exception:
+            log.exception("Could not read the persisted kill switch")
+            return False
 
     def reset_kill_switch(self):
         """Manual reset only — never call this automatically from inside the

@@ -296,6 +296,23 @@ class OrderStore:
                 new += cur.rowcount
         return new
 
+    def fills_recorded_since(self, since_epoch: float) -> int:
+        """How many fills the bot has recorded since `since_epoch`.
+
+        Keyed on recorded_at (when we learned of the fill) rather than
+        created_at (when the exchange made it), because the question this
+        answers is "did we do this?" — and a fill we had not yet observed
+        cannot explain a balance change we are looking at right now.
+        """
+        if since_epoch is None:
+            return 0
+        with connect(self.db_path) as c:
+            row = c.execute(
+                "SELECT COUNT(*) AS n FROM fills WHERE recorded_at >= ?",
+                (float(since_epoch),),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
     def fills_for_order(self, client_order_id: str) -> list[Fill]:
         with connect(self.db_path) as c:
             rows = c.execute(
