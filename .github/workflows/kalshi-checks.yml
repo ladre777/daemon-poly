@@ -14,6 +14,10 @@ on:
       - "memory/**"
       - "backtest/**"
       - "tests/**"
+      # scripts/ is linted by the ruff step below, so a scripts-only change
+      # can fail CI — but without this line it never triggers a run, and with
+      # deploy gating on, Railway would ship it unchecked.
+      - "scripts/**"
       - "main.py"
       - "config.py"
       - "requirements.txt"

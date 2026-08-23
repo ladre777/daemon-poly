@@ -18,6 +18,7 @@ from core.account_state import AccountState, ReconciliationError
 from core.errors import CircuitBreaker, classify
 from core.llm_client import LLMRateLimited
 from core.kalshi_client import KalshiClient
+from core.telegram_commands import TelegramCommandListener
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore, SignalAlertStore, signal_key
@@ -152,9 +153,70 @@ def install_shutdown_handlers() -> dict:
     return shutdown
 
 
+def _check_balance_change(snapshot, store, order_store, notifier) -> None:
+    """Alert when the exchange balance moves, in either direction.
+
+    The baseline lives in the database, not in memory: Railway restarts on
+    every push, and an in-memory baseline would fire a false alert on the
+    first reconcile after each deploy until the alert got muted as noise.
+
+    A first-ever observation records the baseline and stays silent — there is
+    nothing to compare against, and "None" must not be reported as a drop to
+    zero. After that, every move past the threshold is reported, with the
+    count of fills the bot recorded in the same window, because that is what
+    separates "we spent it" from "something else moved it".
+    """
+    if store is None:
+        return
+    current_cents = snapshot.balance_cents
+    try:
+        previous_cents = store.load_last_balance()
+    except Exception:
+        # Alerting must never be able to stop a pass. A balance we failed to
+        # read is a missed alert, not a reason to skip trading.
+        log.exception("Could not read the balance baseline — skipping the check")
+        return
+
+    if previous_cents is None:
+        store.set_last_balance(current_cents)
+        log.info(
+            "Balance baseline recorded at $%.2f — changes from here are alerted",
+            current_cents / 100,
+        )
+        return
+
+    delta_cents = current_cents - previous_cents
+    threshold_cents = CONFIG.telegram.balance_alert_threshold_usd * 100
+    if abs(delta_cents) < threshold_cents:
+        return
+
+    fills = 0
+    if order_store is not None:
+        try:
+            # Bounded to the same window as the balance change, so the count
+            # answers "did we cause THIS move" rather than "have we ever
+            # traded". Falls back to counting nothing if the timestamp is
+            # missing, which reads as "the bot did not do this" — the
+            # conservative direction, since it prompts a look.
+            fills = order_store.fills_recorded_since(store.load_last_balance_at())
+        except Exception:
+            log.exception("Could not count recent fills — alerting without that detail")
+
+    log.warning(
+        "Balance moved $%+.2f ($%.2f -> $%.2f) with %d bot fill(s) recorded "
+        "in the window",
+        delta_cents / 100, previous_cents / 100, current_cents / 100, fills,
+    )
+    _alert(notifier, "notify_balance_change",
+           previous_cents / 100, current_cents / 100, fills)
+    # Written after alerting, so a crash mid-alert re-reports rather than
+    # silently swallowing the change.
+    store.set_last_balance(current_cents)
+
+
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
              notifier=None, health=None, alert_store=None, arb_scanner=None,
-             coherence_gate=None):
+             coherence_gate=None, store=None, order_store=None):
     try:
         snapshot = account.reconcile()
         if health is not None:
@@ -163,6 +225,12 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         log.error("Reconciliation failed — placing no orders this pass: %s", e)
         _alert(notifier, "notify_systemic_error", "reconciliation", str(e))
         return 0
+    # Before the tradeability gate: a balance that just went to zero makes the
+    # account untradeable, and that is exactly the change worth alerting on.
+    # Checking after the early return would guarantee silence in the one case
+    # this exists for.
+    _check_balance_change(snapshot, store, order_store, notifier)
+
     if not snapshot.is_tradeable:
         log.error("Not safe to trade this pass: %s", snapshot.blocking_reason())
         _alert(notifier, "notify_systemic_error", "account_state",
@@ -466,16 +534,43 @@ def main():
         bankroll_usd=risk.effective_bankroll_usd(snapshot),
     )
 
+    # Operator halt that does not require a redeploy. The persisted flag and
+    # the guardrail that reads it already existed; this is the way a human
+    # reaches them from a phone.
+    def _halt(reason: str) -> None:
+        store.set_kill_switch(True, reason)
+
+    def _status() -> str:
+        snap = account.snapshot()
+        killed = store.load_kill_switch()
+        return (
+            f"env={CONFIG.kalshi.env} dry_run={CONFIG.risk.dry_run}\n"
+            f"balance ${snap.balance_cents / 100:,.2f} | "
+            f"{snap.open_position_count()} position(s)\n"
+            f"kill switch: {'TRIPPED — ' + (killed['reason'] or 'no reason recorded') if killed['tripped'] else 'clear'}\n"
+            f"passes this run: {pass_count}"
+        )
+
     shutdown = install_shutdown_handlers()
     pass_count = 0
     exit_reason = "loop ended"
+
+    # Started after pass_count exists: _status closes over it, and the
+    # listener thread can be answering a /status within milliseconds.
+    commands = TelegramCommandListener(
+        on_halt=_halt,
+        status_provider=_status,
+        send=notifier.send,
+    )
+    commands.start()
     try:
         while True:
             try:
                 run_once(scout, maker, quant_maker, checker, risk, execution,
                          ledger, account, notifier=notifier, health=health,
                          alert_store=alert_store, arb_scanner=arb_scanner,
-                         coherence_gate=coherence_gate)
+                         coherence_gate=coherence_gate,
+                         store=store, order_store=order_store)
                 ledger.reconcile_settlements()
                 ledger.reconcile_forecasts()
                 spot_client.persist_history()
