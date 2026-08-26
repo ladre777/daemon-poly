@@ -419,3 +419,82 @@ def test_ci_runs_on_changes_to_every_directory_it_lints():
         assert f'"{directory}/**"' in trigger_block, (
             f"CI lints {directory}/ but no push to it triggers a run"
         )
+
+
+# -- Checker truncation: a budget failure must not look like bad JSON ------
+#
+# Restored after the 2026-08-21 rewrite dropped it. A truncated verdict is
+# ALSO unparseable JSON, so whichever check runs second never fires. If the
+# parser runs first the symptom is "the model answered badly" and the fix
+# (raise the budget) is invisible — which is exactly what happened three
+# times before the original stop_reason check was written.
+
+
+def _proposal_for_truncation():
+    from workers.maker import Proposal
+    from tests.conftest import make_candidate
+    return Proposal(
+        candidate=make_candidate(ticker="KXBTCD-26AUG2516-T78999.99"),
+        maker_probability=0.62, maker_confidence=0.8, reasoning="stub",
+    )
+
+
+def _checker_whose_llm_raises(exc):
+    from workers.checker import Checker
+
+    class Raising:
+        def complete(self, *a, **kw):
+            raise exc
+
+    checker = Checker.__new__(Checker)
+    checker._llm = Raising()
+    return checker
+
+
+def test_a_truncated_verdict_is_reported_as_truncation(caplog):
+    from core.llm_client import LLMTruncated
+
+    checker = _checker_whose_llm_raises(LLMTruncated("gemini", "gemini-3.5-flash-lite", 1200))
+
+    with caplog.at_level("ERROR"):
+        verdict = checker.check(_proposal_for_truncation())
+
+    assert verdict.verdict == "abstain"
+    assert "truncated" in verdict.reasoning
+    assert "1200" in verdict.reasoning
+    # Must NOT be filed as a generic LLM error or a parse failure.
+    assert "llm_error" not in verdict.reasoning
+    assert "parse_error" not in verdict.reasoning
+
+
+def test_the_truncation_log_names_the_lever_to_turn(caplog):
+    from core.llm_client import LLMTruncated
+
+    checker = _checker_whose_llm_raises(LLMTruncated("anthropic", "claude-haiku-4-5", 1200))
+
+    with caplog.at_level("ERROR"):
+        checker.check(_proposal_for_truncation())
+
+    assert "CHECKER_MAX_TOKENS" in caplog.text
+    assert "TRUNCATED" in caplog.text
+
+
+def test_a_truncated_verdict_still_fails_closed():
+    """Fail-closed is the property that must survive regardless of how the
+    failure is labelled: a cut-off answer never becomes an approval."""
+    from core.llm_client import LLMTruncated
+
+    checker = _checker_whose_llm_raises(LLMTruncated("gemini", "m", 1200))
+
+    assert checker.check(_proposal_for_truncation()).approved is False
+
+
+def test_a_non_truncation_error_still_takes_the_generic_path():
+    """The new branch must not swallow ordinary failures."""
+    checker = _checker_whose_llm_raises(RuntimeError("connection reset"))
+
+    verdict = checker.check(_proposal_for_truncation())
+
+    assert verdict.verdict == "abstain"
+    assert "llm_error" in verdict.reasoning
+    assert "truncated" not in verdict.reasoning

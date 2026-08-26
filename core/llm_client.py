@@ -45,6 +45,31 @@ class LLMRateLimited(TransientError):
     """An optional provider rejected the request due to a temporary quota."""
 
 
+class LLMTruncated(SystemicError):
+    """The provider stopped because it ran out of output budget.
+
+    A distinct type because a truncated answer and a badly-formed answer
+    need opposite responses, and conflating them has already cost this
+    project three separate investigations. A cut-off JSON verdict is also
+    unparseable JSON, so whichever check runs second never fires — the
+    budget failure arrives wearing the costume of a bad model response, and
+    the fix (raise max_tokens / lower effort) is invisible from the symptom.
+
+    Systemic, not transient: every retry at the same budget truncates in the
+    same place. Retrying is not the fix; changing the budget is.
+    """
+
+    def __init__(self, provider: str, model: str, max_tokens: int, detail: str = ""):
+        self.provider = provider
+        self.model = model
+        self.max_tokens = max_tokens
+        super().__init__(
+            f"{provider} model {model} hit the {max_tokens}-token output cap "
+            f"and was cut off mid-answer{(' — ' + detail) if detail else ''}. "
+            f"This is a BUDGET failure, not a bad answer."
+        )
+
+
 def first_text_block(response) -> str:
     for block in getattr(response, "content", None) or []:
         text = getattr(block, "text", None)
@@ -180,6 +205,18 @@ class MoonshotBackend:
         started = time.perf_counter()
         resp = self._client.post("/chat/completions", json=payload)
         elapsed_ms = (time.perf_counter() - started) * 1000
+        if resp.status_code >= 400:
+            # Same defect GeminiBackend had: raise_for_status() discards the
+            # body, so every failure logged as httpx's bare status line and
+            # the actual reason was unrecoverable. A Moonshot 429 states
+            # whether it is a rate limit or an exhausted prepaid balance —
+            # and those have opposite remedies for the same money. Production
+            # ran 209 consecutive 429s with the cause unknowable because this
+            # line was missing.
+            log.warning(
+                "Moonshot HTTP %s on %s: %s",
+                resp.status_code, model, resp.text[:_ERROR_BODY_CHARS * 2],
+            )
         resp.raise_for_status()
         body = resp.json()
         usage = body.get("usage") or {}
@@ -194,6 +231,14 @@ class MoonshotBackend:
             raise SystemicError(f"Moonshot response had no message content: {e}") from e
         if not isinstance(content, str) or not content.strip():
             raise SystemicError("Moonshot response had empty message content")
+        # OpenAI-compatible providers report a budget cut-off as
+        # finish_reason == "length". Checked before the content is handed
+        # back, so a truncated verdict never reaches the JSON parser.
+        if choice.get("finish_reason") == "length":
+            raise LLMTruncated(
+                "moonshot", model, self._max_tokens,
+                f"completion_tokens={usage.get('completion_tokens', '?')}",
+            )
         log.info(
             "Kimi completion model=%s elapsed_ms=%.0f prompt_tokens=%s "
             "cached_tokens=%s completion_tokens=%s finish_reason=%s",
@@ -254,10 +299,15 @@ class GeminiBackend:
 
     name = "gemini"
 
-    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 12.0):
+    def __init__(self, api_key: str, base_url: str, model: str, timeout: float = 12.0,
+                 max_tokens: int = 0):
         self._api_key = (api_key or "").strip()
         self._base_url = (base_url or "").rstrip("/")
         self.model = model
+        #: Only used to name the lever in a truncation message. Gemini's cap
+        #: is set server-side unless maxOutputTokens is sent, so 0 means
+        #: "provider default" rather than a number we chose.
+        self._max_tokens = max_tokens
         self._client = httpx.Client(
             base_url=self._base_url or "https://generativelanguage.googleapis.com/v1beta",
             headers={"x-goog-api-key": self._api_key} if self._api_key else {},
@@ -296,13 +346,20 @@ class GeminiBackend:
                 resp.status_code, self.model, resp.text[:800],
             )
         resp.raise_for_status()
+        body = resp.json()
         try:
-            parts = resp.json()["candidates"][0]["content"]["parts"]
+            candidate = body["candidates"][0]
+            parts = candidate["content"]["parts"]
             text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
         except (KeyError, IndexError, TypeError, ValueError) as e:
             raise SystemicError(f"Gemini response had no text content: {e}") from e
         if not text.strip():
             raise SystemicError("Gemini response had empty text content")
+        # Gemini spells a budget cut-off MAX_TOKENS. Checked after the text
+        # is extracted but before it is returned, so the caller never sees a
+        # half-written JSON object it would report as a parse error.
+        if str(candidate.get("finishReason", "")).upper() == "MAX_TOKENS":
+            raise LLMTruncated("gemini", self.model, self._max_tokens)
         return text
 
 
@@ -332,6 +389,12 @@ class AnthropicBackend:
             temperature=temperature,
             messages=[{"role": "user", "content": user}],
         )
+        # The original Checker checked exactly this and the 2026-08-21
+        # rewrite dropped it. stop_reason is the API stating plainly that it
+        # ran out of room; asking is cheaper than diagnosing the parse error
+        # it otherwise becomes.
+        if getattr(resp, "stop_reason", None) == "max_tokens":
+            raise LLMTruncated("anthropic", self.model, self._max_tokens)
         return first_text_block(resp)
 
 
@@ -489,6 +552,7 @@ def build_maker_llm(models_config) -> MakerLLM:
         base_url=getattr(models_config, "gemini_base_url", ""),
         model=getattr(models_config, "gemini_model", "gemini-3.5-flash-lite"),
         timeout=getattr(models_config, "gemini_timeout_seconds", 12.0),
+        max_tokens=getattr(models_config, "checker_max_tokens", 0),
     )
     fallback_model = (getattr(models_config, "maker_fallback_model", "") or "").strip()
     if not fallback_model:
@@ -543,6 +607,7 @@ def build_checker_llm(models_config) -> MakerLLM:
         base_url=getattr(models_config, "gemini_base_url", ""),
         model=getattr(models_config, "gemini_model", "gemini-3.5-flash-lite"),
         timeout=getattr(models_config, "gemini_timeout_seconds", 12.0),
+        max_tokens=getattr(models_config, "checker_max_tokens", 0),
     )
     anthropic_backend = AnthropicBackend(
         api_key=models_config.anthropic_api_key,

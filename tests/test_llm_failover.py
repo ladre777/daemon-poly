@@ -17,6 +17,7 @@ from core.llm_client import (
     AnthropicBackend,
     GeminiBackend,
     LLMRateLimited,
+    LLMTruncated,
     LLMUnavailable,
     MakerLLM,
     MoonshotBackend,
@@ -803,3 +804,96 @@ def test_a_healthy_gemini_response_never_touches_the_error_log(caplog):
         backend.complete("sys", "user")
 
     assert "Gemini HTTP" not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# truncation detection — restored after the 2026-08-21 Checker rewrite
+# --------------------------------------------------------------------------
+#
+# The original Checker inspected stop_reason before parsing, so a cut-off
+# verdict was diagnosed as a BUDGET failure. The rewrite to a provider-
+# configurable backend dropped that entirely: finish_reason was logged but
+# never inspected, so a truncated answer came back as "unparseable JSON".
+# That framing previously sent three separate investigations after the
+# prompt when the fix was the token budget.
+#
+# CHECKER_MAX_TOKENS=1200 was tuned for claude-sonnet-5. The Checker now
+# runs Gemini or Haiku, so this is a live risk, not a historical one.
+
+
+def test_moonshot_reports_a_length_cutoff_as_truncation_not_bad_content():
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"verdict": "appr'},
+                         "finish_reason": "length"}],
+            "usage": {"completion_tokens": 800},
+        })
+
+    backend = _moonshot_with_transport(handler, model="kimi-k2.6")
+    with pytest.raises(LLMTruncated) as excinfo:
+        backend.complete("sys", "user")
+
+    assert excinfo.value.provider == "moonshot"
+    assert "BUDGET failure" in str(excinfo.value)
+
+
+def test_moonshot_stop_is_not_treated_as_truncation():
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"verdict": "reject"}'},
+                         "finish_reason": "stop"}],
+            "usage": {"completion_tokens": 12},
+        })
+
+    assert _moonshot_with_transport(handler).complete("sys", "u") == '{"verdict": "reject"}'
+
+
+def test_gemini_reports_max_tokens_as_truncation():
+    backend = _gemini_with_transport(
+        lambda request: httpx.Response(200, json={
+            "candidates": [{
+                "content": {"parts": [{"text": '{"verdict": "appr'}]},
+                "finishReason": "MAX_TOKENS",
+            }]
+        })
+    )
+    with pytest.raises(LLMTruncated) as excinfo:
+        backend.complete("sys", "user")
+
+    assert excinfo.value.provider == "gemini"
+
+
+def test_gemini_normal_stop_is_not_truncation():
+    backend = _gemini_with_transport(
+        lambda request: httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": "ok"}]},
+                            "finishReason": "STOP"}]
+        })
+    )
+    assert backend.complete("sys", "user") == "ok"
+
+
+def test_moonshot_error_body_is_logged_not_discarded(caplog):
+    """A Moonshot 429 states whether it is a rate limit or an exhausted
+    prepaid balance. Those have opposite remedies for the same money, and
+    production ran 209 consecutive 429s with the cause unknowable because
+    raise_for_status() threw the body away."""
+    body = ('{"error": {"type": "rate_limit_reached_error", "message": '
+            '"Your account org-xxx<xxx> is not active, please check your '
+            'account balance."}}')
+    backend = _moonshot_with_transport(
+        lambda request: httpx.Response(429, content=body.encode())
+    )
+    with caplog.at_level("WARNING"), pytest.raises(httpx.HTTPStatusError):
+        backend.complete("sys", "user")
+
+    assert "Moonshot HTTP 429" in caplog.text
+    assert "check your account balance" in caplog.text
+
+
+def test_truncation_is_systemic_so_a_retry_at_the_same_budget_is_pointless():
+    """Not transient: every retry at the same cap truncates in the same
+    place. Retrying is not the fix; changing the budget is."""
+    from core.errors import Severity
+
+    assert classify(LLMTruncated("gemini", "m", 1200)) is Severity.SYSTEMIC

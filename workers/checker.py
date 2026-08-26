@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from config import CONFIG
-from core.llm_client import build_checker_llm
+from core.llm_client import LLMTruncated, build_checker_llm
 from core.validation import validate_checker_output
 from workers.maker import Proposal
 
@@ -102,6 +102,31 @@ class Checker:
 
         try:
             raw = self._llm.complete(SYSTEM_PROMPT, user_msg, temperature=0.2)
+        except LLMTruncated as e:
+            # Caught before the generic handler and reported as its own
+            # thing. A truncated verdict is also unparseable JSON, so if this
+            # fell through to validate_checker_output it would come back as
+            # "parse_error" — which reads as "the model answered badly" and
+            # sends the next reader after the prompt. It is a budget failure,
+            # and the levers are named here so nobody has to rediscover them.
+            #
+            # CHECKER_MAX_TOKENS was tuned for claude-sonnet-5. The Checker
+            # now runs Gemini or Haiku, whose output behaviour differs, so
+            # this is a live risk rather than a historical one.
+            log.error(
+                "Checker TRUNCATED on %s: %s Raise CHECKER_MAX_TOKENS "
+                "(currently %d) or shorten the prompt. Abstaining.",
+                c.ticker, e, CONFIG.models.checker_max_tokens,
+            )
+            return Verdict(
+                proposal=proposal,
+                verdict="abstain",
+                confidence=0.0,
+                reasoning=(
+                    f"truncated: {e.provider} hit the {e.max_tokens}-token "
+                    f"cap — budget failure, not a bad verdict"
+                ),
+            )
         except Exception as e:
             log.error("Checker LLM failed on %s: %s — abstaining", c.ticker, e)
             return Verdict(
