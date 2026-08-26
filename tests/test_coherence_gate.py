@@ -398,11 +398,86 @@ def test_one_event_cannot_eat_the_whole_model_budget(
     assert "KXBTC-C" in maker.seen, "crypto must get a look in"
 
 
-def test_priority_markets_still_bypass_the_per_event_cap(
+def test_a_priority_ladder_cannot_starve_other_events_either(
     client, order_store, edge_store, account, execution, risk, ledger
 ):
-    """Golf is the one family the operator named as always-first, and it was
-    already exempt from the per-pass cap. Keep it exempt here too."""
+    """The production failure as it actually shipped.
+
+    ``wti`` is in the default PRIORITY_KEYWORDS, so the starvation test above
+    was passing on a candidate set the cap never applied to in production.
+    Same twelve-strike ladder, this time on the priority path.
+    """
+    import main
+    from tests.test_pass_loop import (
+        StubChecker, StubMaker, StubQuantMaker, StubScout, _positions_follow_fills,
+    )
+
+    CONFIG.risk.dry_run = True
+    CONFIG.max_llm_calls_per_event = 2
+    CONFIG.max_llm_calls_per_pass = 10
+    CONFIG.priority_keywords = ["wti"]
+    CONFIG.llm_reasoning_categories = ["sports"]
+
+    ladder = [
+        make_candidate(ticker=f"KXWTI-A-T{i}", title="WTI crude above",
+                       event_ticker="KXWTI-A")
+        for i in range(12)
+    ]
+    others = [
+        make_candidate(ticker="KXRAIN-B-SFO", event_ticker="KXRAIN-B"),
+        make_candidate(ticker="KXBTC-C-T1", event_ticker="KXBTC-C"),
+    ]
+    candidates = ladder + others
+    _positions_follow_fills(client, candidates)
+
+    class CountingMaker(StubMaker):
+        def __init__(self):
+            super().__init__()
+            self.seen: list[str] = []
+
+        def propose(self, candidate):
+            self.seen.append(candidate.event_ticker)
+            return super().propose(candidate)
+
+    maker = CountingMaker()
+    main.run_once(StubScout(candidates), maker, StubQuantMaker(), StubChecker(),
+                  risk, execution, ledger, account)
+
+    assert maker.seen.count("KXWTI-A") <= 2, (
+        f"the priority ladder took {maker.seen.count('KXWTI-A')} calls; "
+        f"the cap is 2 and priority does not waive it"
+    )
+    assert "KXRAIN-B" in maker.seen, "weather must get a look in"
+    assert "KXBTC-C" in maker.seen, "crypto must get a look in"
+
+
+def test_priority_markets_are_rationed_per_event_like_everything_else(
+    client, order_store, edge_store, account, execution, risk, ledger
+):
+    """This test used to assert the opposite, and the opposite was wrong.
+
+    Its reasoning was that golf is the family the operator named as
+    always-first, so it should be exempt from the per-event cap as it is from
+    the per-pass one. But the exemption keyed on PRIORITY_KEYWORDS, whose
+    shipped default is:
+
+        golf, pga, masters, liv, btc, bitcoin, eth, high, temperature, rain,
+        wti, oil, gas, gold, silver, fed, cpi
+
+    That matches essentially every in-scope candidate — including ``wti``,
+    the exact family in ``test_one_event_cannot_eat_the_whole_model_budget``
+    above. So the cap that test exists to protect was dead in production: the
+    twelve-strike WTI ladder that starved weather and crypto was a priority
+    candidate and skipped the cap entirely. Two tests, one asserting the cap
+    binds and one asserting it does not, and the second silently won.
+
+    Priority still means what it usefully meant. Priority candidates are
+    sorted first, so they are looked at before anything else, and they are
+    still waived from the per-*pass* cap — that is what stops an earlier
+    event exhausting the budget before a priority one is reached. What they
+    no longer get is unlimited calls on a single event, because "first" and
+    "unlimited" are different claims and only the first one was intended.
+    """
     import main
     from tests.test_pass_loop import (
         StubChecker, StubMaker, StubQuantMaker, StubScout, _positions_follow_fills,
@@ -433,4 +508,6 @@ def test_priority_markets_still_bypass_the_per_event_cap(
     main.run_once(StubScout(candidates), maker, StubQuantMaker(), StubChecker(),
                   risk, execution, ledger, account)
 
-    assert len(maker.seen) == 4, "priority markets are not rationed per event"
+    assert len(maker.seen) == 1, (
+        f"the priority ladder took {len(maker.seen)} calls; the cap is 1"
+    )

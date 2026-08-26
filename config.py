@@ -334,6 +334,12 @@ class AppConfig:
     # Fewer calls/pass → less timeout pressure on Moonshot.
     max_llm_calls_per_pass: int = _int("MAX_LLM_CALLS_PER_PASS", 25)
     max_llm_calls_per_event: int = _int("MAX_LLM_CALLS_PER_EVENT", 2)
+    # Checker calls per (event_ticker, direction), best |edge| first. A strike
+    # ladder is one model opinion evaluated at several points, so past this
+    # the Checker is re-answering a question it has already answered. 0 = off.
+    max_checker_calls_per_event_direction: int = _int(
+        "MAX_CHECKER_CALLS_PER_EVENT_DIRECTION", 3
+    )
     max_fallback_llm_calls_per_pass: int = _int("MAX_FALLBACK_LLM_CALLS_PER_PASS", 8)
     model_failure_threshold: int = _int("MODEL_FAILURE_THRESHOLD", 5)
     startup_failure_hold_seconds: int = _int("STARTUP_FAILURE_HOLD_SECONDS", 60)

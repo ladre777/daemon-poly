@@ -46,6 +46,7 @@ from core.telegram_client import TelegramClient
 from workers.quant_maker import QuantMaker
 from workers.arbitrage import ArbitrageScanner
 from workers.coherence import CoherenceGate
+from workers.ladder_dedup import select_for_checker
 
 logging.basicConfig(
     level=CONFIG.log_level,
@@ -253,6 +254,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     candidates.sort(key=lambda c: (not _is_priority(c), not _is_preferred(c)))
 
     filled_this_pass = 0
+    priced: list = []
     llm_calls_this_pass = 0
     llm_calls_by_event: dict[str, int] = defaultdict(int)
     stats: dict[str, int] = defaultdict(int)
@@ -296,9 +298,15 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 continue
 
             event_key = candidate.event_ticker or candidate.ticker
+            # The per-event cap binds on priority candidates too. It used to
+            # be skipped for them, and PRIORITY_KEYWORDS matches essentially
+            # every in-scope candidate (btc, eth, high, wti, gold, fed, cpi,
+            # golf...), so in practice the cap was dead: a deep ladder on one
+            # event could consume the whole pass. The per-pass cap below is
+            # still waived for priority candidates — that is what keeps a
+            # priority event from being starved by earlier ones.
             per_event_cap = CONFIG.max_llm_calls_per_event
-            if (not is_priority and per_event_cap
-                    and llm_calls_by_event[event_key] >= per_event_cap):
+            if per_event_cap and llm_calls_by_event[event_key] >= per_event_cap:
                 stats["llm_capped_per_event"] += 1
                 continue
 
@@ -350,6 +358,30 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                                         reason=coherence.reason)
             continue
 
+        priced.append(proposal)
+
+    # The pass is split here, and it has to be. Selecting the best strikes on
+    # a ladder means ranking them against each other, and nothing above this
+    # line ever has a whole ladder in hand — CoherenceGate says so in its own
+    # docstring, and it is right: it is incremental by design because it must
+    # refuse a proposal before the next one is priced.
+    #
+    # Pricing is cheap and local; the Checker is the expensive, remote call.
+    # So everything up to here still runs per candidate, and only the Checker
+    # and what follows it wait for the full set. Quotes are refreshed again
+    # before execution, so the added delay does not trade on a stale price.
+    selected, dropped = select_for_checker(
+        priced, CONFIG.max_checker_calls_per_event_direction
+    )
+    stats["ladder_deduped"] += dropped
+    if dropped:
+        log.info(
+            "Ladder cap: %d priced -> %d to the Checker (%d duplicate strikes "
+            "dropped)", len(priced), len(selected), dropped,
+        )
+
+    for proposal in selected:
+        candidate = proposal.candidate
         try:
             verdict = checker.check(proposal)
         except Exception as e:
@@ -434,10 +466,10 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
 
     log.info(
         "Pass funnel: candidates=%d quant=%d llm_called=%d llm_disabled=%d "
-        "proposed=%d approved=%d filled=%d",
+        "proposed=%d ladder_deduped=%d checked=%d approved=%d filled=%d",
         len(candidates), stats["quant_attempted"], stats["llm_called"],
-        stats["llm_disabled"], stats["proposed"], stats["approved"],
-        filled_this_pass,
+        stats["llm_disabled"], stats["proposed"], stats["ladder_deduped"],
+        stats["checked"], stats["approved"], filled_this_pass,
     )
     return filled_this_pass
 
