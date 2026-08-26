@@ -19,8 +19,6 @@ approval is not.
 """
 from __future__ import annotations
 
-import pytest
-
 from config import CONFIG
 from core.validation import repair_truncated_json, validate_checker_output
 
@@ -197,10 +195,56 @@ def test_a_complete_response_is_not_marked_as_recovered():
     assert "truncated" not in out.reasoning.lower()
 
 
+
 # -- the Checker must know what year it is ---------------------------------
+#
+# These four tests used to drive ``Checker.__new__(Checker)`` with a hand-set
+# ``_client`` holding an Anthropic-shaped ``messages.create``. The Checker no
+# longer talks to a vendor SDK directly: it holds a ``MakerLLM`` at ``_llm``
+# and calls ``complete(system, user)``. Reaching past that seam meant the
+# tests asserted against a client attribute that no longer exists, so all
+# four failed with ``AttributeError: 'Checker' object has no attribute
+# '_llm'`` — never reaching the thing they were written to protect.
+#
+# They are rehomed onto the real seam here. What is under test is unchanged:
+# the prompt still has to state the date and the close time, and the Checker
+# still has to announce which model is judging.
 
 
-def test_the_prompt_states_todays_date(monkeypatch):
+class _CapturingLLM:
+    """Stands in for ``MakerLLM``: captures the prompt, returns a real verdict.
+
+    It must *return* rather than raise. ``Checker.check`` catches every
+    exception and abstains — that is the fail-closed behaviour the gate is
+    built on — so a raising double is swallowed and tells the test nothing.
+    Returning well-formed JSON keeps the pass on its normal path and leaves
+    the captured prompt as the only thing under test.
+    """
+
+    def __init__(self):
+        self.system = ""
+        self.user = ""
+
+    def describe(self) -> str:
+        return "primary=fake:fake-1 fallback=none"
+
+    def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        self.system = system
+        self.user = user
+        return '{"verdict": "abstain", "confidence": 0.0, "reasoning": "test double"}'
+
+
+def checker_prompt_for(proposal) -> str:
+    """Run one check against a capturing double and hand back the user turn."""
+    from workers.checker import Checker
+
+    llm = _CapturingLLM()
+    Checker(llm=llm).check(proposal)
+    assert llm.user, "the Checker never reached the LLM seam"
+    return llm.user
+
+
+def test_the_prompt_states_todays_date():
     """A false rejection traced to the Checker not knowing the date.
 
     On KXHIGHNY-26AUG17-T84 — a weather market, where our grounding is an
@@ -218,54 +262,19 @@ def test_the_prompt_states_todays_date(monkeypatch):
     """
     from datetime import datetime, timezone
 
-    from workers.checker import Checker
+    prompt = checker_prompt_for(make_verdict().proposal)
 
-    captured = {}
-
-    class FakeMessages:
-        def create(self, **kwargs):
-            captured.update(kwargs)
-            raise RuntimeError("stop here — the prompt is what is under test")
-
-    class FakeClient:
-        messages = FakeMessages()
-
-    checker = Checker.__new__(Checker)
-    checker._client = FakeClient()
-
-    verdict = make_verdict()
-    with pytest.raises(RuntimeError):
-        checker.check(verdict.proposal)
-
-    prompt = captured["messages"][0]["content"]
     today = f"{datetime.now(timezone.utc):%Y-%m-%d}"
     assert today in prompt, "the Checker must be told the current date"
     assert "authoritative" in prompt
 
 
-def test_the_prompt_carries_the_market_close_time(monkeypatch):
+def test_the_prompt_carries_the_market_close_time():
     """Knowing today is only half of it — the Checker also has to see when
     the market resolves to judge whether a forecast horizon is plausible."""
-    from workers.checker import Checker
+    prompt = checker_prompt_for(make_verdict().proposal)
 
-    captured = {}
-
-    class FakeMessages:
-        def create(self, **kwargs):
-            captured.update(kwargs)
-            raise RuntimeError("stop")
-
-    class FakeClient:
-        messages = FakeMessages()
-
-    checker = Checker.__new__(Checker)
-    checker._client = FakeClient()
-
-    verdict = make_verdict()
-    with pytest.raises(RuntimeError):
-        checker.check(verdict.proposal)
-
-    assert "Market closes:" in captured["messages"][0]["content"]
+    assert "Market closes:" in prompt
 
 
 def test_no_threshold_moved_with_it():
@@ -276,37 +285,43 @@ def test_no_threshold_moved_with_it():
 # -- the Checker announces itself at boot ----------------------------------
 
 
-def test_the_checker_logs_its_model_at_startup(caplog, monkeypatch):
+def test_the_checker_logs_its_model_at_startup(caplog):
     """Maker prints "Maker LLM: primary=... fallback=..." on startup; the
     Checker printed nothing. So the model standing between a proposal and the
     account could only be established by reading config.py and then checking
     whether CHECKER_MODEL was set in the environment — two lookups, one of
-    them outside the repo, to answer "what is judging this?"."""
-    import anthropic
+    them outside the repo, to answer "what is judging this?".
 
+    Asserted through ``build_checker_llm``'s own ``describe()`` rather than
+    against a hardcoded string, so a provider switch cannot quietly make the
+    boot line say something the builder no longer produces.
+    """
+    from core.llm_client import build_checker_llm
     from workers.checker import Checker
 
-    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: object())
+    expected = build_checker_llm(CONFIG.models).describe()
 
     with caplog.at_level("INFO"):
         Checker()
 
     assert "Checker LLM:" in caplog.text
-    assert CONFIG.models.checker_model in caplog.text
+    assert expected in caplog.text
 
 
-def test_it_also_reports_the_budget_levers(caplog, monkeypatch):
-    """max_tokens and effort are not incidental — they are what a truncated
-    verdict is diagnosed from, and a verdict cut off mid-JSON is discarded
-    entirely."""
-    import anthropic
+def test_it_also_reports_the_budget_lever(caplog):
+    """max_tokens is not incidental — it is what a truncated verdict is
+    diagnosed from, and a verdict cut off mid-JSON is discarded entirely.
 
+    Singular: this test used to also assert ``effort=``. ``CHECKER_EFFORT``
+    is a dead setting — ``config.py`` still defines ``checker_effort``, but
+    no product code reads it, so the boot line could not honestly print it.
+    The assertion was dropped rather than the config being wired up to
+    satisfy a test; if effort is wanted, that is a product decision, not a
+    test repair.
+    """
     from workers.checker import Checker
-
-    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: object())
 
     with caplog.at_level("INFO"):
         Checker()
 
     assert f"max_tokens={CONFIG.models.checker_max_tokens}" in caplog.text
-    assert f"effort={CONFIG.models.checker_effort}" in caplog.text

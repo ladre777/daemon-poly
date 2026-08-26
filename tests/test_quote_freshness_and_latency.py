@@ -289,12 +289,40 @@ def test_the_tally_clears_once_the_cooldown_elapses():
 
 
 def test_the_timeout_budget_is_calibrated_on_observed_latency():
-    """15s was never a measurement. Successful calls returned in ~2s; the
-    budget was only ever spent by calls that were going to fail anyway."""
-    assert CONFIG.models.maker_timeout_seconds <= 8.0
-    assert CONFIG.models.maker_timeout_seconds >= 4.0, (
-        "not so tight that a merely slow-but-good answer is discarded"
+    """The budget must be a measurement, not a guess — but the measurement
+    has been retaken, and it moved the other way.
+
+    This test used to assert ``<= 8.0``, on the reading that successful calls
+    returned in ~2s so a long budget was only ever spent by calls that were
+    going to fail anyway. Production then showed the opposite failure mode.
+    Commit 442ea6b (2026-08-21, "Raise Moonshot timeouts to 25s; cap LLM calls
+    at 25/pass to reduce timeout storms") raised maker and checker timeouts
+    from 12s to 25s together, recording in config.py:
+
+        25s — Moonshot often answers after 12s under load; short timeout =
+        false failure.
+
+    Under load the tail is long, and a tight budget discards good answers —
+    which is the one thing the old lower bound was written to prevent. Two
+    commits disagreed here and the later one carries the production evidence,
+    so the assertion follows the shipped policy rather than pinning a value
+    the system deliberately moved off.
+
+    The config value is not changed by this test. What is asserted is that
+    the number stays deliberate: long enough to cover the observed tail, not
+    so long that a hung provider stalls a whole pass.
+    """
+    assert CONFIG.models.maker_timeout_seconds >= 25.0, (
+        "must cover the observed under-load tail; below this, slow-but-good "
+        "answers are discarded as failures (442ea6b)"
     )
+    assert CONFIG.models.maker_timeout_seconds <= 60.0, (
+        "a hung provider must not be able to stall a pass indefinitely"
+    )
+    assert (
+        CONFIG.models.checker_timeout_seconds
+        == CONFIG.models.maker_timeout_seconds
+    ), "442ea6b raised both together; they answer to the same provider tail"
 
 
 # --------------------------------------------------------------------------

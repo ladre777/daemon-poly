@@ -121,37 +121,81 @@ def test_a_non_string_payload_does_not_crash_the_logger():
     assert _describe_unparseable(12345)
 
 
-def test_checker_records_stop_reason_on_a_parse_failure(caplog):
-    """Separates 'stopped early for another reason' from 'finished, emitted
-    non-JSON' — the open question from the two production failures."""
-    from workers.checker import Checker
-    from tests.test_checker_budget import _Block, _Resp, _RecordingClient, _proposal
+# Both tests below drove ``Checker.__new__(Checker)`` with a hand-set
+# ``_client`` holding a raw Anthropic response object, and read the vendor
+# ``stop_reason`` off it. The Checker no longer holds a vendor client: it
+# holds a ``MakerLLM`` at ``_llm`` whose ``complete()`` returns a plain
+# string, and truncation is raised as a typed ``LLMTruncated`` by whichever
+# backend saw it. They are rehomed onto that seam.
+#
+# The separation these tests exist to protect is now structural rather than
+# a log line. Truncation raises before any parsing happens, so anything that
+# reaches ``validate_checker_output`` has by construction finished and
+# emitted non-JSON. That is a stronger guarantee than "the log said
+# stop_reason=end_turn", and it is what is asserted now — the old
+# ``stop_reason=`` / "NOT a token-cap truncation" strings are gone from the
+# product and were not re-added to satisfy a test.
 
-    checker = Checker.__new__(Checker)
-    checker._client = _RecordingClient(_Resp([_Block("plainly not json")],
-                                             stop_reason="end_turn"))
+
+class _StubLLM:
+    """Returns a fixed payload, or raises a fixed error, at the LLM seam."""
+
+    def __init__(self, payload=None, error=None):
+        self._payload = payload
+        self._error = error
+
+    def describe(self) -> str:
+        return "primary=fake:fake-1 fallback=none"
+
+    def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
+        if self._error is not None:
+            raise self._error
+        return self._payload
+
+
+def test_a_finished_but_non_json_verdict_is_not_blamed_on_the_token_cap(caplog):
+    """Separates 'stopped early for another reason' from 'finished, emitted
+    non-JSON' — the open question from the two production failures.
+
+    A complete response that simply is not JSON must abstain as a parse
+    failure and must not be described as truncation: the budget is not the
+    problem, and sending the next reader after CHECKER_MAX_TOKENS would waste
+    exactly the investigation this separation was built to save.
+    """
+    from workers.checker import Checker
+    from tests.conftest import make_verdict
+
+    checker = Checker(llm=_StubLLM(payload="plainly not json"))
     with caplog.at_level("WARNING"):
-        verdict = checker.check(_proposal())
+        verdict = checker.check(make_verdict().proposal)
 
     assert verdict.verdict == "abstain"
-    assert "stop_reason=end_turn" in caplog.text
-    assert "NOT a token-cap truncation" in caplog.text
+    assert "parse" in verdict.reasoning.lower()
+    assert "truncated" not in verdict.reasoning.lower()
+    assert "CHECKER_MAX_TOKENS" not in caplog.text, (
+        "a finished non-JSON answer is not a budget failure"
+    )
 
 
 def test_a_token_cap_truncation_still_takes_the_earlier_path(caplog):
-    """The budget check must keep firing first — this must not regress it."""
-    from workers.checker import Checker
-    from tests.test_checker_budget import _Block, _Resp, _RecordingClient, _proposal
+    """The budget check must keep firing first — this must not regress it.
 
-    checker = Checker.__new__(Checker)
-    checker._client = _RecordingClient(_Resp([_Block('{"verdict": "appr')],
-                                             stop_reason="max_tokens"))
+    ``LLMTruncated`` is caught ahead of the generic handler, so a cut-off
+    verdict is reported as a budget failure rather than falling through to
+    the JSON parser and coming back as "the model answered badly".
+    """
+    from core.llm_client import LLMTruncated
+    from workers.checker import Checker
+    from tests.conftest import make_verdict
+
+    truncated = LLMTruncated("moonshot", "kimi-k2.6", 1200, "completion_tokens=1200")
+    checker = Checker(llm=_StubLLM(error=truncated))
     with caplog.at_level("ERROR"):
-        verdict = checker.check(_proposal())
+        verdict = checker.check(make_verdict().proposal)
 
     assert "truncated" in verdict.reasoning
     assert "CHECKER_MAX_TOKENS" in caplog.text
-    assert "NOT a token-cap truncation" not in caplog.text, (
+    assert "parse_error" not in verdict.reasoning, (
         "the two diagnoses must never both fire — that is the confusion "
         "this whole change exists to remove"
     )
