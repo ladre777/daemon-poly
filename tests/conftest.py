@@ -36,6 +36,7 @@ _APP_FIELDS = (
     "priority_categories",
     "max_llm_calls_per_pass",
     "max_llm_calls_per_event",
+    "max_checker_calls_per_event_direction",
     "scout_poll_seconds",
     "scout_max_pages",
 )
