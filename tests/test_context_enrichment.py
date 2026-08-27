@@ -36,6 +36,25 @@ class _RecordingESPN:
         return self._payload
 
 
+class _RecordingSlashGolf:
+    """Golf grounding left ESPN on 2026-08-21 for Slash Golf's live feed.
+    ESPN's ``golf_leaderboard`` never carried PGA leaderboards at all."""
+
+    available = True
+
+    def __init__(self, rows=None):
+        self.calls = 0
+        self._rows = rows if rows is not None else [
+            {"firstName": "Rory", "lastName": "McIlroy",
+             "position": "1", "total": -7},
+        ]
+
+    def leaderboard(self, **kwargs):
+        self.calls += 1
+        return {"tournId": "1", "year": 2026, "name": "US Open",
+                "rows": self._rows}
+
+
 class _RecordingNOAA:
     def __init__(self, forecast=None):
         self.calls = []
@@ -152,17 +171,14 @@ def test_golf_market_routes_to_the_leaderboard_without_golf_in_the_title():
     candidate = _candidate_from_ticker("KXUSOPEN-26", "Will Rory McIlroy win the US Open?")
     assert (candidate.category, candidate.taxonomy_category) == ("Sports", "Golf")
 
-    espn = _RecordingESPN(payload={"events": [{
-        "name": "US Open",
-        "competitions": [{"competitors": [
-            {"athlete": {"displayName": "R. McIlroy"}, "score": "-7",
-             "status": {"position": {"displayName": "1"}}},
-        ]}],
-    }]})
-    out = ContextEnricher(espn=espn).enrich(candidate)
+    espn = _RecordingESPN()
+    golf = _RecordingSlashGolf()
+    out = ContextEnricher(espn=espn, slash_golf=golf).enrich(candidate)
 
-    assert espn.golf_calls == ["pga"]
-    assert espn.scoreboard_calls == []
+    # The routing claim, now against the source that actually serves golf.
+    assert golf.calls == 1
+    assert espn.scoreboard_calls == [], "a golf market must not hit a scoreboard"
+    assert espn.golf_calls == [], "ESPN is no longer on the golf path at all"
     assert "McIlroy" in out
 
 

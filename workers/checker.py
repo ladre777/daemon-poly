@@ -63,7 +63,14 @@ class Verdict:
 class Checker:
     def __init__(self, llm=None):
         self._llm = llm or build_checker_llm(CONFIG.models)
-        log.info("Checker LLM: %s", self._llm.describe())
+        # max_tokens on the boot line, not just the provider pair. It is the
+        # lever a truncated verdict is diagnosed from, and CHECKER_MAX_TOKENS
+        # was tuned for claude-sonnet-5 — the Checker now runs Gemini or
+        # Haiku, so the value in force is worth stating where it is read.
+        log.info(
+            "Checker LLM: %s max_tokens=%d",
+            self._llm.describe(), CONFIG.models.checker_max_tokens,
+        )
 
     def check(self, proposal: Proposal) -> Verdict:
         c = proposal.candidate

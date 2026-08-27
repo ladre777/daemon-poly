@@ -50,6 +50,25 @@ class FakeESPN:
         }]}]}
 
 
+class FakeSlashGolf:
+    """Golf grounding moved off ESPN on 2026-08-21. ESPN never carried PGA
+    leaderboards — only game scores — so the golf path now reads Slash Golf's
+    live scoring feed and the ESPN doubles below no longer reach it."""
+
+    available = True
+
+    def leaderboard(self, **kwargs):
+        return {
+            "tournId": "1", "year": 2026, "name": "The Open Championship",
+            "rows": [
+                {"firstName": "Rory", "lastName": "McIlroy",
+                 "position": "1", "total": -12},
+                {"firstName": "Scottie", "lastName": "Scheffler",
+                 "position": "T2", "total": -10},
+            ],
+        }
+
+
 class FakeFRED:
     def get_series_for_keyword(self, title):
         return {"series_id": "CPIAUCSL", "value": "3.2", "date": "2026-07-01"}
@@ -109,13 +128,19 @@ def test_the_weather_context_does_not_tell_the_model_to_distrust_it():
 # -- ESPN keeps its caveat, because it earns it -----------------------------
 
 
-def test_golf_context_still_warns_about_event_matching():
-    """ESPN genuinely may be reporting a different tournament. That caveat was
-    right — it was just being applied to everything."""
-    text = ContextEnricher(espn=FakeESPN()).enrich(golf_candidate())
+def test_golf_context_names_slash_golf_as_the_official_feed():
+    """This test used to assert golf carried ESPN's "may not be reporting the
+    same event" caveat. That caveat was correct for ESPN and is wrong for what
+    replaced it: Slash Golf is the live scoring feed for the event itself, not
+    a third party that might be covering a different tournament. Asserting the
+    old caveat here would mean re-labelling authoritative data as unreliable —
+    the exact failure this whole file exists to prevent, pointed the other way.
+    """
+    text = ContextEnricher(slash_golf=FakeSlashGolf()).enrich(golf_candidate())
 
-    assert "SOURCE: ESPN" in text
-    assert "may not be reporting the same event" in text
+    assert "SOURCE: Slash Golf" in text
+    assert "official live scoring feed" in text
+    assert "ESPN" not in text
 
 
 def test_sports_context_carries_the_same_warning():
@@ -147,8 +172,16 @@ def test_fred_names_itself_as_official():
 class CapturingLLM:
     """Captures the prompt instead of calling a model."""
 
+    #: ``Maker.__init__`` reads this to decide whether the LLM path is usable.
+    #: Without it the double looks like an unconfigured provider.
+    configured = True
+    on_fallback = False
+
     def __init__(self):
         self.user_msg = ""
+
+    def describe(self):
+        return "primary=fake:fake-1 fallback=none"
 
     def complete(self, system, user, temperature=0.3):
         self.user_msg = user
@@ -156,13 +189,21 @@ class CapturingLLM:
 
 
 def maker_prompt_for(candidate, **enricher_kw):
-    """The prompt the Maker actually sends, grounding block included."""
+    """The prompt the Maker actually sends, grounding block included.
+
+    The double goes in through the constructor. Swapping ``maker._llm``
+    afterwards does not work: ``Maker.__init__`` computes ``_disabled`` from
+    the *original* llm, so a post-hoc swap left ``_disabled=True`` and
+    ``propose()`` returned ``None`` before it ever built a prompt — the
+    assertions below were running against an empty string.
+    """
     from workers.maker import Maker
 
-    maker = Maker(enricher=ContextEnricher(**enricher_kw))
-    maker._llm = CapturingLLM()
+    llm = CapturingLLM()
+    maker = Maker(enricher=ContextEnricher(**enricher_kw), llm=llm)
+    assert maker.available, "the Maker must not be disabled in this harness"
     maker.propose(candidate)
-    return maker._llm.user_msg
+    return llm.user_msg
 
 
 def test_the_prompt_does_not_call_a_weather_forecast_espn():
@@ -175,14 +216,25 @@ def test_the_prompt_does_not_call_a_weather_forecast_espn():
 
 
 def test_the_prompt_defers_to_each_source_on_trust():
+    """The wrapper wording is now "LIVE EVIDENCE CARD (current facts; verify
+    market match)". What matters is unchanged and is what is asserted: the
+    wrapper stays source-neutral, so each SOURCE: line inside the card is the
+    only thing making a trust claim."""
     prompt = maker_prompt_for(weather_candidate(), weather=FakeNOAA())
 
-    assert "Live grounding data" in prompt
-    assert "states its own" in prompt
+    header = prompt.split("LIVE EVIDENCE CARD", 1)
+    assert len(header) == 2, "the evidence card wrapper must be present"
+    assert "verify market match" in prompt
+
+    wrapper_line = header[1].splitlines()[0]
+    for source in ("ESPN", "National Weather Service", "FRED", "Slash Golf"):
+        assert source not in wrapper_line, (
+            f"the wrapper named {source}, which mislabels every other source"
+        )
 
 
-def test_a_golf_prompt_still_carries_the_espn_caveat():
-    prompt = maker_prompt_for(golf_candidate(), espn=FakeESPN())
+def test_a_golf_prompt_carries_the_slash_golf_attribution():
+    prompt = maker_prompt_for(golf_candidate(), slash_golf=FakeSlashGolf())
 
-    assert "SOURCE: ESPN" in prompt
-    assert "may not be reporting the same event" in prompt
+    assert "SOURCE: Slash Golf" in prompt
+    assert "official live scoring feed" in prompt
