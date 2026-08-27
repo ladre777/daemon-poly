@@ -22,8 +22,9 @@ document settles all three:
 
 1. **Does the multiplier vary by category, and is crypto higher?**
    No. The base taker rate is 0.07 for every event contract market. What
-   varies is a per-series multiplier ``M``, and the non-standard table lists
-   it as either 0 or 1. Crypto is not charged a higher rate. The two crypto
+   varies is a per-series multiplier ``M``. The taker column is only ever 0
+   or 1; the maker column is 0, 1, or — in exactly one row, ``KXMVE`` — 2.
+   Crypto is not charged a higher rate. The two crypto
    series that ARE non-standard go the other way and are fee-FREE:
    ``KXBTCY`` (BTC price range EOY) and ``KXETHY`` (ETH price EOY), both
    M=0 on each side. None of the families this bot actually trades
@@ -32,9 +33,11 @@ document settles all three:
 
 2. **Maker treatment.** Both disputed claims are half right. The maker
    multiplier defaults to **0**, so standard markets carry no maker fee at
-   all. Where a series does carry a maker multiplier, the rate is 0.0175 —
-   exactly 25% of the taker rate. The claimed "flat 0.25% during major
-   events" appears nowhere in the document.
+   all. The maker rate is 0.0175 — exactly 25% of the taker rate — so a
+   series with maker M=1 pays a quarter of taker. ``KXMVE`` is the sole
+   exception with maker M=2, i.e. half of taker; it is also the only row
+   where maker and taker differ at all. The claimed "flat 0.25% during
+   major events" appears nowhere in the document.
 
 3. **A $0.035 per-contract cap.** Not in the document. No cap of any kind
    is stated. Treated as non-existent.
@@ -80,6 +83,14 @@ that matters:
     contradict the source.
   - A series the document mentions but whose numbers cannot be read
     unambiguously is genuinely unverified, and returns Unavailable.
+
+A caution earned the hard way. The first transcription put ``KXMVE`` in the
+second category on the strength of a mangled text extraction, asserting the
+row "did not extract with two legible columns". An independent transcription
+read it cleanly, and rendering page 8 settled it: the row prints ``2  1``,
+plainly. An extraction artifact had been promoted to a finding without
+anyone looking at the page. Refusing to guess is only a virtue when the
+refusal is itself checked — otherwise it is just a guess wearing a caveat.
 """
 from __future__ import annotations
 
@@ -181,6 +192,14 @@ SERIES_FEES: dict[str, SeriesFees] = {
     "KXMLBASGAME": SeriesFees(1, 1, "Professional Baseball All-Star Game"),
     "KXMLBGAME": SeriesFees(1, 1, "Professional Baseball Game"),
     "KXMLBNL": SeriesFees(1, 1, "MLB National League Championship"),
+    # The only row in the whole table where maker != taker, and the only
+    # multiplier above 1. Verified by rendering page 8 at 170dpi and
+    # reading it visually, after two independent text extractions
+    # disagreed: the positioned glyphs are "2" at x=341 (Maker) and
+    # "1" at x=394 (Taker). A maker multiplier of 2 makes the maker
+    # rate 2 x 0.0175 = 0.035, exactly half the taker rate — so makers
+    # still pay less than takers here, just not the usual quarter.
+    "KXMVE": SeriesFees(2, 1, "Combos (excluding uncorrelated NFL combos)"),
     "KXNASDAQ100Y": SeriesFees(1, 1, "Nasdaq yearly range"),
     "KXNBA": SeriesFees(1, 1, "Pro Basketball Champion"),
     "KXNBAEAST": SeriesFees(1, 1, "Pro Basketball Eastern Conference Champion"),
@@ -237,12 +256,14 @@ SERIES_FEES: dict[str, SeriesFees] = {
 #: guess. Guessing here would be worse than refusing: a wrong multiplier on
 #: a combo product is a silently wrong cost on every leg.
 AMBIGUOUS_SERIES: dict[str, str] = {
-    "KXMVE": (
-        "the Non-Standard table row 'KXMVE Combos (excluding uncorrelated "
-        "NFL combos)' carries the digits '12', which could be maker=1/"
-        "taker=2 or a single multiplier of 12; the source PDF's layout does "
-        "not disambiguate the two columns"
-    ),
+    # Currently empty. KXMVE lived here on the first transcription, on the
+    # claim that its columns "did not extract with two legible columns".
+    # That claim was false: an independent check read it cleanly, and
+    # rendering page 8 at 170dpi shows "2  1" printed unambiguously. The
+    # entry was an extraction artifact promoted to a finding without being
+    # verified against the page. The mechanism stays because refusing to
+    # guess is still the right behaviour when a row genuinely is unreadable —
+    # but a row is only unreadable once someone has actually looked at it.
 }
 
 #: Products with an entirely separate schedule that this module does not
@@ -358,7 +379,10 @@ def provenance() -> dict:
         "per_contract_cap_note": (
             "No cap of any kind appears in the published schedule. A $0.035 "
             "per-contract cap asserted by third-party write-ups is not "
-            "supported by the source document."),
+            "supported by the source document. Note the coincidence: KXMVE's "
+            "maker multiplier of 2 makes its maker rate 2 x 0.0175 = 0.035. "
+            "The folklore 'cap' may be a garbled reading of that multiplier, "
+            "but that is a guess about provenance, not a finding."),
         "non_standard_series_count": len(SERIES_FEES),
         "ambiguous_series": sorted(AMBIGUOUS_SERIES),
         "rounding": "ceiling to the cent, applied once to the whole order",

@@ -49,8 +49,9 @@ write-ups that could not all be true. The document settles all three.
 ### 1. Does the multiplier vary by category? Is crypto higher?
 
 **No, and no.** The base rate is `0.07` for every event contract market.
-What varies is a per-series multiplier `M`, published as either `0` or `1`
-in the Non-Standard Fees table.
+What varies is a per-series multiplier `M` in the Non-Standard Fees table.
+The taker column is only ever `0` or `1`; the maker column is `0`, `1`, or —
+in exactly one row, `KXMVE` — `2`.
 
 Crypto is not charged more. The two crypto series that *are* non-standard go
 the other way and are **fee-free**:
@@ -77,7 +78,8 @@ Both disputed claims were half right.
 - "Most standard markets carry 0% maker fee" — **true**, via the maker
   multiplier defaulting to `0`.
 - "Maker is ~25% of taker" — **true as a rate ratio** where a maker
-  multiplier applies: `0.0175 / 0.07 = 0.25` exactly.
+  multiplier applies: `0.0175 / 0.07 = 0.25` exactly. `KXMVE` is the sole
+  exception, at maker `M = 2`, i.e. half of taker.
 - "A flat 0.25% during major events" — **not supported**. Nothing of the
   kind appears in the document.
 
@@ -101,10 +103,28 @@ and several exceed what a centicent ceiling would give — one contract at
 $0.50 has a raw fee of $0.0175, already an exact centicent, and the table
 charges **$0.02**.
 
-The table is unambiguous and machine-checkable, so the table is what
-`core/fee_schedule.py` implements. The prose discrepancy is recorded in
-`provenance()["rounding_note"]` and listed as an open question in the review
-document rather than silently resolved.
+**The arithmetic, so a reader does not have to take this on trust.** Someone
+who sees only the word "centicent" in the prose has no reason to doubt it
+until they watch it fail against the document's own table:
+
+| rate | C | P | raw fee | ceil to cent | ceil to centicent | **published** |
+|---|---|---|---|---|---|---|
+| 0.07 | 1 | $0.01 | 0.000693 | **$0.01** | $0.0007 | **$0.01** |
+| 0.07 | 1 | $0.50 | 0.017500 | **$0.02** | $0.0175 | **$0.02** |
+| 0.07 | 100 | $0.45 | 1.732500 | **$1.74** | $1.7325 | **$1.74** |
+
+Cent-rounding reproduces the printed values; centicent-rounding does not,
+and is not merely less precise — it is a different number in the column the
+document itself prints. The table is unambiguous and machine-checkable, so
+the table is what `core/fee_schedule.py` implements. The prose discrepancy
+is recorded in `provenance()["rounding_note"]` and listed as an open
+question in the review document rather than silently resolved.
+
+This reading was **independently confirmed** on 2026-08-27 by a separate
+session that saw only the PDF — never this file, `core/fee_schedule.py`, or
+the review. It reached the same cent-vs-centicent conflict from the prose
+alone. That is a genuine second derivation of the one-cent-per-order floor,
+which is the finding the Sep 4 arbitrage review depends on.
 
 One consequence worth stating plainly: **there is no sub-cent fee.** Any
 fee-bearing order costs at least one cent, however small.
@@ -161,16 +181,61 @@ quietly become `0.0` inside a cost calculation. Same guarantee as
 `reporting.evidence.Unavailable`, kept as a separate class so `core` does
 not depend on `reporting`.
 
-Two cases return it:
+One case returns it:
 
-- **`KXMVE`** (Combos). The table row extracts as
-  `Combos (excluding uncorrelated NFL combos) 12`, which could be
-  maker=1/taker=2 or a single multiplier of 12. The PDF layout does not
-  disambiguate the columns. A guess here would be a silently wrong cost on
-  every leg of a combo.
 - **Perpetual futures** (`KXPERP*`). Priced in basis points on a 30-day
   trailing volume tier — 12.0bps down to 2.6bps taker, 5.0 to 0.6 maker —
   and the tier depends on account volume history the ledger does not carry.
+
+That is currently the only case. `AMBIGUOUS_SERIES` is empty.
+
+### `KXMVE` was wrongly listed here, and the correction matters
+
+The first transcription put `KXMVE` in this section, asserting its row "did
+not extract with two legible columns". **That was false.** An independent
+transcription read it cleanly, and rendering page 8 at 170dpi settles it —
+the row prints:
+
+```
+KXMVE   Combos (excluding uncorrelated NFL combos)   2   1
+```
+
+Maker **2**, taker **1**, in the same column order (`Maker Multipler`, then
+`Taker Multiplier`) every other row uses. The positioned glyphs confirm it:
+`2` at x=341, `1` at x=394.
+
+It is the only row in the whole table where maker ≠ taker, and the only
+multiplier above 1. That irregularity is what made it look like a misread —
+but "different from every other row" is not the same failure as "columns did
+not extract legibly", and only the first was ever true here.
+
+A maker multiplier of 2 makes the maker rate `2 x 0.0175 = 0.035`, exactly
+half the taker rate. Makers still pay less than takers on this series, just
+not the usual quarter.
+
+Note the coincidence: `0.035` is also the number third-party write-ups
+assert as a "$0.035 per-contract cap". The folklore cap may be a garbled
+reading of this multiplier — but that is a guess about provenance, not a
+finding, and no cap exists in the document either way.
+
+**The lesson, recorded because it generalises:** refusing to guess is only a
+virtue when the refusal is itself checked. An extraction artifact was
+promoted to a finding without anyone looking at the page, and it took an
+independent reader to catch it. A row is only unreadable once someone has
+actually looked at it.
+
+### Two rows that needed the same visual check
+
+`KXMLBNL` and `KXNASDAQ100Y` sit either side of `KXMVE` on page 8. Two
+independent text extractions disagreed with *each other* about which of the
+two was missing its taker value — one pass showed `KXMLBNL` with two values
+and `KXNASDAQ100Y` with one, the other the reverse. The rendered page shows
+**both as `1 | 1`**.
+
+The first transcription assigned `(1, 1)` to both, which happens to be
+right, but by pattern-matching the surrounding rows rather than by reading
+them. Both are now pinned individually in the tests so neither can drift
+back to a default that was never actually verified.
 
 ### A note on what "unverified" means here
 

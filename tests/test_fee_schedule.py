@@ -193,12 +193,34 @@ def test_series_is_parsed_from_a_full_ticker():
 # refusing to guess
 # ---------------------------------------------------------------------------
 
-def test_an_ambiguous_series_yields_unavailable_never_a_number():
-    """KXMVE's row did not extract with two legible columns. A guess there
-    would be a silently wrong cost on every leg of a combo."""
-    got = fs.fee_dollars("0.50", 100, series="KXMVE")
-    assert isinstance(got, Unavailable)
-    assert "12" in got.reason
+def test_kxmve_is_the_one_row_where_maker_and_taker_differ():
+    """Verified visually from a 170dpi render of page 8 after two text
+    extractions disagreed. The row prints ``2  1``: maker 2, taker 1.
+
+    This test replaces one that asserted KXMVE was illegible and returned
+    Unavailable. That assertion was wrong — the row is perfectly clear on
+    the page, and the illegibility was an artifact of how the PDF's text
+    layer flattens this row's wrapped description. Recorded here because a
+    combo book that silently declines to price itself is worse than one that
+    charges correctly.
+    """
+    assert fs.SERIES_FEES["KXMVE"].maker_multiplier == 2
+    assert fs.SERIES_FEES["KXMVE"].taker_multiplier == 1
+    # Taker is standard: same as any M=1 series.
+    assert fs.fee_dollars("0.50", 100, series="KXMVE") == Decimal("1.75")
+    # Maker is 2 x 0.0175 = 0.035, exactly half the taker rate.
+    assert fs.fee_dollars("0.50", 100, series="KXMVE",
+                          side="maker") == Decimal("0.88")
+
+
+def test_no_series_is_currently_marked_ambiguous():
+    """The mechanism stays; the one entry that used it was mistaken.
+
+    If a future transcription adds a row here, it should be because someone
+    looked at the rendered page and still could not read it — not because a
+    text extraction came back garbled.
+    """
+    assert fs.AMBIGUOUS_SERIES == {}
 
 
 def test_perpetual_futures_yield_unavailable():
@@ -227,7 +249,7 @@ def test_zero_or_negative_count_yields_unavailable():
 def test_unavailable_refuses_to_be_arithmetic():
     """Same guarantee as reporting.evidence.Unavailable: an unverified fee
     must not quietly become 0.0 inside a cost calculation."""
-    u = fs.fee_dollars("0.50", 100, series="KXMVE")
+    u = fs.fee_dollars("0.50", 100, series="KXPERPBTC")
     with pytest.raises(TypeError):
         _ = u + Decimal("1")     # type: ignore[operator]
     with pytest.raises(TypeError):
@@ -276,6 +298,32 @@ def test_the_transcribed_table_covers_the_expected_series_count():
     """A crude guard against a truncated transcription: the non-standard
     table ran to roughly ninety series across pages 6-11."""
     assert len(fs.SERIES_FEES) >= 85
-    for entry in fs.SERIES_FEES.values():
-        assert entry.maker_multiplier in (0, 1)
-        assert entry.taker_multiplier in (0, 1)
+    for series, entry in fs.SERIES_FEES.items():
+        # Taker is only ever 0 or 1 anywhere in the table.
+        assert entry.taker_multiplier in (0, 1), series
+        # Maker is 0 or 1 everywhere except KXMVE, which is 2. Asserted as a
+        # named exception rather than a widened range, so a future 2 landing
+        # in some other row fails here instead of passing quietly.
+        allowed = (0, 1, 2) if series == "KXMVE" else (0, 1)
+        assert entry.maker_multiplier in allowed, series
+
+
+def test_only_kxmve_has_asymmetric_multipliers():
+    """Every other row in the table has maker == taker. That regularity is
+    what made KXMVE look like a misread in the first place, so it is worth
+    pinning: if a second asymmetric row appears, this fails and someone
+    re-reads the page."""
+    asymmetric = {s for s, e in fs.SERIES_FEES.items()
+                  if e.maker_multiplier != e.taker_multiplier}
+    assert asymmetric == {"KXMVE"}
+
+
+def test_the_two_rows_that_needed_a_visual_check_are_pinned():
+    """KXMLBNL and KXNASDAQ100Y sit either side of KXMVE on page 8. Two
+    independent text extractions disagreed about which of the two was
+    missing a taker value; the rendered page shows both as 1 | 1. Pinned
+    individually so neither can drift back to a pattern-matched default."""
+    assert fs.SERIES_FEES["KXMLBNL"] .maker_multiplier == 1
+    assert fs.SERIES_FEES["KXMLBNL"] .taker_multiplier == 1
+    assert fs.SERIES_FEES["KXNASDAQ100Y"].maker_multiplier == 1
+    assert fs.SERIES_FEES["KXNASDAQ100Y"].taker_multiplier == 1

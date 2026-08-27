@@ -36,7 +36,7 @@ either read from the document or refused.
 
 | File | Reason | Safety impact | Test coverage | Config/deploy action later? |
 |---|---|---|---|---|
-| `core/fee_schedule.py` *(new, 330 lines)* | Transcribed schedule: rates, per-series multipliers, rounding, provenance, `Unavailable` sentinel | **None.** Nothing imports it yet — it is not wired into `core/pricing.py` or any decision path. Pure data plus a pure function. | 50 tests, incl. all 42 published table values | **Yes.** Wiring it into the pricing path is a separate, reviewed change — see "Not done deliberately". |
+| `core/fee_schedule.py` *(new, 330 lines)* | Transcribed schedule: rates, per-series multipliers, rounding, provenance, `Unavailable` sentinel | **None.** Nothing imports it yet — it is not wired into `core/pricing.py` or any decision path. Pure data plus a pure function. | 53 tests, incl. all 42 published table values | **Yes.** Wiring it into the pricing path is a separate, reviewed change — see "Not done deliberately". |
 | `tests/test_fee_schedule.py` *(new, 250 lines)* | Boundary, rounding, symmetry, multiplier, refusal and provenance coverage | None | — | No |
 | `docs/FEE_SCHEDULE.md` *(new)* | Data definitions, the three settled disputes, the before/after divergence table, the open rounding question | None | — | No |
 
@@ -49,7 +49,7 @@ changed.**
 
 ```
 $ python -m pytest -q
-15 failed, 1046 passed in 20.79s
+15 failed, 1049 passed in 20.71s
 
 $ python -m ruff check .
 All checks passed!
@@ -57,8 +57,11 @@ All checks passed!
 
 | | Baseline (`de9f467`) | This branch | Delta |
 |---|---|---|---|
-| Passed | 996 | 1046 | **+50** |
+| Passed | 996 | 1049 | **+53** |
 | Failed | 15 | 15 | **0** |
+
+These counts are post-verification; see "Independent verification" below for
+what changed after the first pass.
 
 The 15 are the documented pre-existing set, unchanged in count and identity:
 8 × `test_checker_budget`, 4 × `test_funnel_accounting`,
@@ -72,7 +75,8 @@ Not investigated — out of scope per the brief.
 ### 1. Category-varying multiplier / crypto premium — **claim is false**
 
 The base rate is `0.07` for every event contract market. What varies is a
-per-series multiplier `M`, published as `0` or `1`. Crypto is not charged
+per-series multiplier `M`: taker is only ever `0` or `1`, maker is `0`, `1`,
+or `2` in the single case of `KXMVE`. Crypto is not charged
 more; the two non-standard crypto series go the other way and are
 **fee-free**: `KXBTCY` (BTC price range EOY) and `KXETHY` (ETH price EOY),
 both `0/0`.
@@ -89,8 +93,9 @@ so standard on taker and **not** maker-exempt.
 ### 2. Maker treatment — **both claims half right**
 
 Maker multiplier defaults to **0**, so standard markets carry no maker fee.
-Where a maker multiplier applies the rate is `0.0175`, exactly 25% of taker.
-The "flat 0.25% during major events" claim appears nowhere in the document.
+Where a maker multiplier applies the rate is `0.0175`, exactly 25% of taker —
+except `KXMVE` at maker `M = 2`, i.e. half of taker. The "flat 0.25% during
+major events" claim appears nowhere in the document.
 
 ### 3. $0.035 per-contract cap — **absent**
 
@@ -210,5 +215,100 @@ and its own review.
    phrase "the fee + positionCost is rounded" hints the rounding may be
    applied to a combined quantity rather than the fee alone. The table gives
    no way to distinguish, since it publishes fees in isolation.
+
+---
+
+## Independent verification — 2026-08-27, after the fact
+
+A separate session transcribed the same PDF without access to
+`core/fee_schedule.py`, `tests/test_fee_schedule.py`, `docs/FEE_SCHEDULE.md`
+or this review. Its work is on `claude/fixture-findings-docs-0tk1or`
+(`f90878c` fixture and findings, committed *before* it looked at this
+branch; `3bb522c` the diff afterwards). It was commissioned because the
+transcription pass had produced a wrong scratch comparison and corrected it
+within the same pass — self-checked work underpinning the Sep 4 review.
+
+**Result: one confirmation, one defect found, two rows resolved.**
+
+### Confirmed — the 42 published values
+
+Exact match. No discrepancy.
+
+### Confirmed — cent-not-centicent rounding
+
+The independent session reached the same conflict from the prose alone,
+having never seen `provenance()["rounding_note"]`. This is the finding the
+Sep 4 arbitrage review rests on, and it now has two derivations. No code
+change. On its suggestion, `docs/FEE_SCHEDULE.md` now shows the arithmetic
+that disproves the prose, rather than only asserting the conflict — a reader
+who sees "centicent" has no reason to doubt it until they watch it fail.
+
+### Defect — `KXMVE` was wrongly marked `Unavailable`
+
+**The independent read was right and this branch was wrong.**
+
+It reported the row as legible in both its extraction passes:
+`KXMVE | Combos (excluding uncorrelated NFL combos) | 2 | 1`. This branch
+had asserted the row "did not extract with two legible columns".
+
+Settled by rendering page 8 at 170dpi and reading it. The row prints
+`2   1`, plainly, and the positioned glyphs confirm it: `2` at x=341
+(Maker), `1` at x=394 (Taker). Of the three hypotheses the handoff offered,
+the second was correct — the `Unavailable` came from a mangled extraction
+that was never checked against the page.
+
+Fixed: `KXMVE` is now `SeriesFees(maker=2, taker=1)`. It is the only row in
+the table where maker and taker differ, and the only multiplier above 1. A
+maker multiplier of 2 makes its maker rate `2 x 0.0175 = 0.035`, half the
+taker rate rather than the usual quarter.
+
+Noted in passing: `0.035` is also the figure third-party write-ups assert as
+a "per-contract cap". The folklore may be a garbled reading of this
+multiplier. That is a guess about provenance, not a finding, and no cap
+exists in the document either way.
+
+### Resolved — `KXMLBNL` and `KXNASDAQ100Y`
+
+Both sit either side of `KXMVE` on page 8. The independent session's two
+extraction passes disagreed with *each other* about which was missing a
+taker value — and so, on re-inspection, did this branch's. That is a genuine
+artifact of how the page's text layer flattens rows with wrapped
+descriptions, reproduced independently.
+
+The rendered page shows **both as `1 | 1`**, which is what this branch had.
+But the independent session was right that the value could not be trusted:
+it was pattern-matched from surrounding rows, not read. Both are now pinned
+individually in tests so neither can drift back to an unverified default.
+
+### What this changes about the branch's own claims
+
+The review above states that a series is marked `Unavailable` only when "the
+document is genuinely ambiguous". For `KXMVE` that was not true — the
+document was clear and the tooling was not. `AMBIGUOUS_SERIES` is now empty;
+perpetual futures remain the only `Unavailable` case, on the sound grounds
+that their tier depends on data the ledger does not carry.
+
+The general lesson is recorded in both the module and
+`docs/FEE_SCHEDULE.md`: refusing to guess is only a virtue when the refusal
+is itself checked. An extraction artifact was promoted to a finding without
+anyone looking at the page, and it took a reader who had not seen the answer
+to catch it.
+
+### Tests after the correction
+
+```
+$ python -m pytest -q
+15 failed, 1049 passed
+
+$ python -m ruff check .
+All checks passed!
+```
+
+Fee-schedule tests: 50 -> 53. Three added (`KXMVE` asymmetry, the empty
+`AMBIGUOUS_SERIES`, and the two visually-verified rows); one replaced (the
+test asserting `KXMVE` was illegible); one repointed (the arithmetic-refusal
+test now sources its `Unavailable` from perpetual futures, since `KXMVE` no
+longer produces one). Same 15 pre-existing failures, unchanged in identity.
+No existing test outside this file was modified.
 
 **Awaiting human review.**
