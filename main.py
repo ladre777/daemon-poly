@@ -19,10 +19,12 @@ from core.errors import CircuitBreaker, classify
 from core.llm_client import LLMRateLimited
 from core.kalshi_client import KalshiClient
 from core.telegram_commands import TelegramCommandListener
+from core.reasons import Reason, Stage, stats_to_events
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore, SignalAlertStore, signal_key
 from memory.price_store import PriceStore
+from memory.telemetry_store import TelemetryStore
 from workers.scout import Scout
 from workers.maker import Maker
 from workers.checker import Checker
@@ -268,7 +270,7 @@ def _log_checker_verdicts(stats, verdict_confidence) -> None:
 
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
              notifier=None, health=None, alert_store=None, arb_scanner=None,
-             coherence_gate=None, store=None, order_store=None):
+             coherence_gate=None, store=None, order_store=None, telemetry=None):
     try:
         snapshot = account.reconcile()
         if health is not None:
@@ -290,7 +292,22 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         return 0
 
     quant_maker.begin_pass()
+
+    # Telemetry is an observer and is allowed to fail. Every call below
+    # tolerates a None pass_id, and TelemetryStore swallows its own errors,
+    # so nothing in this block can abort a trading pass.
+    pass_id = None
+    pass_started = time.time()
+    if telemetry is not None:
+        pass_id = telemetry.begin_pass(
+            dry_run=CONFIG.risk.dry_run, kalshi_env=CONFIG.kalshi.env,
+            order_strategy=CONFIG.risk.order_strategy,
+            balance_cents=getattr(snapshot, "balance_cents", None),
+        )
+
+    scout_started = time.time()
     candidates = scout.scan()
+    scout_ms = (time.time() - scout_started) * 1000.0
     if health is not None:
         health.mark_scanned()
     log.info("Scout returned %d candidates", len(candidates))
@@ -562,6 +579,23 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         stats["approved"], filled_this_pass,
     )
     _log_checker_verdicts(stats, verdict_confidence)
+
+    # Same numbers as the line above, kept as rows so they can be aggregated
+    # later instead of grepped out of a log with a retention window. A zero
+    # balance reclassifies risk refusals — see stats_to_events — because an
+    # unfunded account refusing everything is not a gate exercising judgement.
+    if telemetry is not None:
+        zero_balance = not getattr(snapshot, "balance_cents", 0)
+        events = stats_to_events(stats, zero_balance=zero_balance)
+        events[(Stage.SCOUTED.value, None)] = len(candidates)
+        events[(Stage.FILLED.value, None)] = filled_this_pass
+        if not candidates:
+            events[(Stage.SCOUTED.value, Reason.NO_CANDIDATES.value)] = 1
+        telemetry.record_stages(pass_id, events)
+        telemetry.finish_pass(
+            pass_id, candidates=len(candidates), scout_ms=scout_ms,
+            pricing_ms=(time.time() - pass_started) * 1000.0,
+        )
     return filled_this_pass
 
 
@@ -602,6 +636,9 @@ def main():
     client = KalshiClient()
     store = EdgeStore()
     order_store = OrderStore()
+    # Observer only. Its constructor disables itself rather than raising
+    # if the database cannot be prepared, so this cannot stop the bot.
+    telemetry = TelemetryStore()
     alert_store = SignalAlertStore()
     account = AccountState(client, order_store)
 
@@ -693,7 +730,8 @@ def main():
                          ledger, account, notifier=notifier, health=health,
                          alert_store=alert_store, arb_scanner=arb_scanner,
                          coherence_gate=coherence_gate,
-                         store=store, order_store=order_store)
+                         store=store, order_store=order_store,
+                         telemetry=telemetry)
                 ledger.reconcile_settlements()
                 ledger.reconcile_forecasts()
                 spot_client.persist_history()
