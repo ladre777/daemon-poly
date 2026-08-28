@@ -215,6 +215,38 @@ def _check_balance_change(snapshot, store, order_store, notifier) -> None:
     store.set_last_balance(current_cents)
 
 
+def _log_checker_verdicts(stats, verdict_confidence) -> None:
+    """One INFO line summarising what the Checker actually decided.
+
+    The pass funnel says how many verdicts came back; it cannot say what
+    they were. While the exchange balance is zero the distinction is
+    invisible everywhere else: risk.evaluate refuses on bankroll before it
+    reaches the verdict branch, so an approval and a rejection are logged
+    identically by the ledger. Without this line the only durable record is
+    edges.checker_verdict, which needs the database to read.
+
+    Every number here is already in hand when this is called. Nothing is
+    recomputed and nothing is queried.
+    """
+    checked = stats["checked"]
+    if not checked:
+        return
+    approved = checked - stats["checker_rejected"]
+
+    def _mean(bucket):
+        vals = verdict_confidence.get(bucket) or []
+        # No confidences recorded is not a confidence of zero. Averaging an
+        # absence would report a number nobody produced.
+        return f"{sum(vals) / len(vals):.2f}" if vals else "n/a"
+
+    log.info(
+        "Checker verdicts: approved=%d rejected=%d of %d checked "
+        "(%.0f%% approved) | mean confidence approve=%s reject=%s",
+        approved, stats["checker_rejected"], checked,
+        100.0 * approved / checked, _mean("approve"), _mean("reject"),
+    )
+
+
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
              notifier=None, health=None, alert_store=None, arb_scanner=None,
              coherence_gate=None, store=None, order_store=None):
@@ -254,6 +286,13 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     candidates.sort(key=lambda c: (not _is_priority(c), not _is_preferred(c)))
 
     filled_this_pass = 0
+    #: Confidence of every verdict the Checker returned this pass, split by
+    #: disposition. Collected from verdicts already in hand inside the loop
+    #: below — no second pass, no query. Exists because checker_rejected and
+    #: risk_refused were counted and then never printed, which made the gap
+    #: between `checked` and `approved` unreadable from the log stream even
+    #: though the numbers were sitting in `stats`.
+    verdict_confidence: dict[str, list[float]] = {"approve": [], "reject": []}
     priced: list = []
     llm_calls_this_pass = 0
     llm_calls_by_event: dict[str, int] = defaultdict(int)
@@ -394,6 +433,16 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         stats["checked"] += 1
         if not verdict.approved:
             stats["checker_rejected"] += 1
+        # Deliberately no `continue` on a rejection. The fall-through to
+        # risk.evaluate below is what writes edges.checker_verdict, and that
+        # column is the only durable record of what the Checker decided —
+        # the funnel line cannot distinguish an approval from a rejection
+        # once the bankroll check refuses both with the same string. Adding
+        # a short-circuit here would look like tidying and would silently
+        # destroy the data.
+        bucket = "approve" if verdict.approved else "reject"
+        if verdict.confidence is not None:
+            verdict_confidence[bucket].append(float(verdict.confidence))
 
         if account.snapshot is None or account.snapshot.is_stale(
             CONFIG.risk.max_reconciliation_age_seconds * 0.5
@@ -466,11 +515,14 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
 
     log.info(
         "Pass funnel: candidates=%d quant=%d llm_called=%d llm_disabled=%d "
-        "proposed=%d ladder_deduped=%d checked=%d approved=%d filled=%d",
+        "proposed=%d ladder_deduped=%d checked=%d checker_rejected=%d "
+        "risk_refused=%d approved=%d filled=%d",
         len(candidates), stats["quant_attempted"], stats["llm_called"],
         stats["llm_disabled"], stats["proposed"], stats["ladder_deduped"],
-        stats["checked"], stats["approved"], filled_this_pass,
+        stats["checked"], stats["checker_rejected"], stats["risk_refused"],
+        stats["approved"], filled_this_pass,
     )
+    _log_checker_verdicts(stats, verdict_confidence)
     return filled_this_pass
 
 
