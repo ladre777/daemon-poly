@@ -222,9 +222,10 @@ def test_moonshot_does_not_reprobe_models_on_every_call():
 # Gemini REST backend
 # --------------------------------------------------------------------------
 
-def _gemini_with_transport(handler, model="gemini-test"):
+def _gemini_with_transport(handler, model="gemini-test", max_tokens=0):
     backend = GeminiBackend(
-        api_key="g-key", base_url="https://gemini.test/v1beta", model=model
+        api_key="g-key", base_url="https://gemini.test/v1beta", model=model,
+        max_tokens=max_tokens,
     )
     backend._client = httpx.Client(
         base_url="https://gemini.test/v1beta",
@@ -251,6 +252,77 @@ def test_gemini_backend_sends_system_instruction_and_parses_text():
 
     backend = _gemini_with_transport(handler)
     assert backend.complete("sys", "user") == '{"probability_yes": 0.6}'
+
+
+def test_gemini_backend_sends_the_output_cap_it_was_given():
+    """The cap must reach the wire, not just the truncation message.
+
+    Until 2026-08-28 this payload carried no maxOutputTokens at all, so
+    CHECKER_MAX_TOKENS was constructed into the backend, used to name the
+    lever in LLMTruncated, and never sent. The Checker truncated against
+    Gemini's server-side default while the error reported a number that had
+    never left the process — which made raising the cap a silent no-op on
+    the primary Checker path, and would have made the error text misreport
+    a larger cap we still were not sending.
+    """
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen["config"] = json.loads(request.content)["generationConfig"]
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}}]
+        })
+
+    backend = _gemini_with_transport(handler, max_tokens=4000)
+    backend.complete("sys", "user")
+    assert seen["config"]["maxOutputTokens"] == 4000
+
+
+def test_gemini_backend_omits_the_cap_when_none_was_chosen():
+    """Zero means "provider default", not "cap the output at nothing".
+
+    Sending maxOutputTokens=0 would be a different and much worse bug than
+    the one above, so the absence is asserted rather than left implied.
+    """
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen["config"] = json.loads(request.content)["generationConfig"]
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}}]
+        })
+
+    backend = _gemini_with_transport(handler, max_tokens=0)
+    backend.complete("sys", "user")
+    assert "maxOutputTokens" not in seen["config"]
+
+
+def test_gemini_truncation_message_names_a_cap_that_was_actually_sent():
+    """Guards the pairing, not either half.
+
+    A truncation error is only actionable if the number it names is the
+    number the request carried; otherwise it points at a lever that is not
+    connected to anything.
+    """
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        seen["config"] = json.loads(request.content)["generationConfig"]
+        return httpx.Response(200, json={
+            "candidates": [{
+                "content": {"parts": [{"text": '{"probability_yes": 0.'}]},
+                "finishReason": "MAX_TOKENS",
+            }]
+        })
+
+    backend = _gemini_with_transport(handler, max_tokens=4000)
+    with pytest.raises(LLMTruncated) as excinfo:
+        backend.complete("sys", "user")
+    assert "4000" in str(excinfo.value)
+    assert seen["config"]["maxOutputTokens"] == 4000
 
 
 def test_gemini_backend_rejects_empty_candidate_text():
