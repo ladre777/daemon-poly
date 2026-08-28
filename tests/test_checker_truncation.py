@@ -325,3 +325,26 @@ def test_it_also_reports_the_budget_lever(caplog):
         Checker()
 
     assert f"max_tokens={CONFIG.models.checker_max_tokens}" in caplog.text
+
+
+def test_the_budget_has_room_for_a_complete_verdict():
+    """Salvaged from ``tests/test_checker_budget.py`` when that file was
+    removed as obsolete.
+
+    It is the one assertion in that file that survived the Checker going
+    provider-configurable, and it earned its place: it failed for days at
+    1200 against a documented floor of 4000, was carried as a "pre-existing
+    failure", and was right the whole time. Production truncated a real
+    verdict on KXHIGHNY-26AUG29-T79 at 18:50 UTC on 2026-08-28 while this
+    assertion sat red.
+
+    This is not a safety assertion — the recovery path is fail-closed either
+    way, see :func:`test_a_truncated_approval_is_never_honoured`. It is an
+    accuracy one. While the cap is too low, genuine approvals become
+    abstentions for a mechanical reason rather than a judgement, and the
+    observed approval rate reads lower than the Checker actually decided.
+    """
+    assert CONFIG.models.checker_max_tokens >= 4000, (
+        "must cover a complete JSON verdict; 1500 truncated real verdicts "
+        "in production"
+    )

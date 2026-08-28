@@ -135,7 +135,14 @@ class ModelConfig:
     )
     # 25s — Moonshot often answers after 12s under load; short timeout = false failure.
     checker_timeout_seconds: float = _float("CHECKER_TIMEOUT_SECONDS", 25.0)
-    checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 1200)
+    #: Raised from 1200 on 2026-08-28. The suite had asserted >= 4000 ever
+    #: since production truncated real verdicts at 1500, and that failure was
+    #: carried as "pre-existing" while the cap kept cutting answers off — one
+    #: was recovered live on KXHIGHNY-26AUG29-T79 at 18:50 UTC that day,
+    #: while the test sat red. A token budget is not a gate: raising it
+    #: loosens nothing, and a truncated approval abstains either way. What it
+    #: stops is a complete verdict being lost for want of room.
+    checker_max_tokens: int = _int("CHECKER_MAX_TOKENS", 4000)
     checker_effort: str = os.getenv("CHECKER_EFFORT", "low")
 
     maker_provider: str = os.getenv("MAKER_LLM_PROVIDER", "moonshot")

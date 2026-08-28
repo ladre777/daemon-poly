@@ -74,6 +74,25 @@ def _log_vol_signature(spot_client, symbols) -> None:
         log.info("Volatility signature %s over %.0fs (annualized): %s",
                  symbol, lookback, "  ".join(rungs))
 
+        # The signature above samples at several intervals; the quant path
+        # prices with realized_vol_robust at a lookback chosen per contract,
+        # max(3600, min(seconds_to_expiry * 20, 86400)). Those can disagree,
+        # which is not a bug — but a diagnostic reporting a number other than
+        # the one setting prices is exactly how a 6.6%-annualized bitcoin
+        # survived a whole session unnoticed. So both ends of the range the
+        # quant path can actually choose are logged alongside it.
+        floor_vol = history.realized_vol_robust(3600)
+        cap_vol = history.realized_vol_robust(86400)
+
+        def _annualized(v):
+            # None is "not enough history to say", which is a different fact
+            # from a low volatility and must not render as one.
+            return f"{v * _SECONDS_PER_YEAR ** 0.5:.0%}" if v else "n/a"
+
+        log.info("Pricing vol %s (realized_vol_robust, annualized): "
+                 "3600s %s  86400s %s", symbol,
+                 _annualized(floor_vol), _annualized(cap_vol))
+
 
 def _alert(notifier, method: str, *args, **kwargs) -> None:
     if notifier is None:
