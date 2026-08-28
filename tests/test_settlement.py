@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from core.kalshi_client import KalshiTimeoutError
 from core.order_state import Fill
 
 from tests.conftest import make_verdict
@@ -267,3 +268,89 @@ def test_edge_settlement_is_idempotent(ledger, edge_store, order_store, client,
 
     edge = [e for e in edge_store.recent_edges() if e["id"] == edge_id][0]
     assert edge["pnl"] == pytest.approx(6.0)
+
+
+# -- markets the exchange has dropped --------------------------------------
+#
+# Kalshi stops serving long-closed markets. Eight KXRAINSHARD2-26AUG15-*
+# tickers were re-probed once per pass for thirteen days, each one 404ing
+# each time, at roughly one pass per five minutes. The fills are genuinely
+# unresolvable — there is nowhere left to read the outcome from — so the
+# answer is to stop asking, not to invent a result.
+
+
+def test_a_vanished_market_stops_being_re_probed(ledger, order_store, client):
+    store_fill(order_store, "f1", "KXGONE-1", "yes", count=10, price=40.0)
+
+    for _ in range(10):
+        ledger.reconcile_settlements()
+
+    # Three strikes, then silence — not ten.
+    assert client.call_counts["get_market"] == 3
+
+
+def test_the_fill_stays_unsettled_rather_than_being_assumed(ledger, order_store, client):
+    """Giving up on asking is not the same as deciding the outcome.
+
+    A settled row with a guessed result would poison realized PnL and every
+    Brier score downstream, which is the exact class of bug the rest of this
+    file exists to lock out.
+    """
+    store_fill(order_store, "f1", "KXGONE-1", "yes", count=10, price=40.0)
+
+    for _ in range(10):
+        assert ledger.reconcile_settlements() == 0
+
+    assert order_store.settlements_for_ticker("KXGONE-1") == []
+    assert len(order_store.unsettled_fills("KXGONE-1")) == 1
+
+
+def test_the_settlements_endpoint_is_still_asked_after_giving_up(ledger, order_store, client):
+    """Only the per-market fallback is suppressed.
+
+    The settlements endpoint is the authoritative source and is not
+    ticker-addressed, so it costs nothing extra to keep reading it — and a
+    market that reappears there must still settle.
+    """
+    store_fill(order_store, "f1", "KXGONE-1", "yes", count=10, price=40.0)
+    for _ in range(5):
+        ledger.reconcile_settlements()
+    assert client.call_counts["get_market"] == 3
+
+    client.add_settlement("KXGONE-1", "yes")
+    assert ledger.reconcile_settlements() == 1
+    assert order_store.settlements_for_ticker("KXGONE-1")[0]["settlement_result"] == "yes"
+
+
+def test_a_timeout_is_not_evidence_the_market_is_gone(ledger, order_store, client):
+    """Only a 404 counts toward giving up.
+
+    A timeout or a 5xx says nothing about whether the market exists, and
+    treating them as strikes would abandon settleable fills during an
+    exchange outage — precisely when the retry matters most.
+    """
+    store_fill(order_store, "f1", "KXSLOW-1", "yes", count=10, price=40.0)
+
+    def timeout(ticker):
+        client._count("get_market")
+        raise KalshiTimeoutError("too slow", "get_market", None)
+
+    client.get_market = timeout
+    for _ in range(6):
+        ledger.reconcile_settlements()
+
+    assert client.call_counts["get_market"] == 6, "timeouts must not accumulate strikes"
+
+
+def test_strikes_reset_when_the_market_answers_again(ledger, order_store, client):
+    """Two isolated 404s either side of a success must not add up to three."""
+    store_fill(order_store, "f1", "KXFLAP-1", "yes", count=10, price=40.0)
+
+    ledger.reconcile_settlements()                      # 404, strike 1
+    client.markets["KXFLAP-1"] = {"ticker": "KXFLAP-1", "result": ""}
+    ledger.reconcile_settlements()                      # answers: strikes cleared
+    del client.markets["KXFLAP-1"]
+    for _ in range(2):
+        ledger.reconcile_settlements()                  # 404 again, strikes 1 and 2
+
+    assert client.call_counts["get_market"] == 4, "a success must clear the count"
