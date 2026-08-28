@@ -52,6 +52,13 @@ def _close_epoch(candidate) -> Optional[float]:
 CONTRACT_PAYOUT_CENTS = 100.0
 
 
+#: Consecutive 404s from get_market before a ticker stops being re-probed
+#: each pass. Three rather than one because a single 404 is not proof of a
+#: permanently missing market, and the cost of being wrong in the impatient
+#: direction is that a settleable fill stops being asked about.
+_MISSING_MARKET_LIMIT = 3
+
+
 class Ledger:
     def __init__(
         self,
@@ -62,6 +69,12 @@ class Ledger:
         self.client = client or KalshiClient()
         self.store = store or EdgeStore()
         self.order_store = order_store or OrderStore()
+        #: Tickers the exchange has repeatedly said it does not have, counted
+        #: per consecutive 404. Kalshi drops long-closed markets from the API,
+        #: and an unsettled fill on one of those is unresolvable: there is no
+        #: longer anywhere to read the outcome from. See _MISSING_MARKET_LIMIT.
+        self._missing_market_strikes: dict[str, int] = {}
+        self._missing_market_announced: set[str] = set()
 
     # -- decision logging ---------------------------------------------------
 
@@ -396,17 +409,59 @@ class Ledger:
             log.warning("Settlements endpoint unavailable (%s) — falling back to market results", e)
 
         for ticker in wanted:
+            # The settlements endpoint above is authoritative and is always
+            # asked. Only this per-market fallback is suppressed, so a fill
+            # whose market has vanished still settles the moment it appears
+            # in settlements.
+            if self._missing_market_strikes.get(ticker, 0) >= _MISSING_MARKET_LIMIT:
+                continue
             fallback = self._market_result(ticker)
             if fallback:
                 results[ticker] = fallback
         return results
 
+    def _note_missing_market(self, ticker: str) -> None:
+        """Count a 404 against a ticker and announce the give-up exactly once.
+
+        Nothing here settles anything. A fill whose market has been dropped
+        from the API stays unsettled and keeps its row, because the only
+        honest thing to say about it is that the outcome is unknown — the
+        alternative would be inventing a result for a market nobody can read
+        any more. What stops is the asking.
+
+        The fills are named in the message rather than counted, because the
+        operator's next question is always which ones, and the whole reason
+        this state exists is that the answer was drowning in one 404 per
+        market per pass, forever.
+        """
+        strikes = self._missing_market_strikes.get(ticker, 0) + 1
+        self._missing_market_strikes[ticker] = strikes
+        if strikes < _MISSING_MARKET_LIMIT or ticker in self._missing_market_announced:
+            return
+        self._missing_market_announced.add(ticker)
+        open_fills = self.order_store.unsettled_fills(ticker)
+        log.warning(
+            "Giving up on settlement for %s after %d consecutive 404s — the "
+            "exchange no longer serves this market. %d fill(s) stay UNSETTLED "
+            "and are excluded from realized PnL and calibration; no outcome "
+            "has been assumed. Re-probed on restart, and still settled "
+            "immediately if it reappears in the settlements endpoint.",
+            ticker, strikes, len(open_fills),
+        )
+
     def _market_result(self, ticker: str) -> Optional[dict]:
         try:
             payload = self.client.get_market(ticker) or {}
         except (KalshiAPIError, KalshiTimeoutError) as e:
+            if getattr(e, "status_code", None) == 404:
+                self._note_missing_market(ticker)
+            else:
+                # A timeout or a 5xx says nothing about whether the market
+                # exists, so it must not count toward giving up on it.
+                self._missing_market_strikes.pop(ticker, None)
             log.warning("Couldn't fetch market result for %s: %s", ticker, e)
             return None
+        self._missing_market_strikes.pop(ticker, None)
         market = payload.get("market", payload)
         outcome = (market.get("result") or "").lower()
         if outcome not in ("yes", "no"):
