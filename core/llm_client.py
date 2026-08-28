@@ -304,9 +304,10 @@ class GeminiBackend:
         self._api_key = (api_key or "").strip()
         self._base_url = (base_url or "").rstrip("/")
         self.model = model
-        #: Only used to name the lever in a truncation message. Gemini's cap
-        #: is set server-side unless maxOutputTokens is sent, so 0 means
-        #: "provider default" rather than a number we chose.
+        #: Sent as generationConfig.maxOutputTokens when positive, and named
+        #: in the truncation message either way. Zero means "provider
+        #: default": Gemini picks the cap server-side and we report that we
+        #: did not choose one, rather than sending 0 and capping at nothing.
         self._max_tokens = max_tokens
         self._client = httpx.Client(
             base_url=self._base_url or "https://generativelanguage.googleapis.com/v1beta",
@@ -321,13 +322,30 @@ class GeminiBackend:
     def complete(self, system: str, user: str, temperature: float = 0.3) -> str:
         if not self._api_key:
             raise LLMUnavailable("Gemini API key is empty. Set GEMINI_API_KEY in Railway.")
+        generation_config = {
+            "temperature": temperature,
+            "responseMimeType": "application/json",
+        }
+        # Gemini spells the output cap maxOutputTokens, and omitting it does
+        # not mean "unlimited" — it means the server picks. Until 2026-08-28
+        # this payload never sent it, so `self._max_tokens` was carried all
+        # the way to the LLMTruncated message and nowhere else: the Checker
+        # truncated against Gemini's own default while the error named a
+        # 1200-token cap that had never left the process. Raising
+        # CHECKER_MAX_TOKENS would have been a silent no-op on the primary
+        # Checker path, and the error text would then have misreported a
+        # larger cap we still were not sending. Moonshot (max_tokens) and
+        # Anthropic (max_tokens) have always sent theirs.
+        #
+        # Zero keeps the documented "provider default" behaviour for callers
+        # that genuinely want it, rather than sending 0 and capping output at
+        # nothing.
+        if self._max_tokens > 0:
+            generation_config["maxOutputTokens"] = self._max_tokens
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "responseMimeType": "application/json",
-            },
+            "generationConfig": generation_config,
         }
         resp = self._client.post(f"/models/{self.model}:generateContent", json=payload)
         if resp.status_code >= 400:
