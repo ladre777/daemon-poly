@@ -12,6 +12,15 @@ funnel read ``quant 18 (no proposal 0)`` and ``proposed 11`` — of which the
 LLM path accounted for seven. Fourteen quant candidates left no trace. They
 had priced fine and simply not cleared MIN_EDGE_THRESHOLD after fees, which
 is the quant path working correctly, reported as though nothing had happened.
+
+These assertions originally targeted the funnel format of that era —
+``quant 18 (no proposal 0)``. The line has since moved to ``key=value``
+throughout, so they were rehomed onto ``quant_no_proposal=`` and
+``quant_below_edge=`` rather than the product being reverted to a
+parenthesised format it no longer uses anywhere else. The guarantee under
+test is unchanged and is the point: attempted must equal no-proposal plus
+below-edge plus proposed, so a candidate cannot leave the quant path without
+incrementing something.
 """
 from __future__ import annotations
 
@@ -95,8 +104,8 @@ def test_a_priced_candidate_whose_edge_is_too_small_is_counted(run_pass, caplog)
         run_pass(candidates, StubQuantMaker(clears_edge=False))
 
     line = funnel_line(caplog)
-    assert "quant 3 (no proposal 0, below edge 3)" in line
-    assert "proposed 0" in line
+    assert "quant=3 quant_no_proposal=0 quant_below_edge=3" in line
+    assert "proposed=0" in line
 
 
 def test_an_unpriceable_candidate_is_counted_separately(run_pass, caplog):
@@ -109,7 +118,7 @@ def test_an_unpriceable_candidate_is_counted_separately(run_pass, caplog):
         run_pass(candidates, StubQuantMaker(priceable=False))
 
     line = funnel_line(caplog)
-    assert "quant 1 (no proposal 1, below edge 0)" in line
+    assert "quant=1 quant_no_proposal=1 quant_below_edge=0" in line
 
 
 def test_a_quant_candidate_that_clears_the_edge_reaches_the_checker(run_pass, caplog):
@@ -119,8 +128,9 @@ def test_a_quant_candidate_that_clears_the_edge_reaches_the_checker(run_pass, ca
         run_pass(candidates, StubQuantMaker())
 
     line = funnel_line(caplog)
-    assert "quant 1 (no proposal 0, below edge 0)" in line
-    assert "proposed 1 -> checked 1" in line
+    assert "quant=1 quant_no_proposal=0 quant_below_edge=0" in line
+    assert "proposed=1" in line
+    assert "checked=1" in line
 
 
 def test_the_quant_dispositions_sum_to_the_attempts(run_pass, caplog):
@@ -134,10 +144,13 @@ def test_the_quant_dispositions_sum_to_the_attempts(run_pass, caplog):
         run_pass(candidates, StubQuantMaker(clears_edge=False))
 
     line = funnel_line(caplog)
-    attempted = int(line.split("quant ")[1].split(" ")[0])
-    no_proposal = int(line.split("no proposal ")[1].split(",")[0])
-    below_edge = int(line.split("below edge ")[1].split(")")[0])
-    proposed = int(line.split("proposed ")[1].split(" ")[0])
+    def field(name):
+        return int(line.split(f"{name}=")[1].split(" ")[0])
+
+    attempted = field("quant")
+    no_proposal = field("quant_no_proposal")
+    below_edge = field("quant_below_edge")
+    proposed = field("proposed")
 
     assert attempted == 4
     assert no_proposal + below_edge + proposed == attempted

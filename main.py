@@ -493,14 +493,25 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             edge = decision.detail.get("net_edge")
             price = decision.executable_price_cents or record.limit_price_cents
             if alert_store is None:
-                should_alert = True
+                # No suppression state to consult. Say that, rather than
+                # implying a judgement was made.
+                should_alert, alert_reason = True, "no suppression state"
             else:
-                should_alert = alert_store.evaluate(key, edge, price).should_alert
+                # evaluate() returns BOTH the decision and why it reached it
+                # — "new signal", "edge moved 33.0% -> 41.0%", "price moved",
+                # "still standing". Taking only .should_alert threw the
+                # explanation away and every alert then read "trade", which
+                # is the one thing the operator already knew from the fact
+                # that an alert arrived.
+                alert_decision = alert_store.evaluate(key, edge, price)
+                should_alert = alert_decision.should_alert
+                alert_reason = alert_decision.reason
             if should_alert:
                 if alert_store is not None:
                     alert_store.record(key, record.ticker, record.action, record.side,
                                        verdict.proposal.source, edge, price)
-                _alert(notifier, "notify_trade", record, decision, reason="trade")
+                _alert(notifier, "notify_trade", record, decision,
+                       reason=alert_reason)
 
         if record.filled_count > 0:
             filled_this_pass += 1
@@ -513,11 +524,20 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             log.error("Post-trade reconciliation failed — ending pass: %s", e)
             break
 
+    # quant_no_proposal and quant_below_edge sit immediately after the
+    # attempt count they decompose. Without them a priced candidate that
+    # cleared the model and then failed MIN_EDGE_THRESHOLD left no trace at
+    # all: on the first production pass where crypto priced, the funnel read
+    # 18 attempted and 11 proposed, and the fourteen that had simply not
+    # cleared the threshold were invisible — the quant path working
+    # correctly, reported as though nothing had happened.
     log.info(
-        "Pass funnel: candidates=%d quant=%d llm_called=%d llm_disabled=%d "
+        "Pass funnel: candidates=%d quant=%d quant_no_proposal=%d "
+        "quant_below_edge=%d llm_called=%d llm_disabled=%d "
         "proposed=%d ladder_deduped=%d checked=%d checker_rejected=%d "
         "risk_refused=%d approved=%d filled=%d",
-        len(candidates), stats["quant_attempted"], stats["llm_called"],
+        len(candidates), stats["quant_attempted"], stats["quant_no_proposal"],
+        stats["quant_below_edge_threshold"], stats["llm_called"],
         stats["llm_disabled"], stats["proposed"], stats["ladder_deduped"],
         stats["checked"], stats["checker_rejected"], stats["risk_refused"],
         stats["approved"], filled_this_pass,
