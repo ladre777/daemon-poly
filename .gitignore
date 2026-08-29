@@ -50,3 +50,6 @@ Thumbs.db
 
 # Local Polymarket US credentials (never commit)
 .pm_creds.json
+
+# vidgrab scratch downloads
+vidgrab/downloads/
