@@ -323,8 +323,37 @@ class Ledger:
                     "pre-fix", self.store.calibration_by_category(until=boundary))
                 self._emit_calibration(
                     "post-fix", self.store.calibration_by_category(since=boundary))
+            self._emit_refusal_breakdown(boundary)
         except Exception:
             log.exception("Could not read the calibration table — continuing")
+
+    def _emit_refusal_breakdown(self, boundary) -> None:
+        """Split the refused bucket by the gate that actually refused it.
+
+        The calibration line above reports one `refused` figure per
+        category, and that figure blends risk refusals with proposals the
+        coherence gate killed before the Checker saw them. On the live book
+        those are not comparable: KXHIGHCHI and KXHIGHNY are refused for
+        incoherence on essentially every pass, so a Weather number that
+        silently includes them is not measuring the Checker at all.
+
+        Printed rather than queried on demand because the database sits on
+        the Railway volume and has blocked this answer repeatedly. Emitted
+        beside the calibration table, on settlement, so both move together.
+        """
+        rows = self.store.refusal_breakdown(since=boundary)
+        if not rows:
+            return
+        for row in sorted(rows, key=lambda r: -(r["n"] or 0)):
+            pnl = row["total_pnl"]
+            brier = row["brier_score"]
+            log.info(
+                "Refusals by reason [%s] %s/%s: n=%d  brier=%s  pnl=%s",
+                row["action_taken"] or "?", row["category"] or "?",
+                row["source"] or "?", row["n"] or 0,
+                f"{brier:.3f}" if brier is not None else "n/a",
+                f"${pnl:.2f}" if pnl is not None else "n/a",
+            )
 
     def _emit_calibration(self, regime: str, rows: list) -> None:
         if not rows:

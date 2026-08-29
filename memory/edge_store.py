@@ -269,6 +269,46 @@ class EdgeStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def refusal_breakdown(self, since: float = None) -> list[dict]:
+        """Refused rows split by *why* they were refused.
+
+        ``calibration_by_category`` collapses every non-traded row into a
+        single ``refused`` bucket, and that bucket mixes two different facts:
+        a proposal the risk layer declined, and one the coherence gate killed
+        before the Checker was ever asked. They answer different questions —
+        "is the gate refusing winners" versus "is the model producing junk on
+        this family" — and one number across both describes neither.
+
+        This is read-only diagnostics. It deliberately does NOT feed PF-09,
+        which keeps using ``calibration_by_category`` unchanged: narrowing
+        what that gate reads is a behaviour change, and this is not one.
+
+        Rows are bounded by ``created_at`` like the calibration table, for
+        the same reason — the model changes under us, and a split computed
+        across two models describes neither half.
+        """
+        clauses = ["settled = 1", "maker_probability IS NOT NULL",
+                   "action_taken NOT IN ('executed', 'dry_run', 'no_fill')"]
+        params: list = []
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(float(since))
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT category, source, action_taken,
+                          COUNT(*) as n,
+                          AVG((maker_probability - CASE WHEN outcome='yes' THEN 1.0 ELSE 0.0 END)
+                              * (maker_probability - CASE WHEN outcome='yes' THEN 1.0 ELSE 0.0 END)
+                          ) as brier_score,
+                          SUM(pnl) as total_pnl,
+                          AVG(pnl) as avg_pnl
+                     FROM edges
+                    WHERE """ + " AND ".join(clauses) +
+                """ GROUP BY category, source, action_taken""",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def calibration_by_category(self, since: float = None,
                                 until: float = None) -> list[dict]:
         """

@@ -765,3 +765,85 @@ def test_a_dropped_market_stops_consuming_a_grading_slot(store, order_store):
     assert "KXLIVE-1" in client.lookups
     live = [r for r in store.recent_edges() if r["ticker"] == "KXLIVE-1"][0]
     assert live["settled"] == 1
+
+
+# -- splitting the refused bucket by the gate that refused ------------------
+#
+# `refused` blends risk refusals with coherence refusals. On the live book
+# that is not a detail: KXHIGHCHI and KXHIGHNY are refused for incoherence
+# on essentially every pass, so a Weather figure that silently includes them
+# is not measuring the Checker's judgement at all.
+
+
+def test_the_two_kinds_of_refusal_are_reported_apart(store, order_store):
+    for _ in range(4):
+        record(store, action="skipped_risk", category="Weather", ticker="KXW-1")
+    for _ in range(6):
+        record(store, action="skipped_incoherent", category="Weather", ticker="KXW-1")
+    for row in store.recent_edges(limit=50):
+        store.settle(row["id"], "yes", 1.0)
+
+    rows = {r["action_taken"]: r for r in store.refusal_breakdown()}
+
+    assert rows["skipped_risk"]["n"] == 4
+    assert rows["skipped_incoherent"]["n"] == 6
+
+
+def test_traded_rows_are_not_counted_as_refusals(store, order_store):
+    record(store, action="dry_run", category="Finance", ticker="KXF-1")
+    record(store, action="executed", category="Finance", ticker="KXF-1")
+    record(store, action="no_fill", category="Finance", ticker="KXF-1")
+    record(store, action="skipped_risk", category="Finance", ticker="KXF-1")
+    for row in store.recent_edges(limit=50):
+        store.settle(row["id"], "yes", 1.0)
+
+    actions = {r["action_taken"] for r in store.refusal_breakdown()}
+
+    assert actions == {"skipped_risk"}, "a traded row is not a refusal"
+
+
+def test_an_unsettled_refusal_is_not_counted(store, order_store):
+    """Same rule the calibration table uses: no outcome, no row."""
+    record(store, action="skipped_incoherent", category="Weather", ticker="KXW-1")
+
+    assert store.refusal_breakdown() == []
+
+
+def test_the_breakdown_does_not_change_what_pf09_reads(store, order_store):
+    """The guard that matters.
+
+    PF-09 gates real trading off calibration_by_category. This change is
+    diagnostics only, so that function's output must be byte-identical
+    before and after — narrowing what the gate reads would be a behaviour
+    change wearing a reporting change's clothes.
+    """
+    for _ in range(5):
+        record(store, action="skipped_risk", category="Crypto")
+    for _ in range(5):
+        record(store, action="skipped_incoherent", category="Crypto")
+    for row in store.recent_edges(limit=50):
+        store.settle(row["id"], "yes", 1.0)
+
+    calibration = store.calibration_by_category()
+
+    # One 'refused' bucket, still collapsing both actions, exactly as before.
+    refused = [r for r in calibration if r["mode"] == "refused"]
+    assert len(refused) == 1
+    assert refused[0]["n"] == 10, (
+        "calibration_by_category must still merge both refusal kinds — "
+        "PF-09 depends on it"
+    )
+
+
+def test_the_breakdown_reaches_the_log(store, order_store, caplog):
+    import logging
+    for _ in range(3):
+        record(store, action="skipped_incoherent", category="Weather", ticker="KXW-1")
+    for row in store.recent_edges(limit=50):
+        store.settle(row["id"], "yes", 1.0)
+
+    ledger = Ledger(ResolvedClient(), store, order_store)
+    with caplog.at_level(logging.INFO, logger="daemon_kalshi.ledger"):
+        ledger._emit_refusal_breakdown(None)
+
+    assert "Refusals by reason [skipped_incoherent] Weather/llm: n=3" in caplog.text
