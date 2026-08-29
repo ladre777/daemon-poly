@@ -94,6 +94,14 @@ class _EventGroup:
 class CoherenceReport:
     ok: bool
     reason: str = ""
+    #: Which gate refused, when one did. The two are not the same finding and
+    #: must not share a label on disk: "a higher strike cannot be more likely"
+    #: is the model being arithmetically broken, while a large log-odds gap is
+    #: the model disagreeing loudly with the market and possibly being right.
+    #: Both used to be written as action_taken='skipped_incoherent', so the
+    #: refused-PnL for a family blended a broken model with a bold one and
+    #: could not answer whether the gate was refusing winners.
+    kind: str = ""
 
 
 class CoherenceGate:
@@ -164,6 +172,7 @@ class CoherenceGate:
                 False,
                 f"event {event} already produced contradictory probabilities "
                 f"this pass — the model is not reading the strike",
+                kind="monotonicity",
             )
 
         p = proposal.maker_probability
@@ -189,6 +198,7 @@ class CoherenceGate:
                     f"incoherent across strikes on {event}: "
                     f"P(>{lower_k:g})={lower:.0%} vs P(>{higher_k:g})={higher:.0%} "
                     f"— a higher strike cannot be more likely",
+                    kind="monotonicity",
                 )
 
         group.by_strike[c.floor_strike] = p
@@ -210,6 +220,7 @@ class CoherenceGate:
             f"{market:.1%} — {distance:.2f} in log-odds, over the {limit:.2f} "
             f"limit. A disagreement this large is more likely a model error "
             f"than an edge",
+            kind="implausible",
         )
 
     # -- public ------------------------------------------------------------

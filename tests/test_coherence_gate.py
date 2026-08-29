@@ -295,10 +295,18 @@ def test_run_once_refuses_an_incoherent_ladder_before_the_checker(
                   checker, risk, execution, ledger, account)
 
     rows = edge_store.recent_edges(limit=10)
-    refused = [r for r in rows if r["action_taken"] == "skipped_incoherent"]
+    refused = [r for r in rows if r["action_taken"] == "skipped_monotonicity"]
     assert refused, "the contradiction must be recorded, not silently dropped"
     assert refused[0]["checker_verdict"] is None, (
         "no verdict — the Checker was never asked, and the row must say so"
+    )
+    # The label carries WHICH gate refused. A higher strike scoring higher is
+    # the model being arithmetically broken, and that has to be separable on
+    # disk from a merely bold disagreement with the market — otherwise the
+    # refused-PnL for a family blends the two and cannot say whether the gate
+    # is refusing winners.
+    assert not [r for r in rows if r["action_taken"] == "skipped_implausible"], (
+        "a monotonicity failure must not be filed as an implausible one"
     )
 
 
@@ -635,3 +643,52 @@ def test_skipping_never_admits_a_proposal_the_gate_would_refuse(gate):
         "sampling must not change what check() does to a proposal that "
         "actually reaches it"
     )
+
+
+# --------------------------------------------------------------------------
+# which gate refused, recorded distinctly
+# --------------------------------------------------------------------------
+#
+# Both refusals used to be written as action_taken='skipped_incoherent', so a
+# family's refused-PnL blended two opposite findings. On the live book WTI
+# produces both within minutes of each other: "P(>86.99)=12% vs P(>87.49)=35%"
+# is the model broken, while "model says 35% against a market at 2.0%" may be
+# the model right and the market wrong. Netting those together is how a gate
+# that refuses winners hides.
+
+
+def test_a_monotonicity_failure_is_labelled_as_one(gate):
+    gate.check(proposal(84, 0.45))
+    report = gate.check(proposal(86, 0.65))
+
+    assert not report.ok
+    assert report.kind == "monotonicity"
+
+
+def test_an_implausible_disagreement_is_labelled_as_one(gate):
+    report = gate.check(proposal(80, 0.35, market_p=0.02,
+                                 event="KXWTI-B", ticker="KXWTI-B-T80"))
+
+    assert not report.ok
+    assert report.kind == "implausible"
+
+
+def test_a_tainted_follow_up_is_still_a_monotonicity_failure(gate):
+    """The taint path refuses too, and must carry the same cause.
+
+    Otherwise the second and subsequent strikes on a broken ladder land in
+    a different bucket from the one that broke it.
+    """
+    gate.check(proposal(84, 0.45))
+    gate.check(proposal(86, 0.65))          # taints the event
+    report = gate.check(proposal(88, 0.50))
+
+    assert not report.ok
+    assert report.kind == "monotonicity"
+
+
+def test_an_accepted_proposal_carries_no_cause(gate):
+    report = gate.check(proposal(84, 0.45, market_p=0.40))
+
+    assert report.ok
+    assert report.kind == ""

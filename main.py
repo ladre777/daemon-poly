@@ -456,8 +456,20 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         coherence = coherence_gate.check(proposal)
         if not coherence.ok:
             stats["incoherent"] += 1
-            ledger.log_refused_proposal(proposal, action="skipped_incoherent",
-                                        reason=coherence.reason)
+            # Recorded under which gate refused, not a single
+            # `skipped_incoherent`. A model that says a higher strike is more
+            # likely is broken; a model that disagrees with the market by a
+            # wide margin may simply be right, and those two need opposite
+            # responses. Sharing one label made the refused-PnL for a family
+            # unable to tell them apart. Falls back to the old label if a
+            # report ever arrives without a kind, so an unlabelled refusal
+            # lands somewhere honest rather than being dropped.
+            ledger.log_refused_proposal(
+                proposal,
+                action=f"skipped_{coherence.kind}" if coherence.kind
+                else "skipped_incoherent",
+                reason=coherence.reason,
+            )
             continue
 
         priced.append(proposal)
