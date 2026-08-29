@@ -18,25 +18,25 @@ CONTRACT_PAYOUT_CENTS = 100.0
 
 
 def fee_cents_per_contract(price_cents: float) -> float:
-    """Conservative per-contract fee estimate, rounded up to the cent.
+    """Conservative per-contract fee, priced as a single-contract order.
 
-    Kalshi's taker fee is approximately ``fee_rate * P * (1 - P)`` per
-    contract with ``P`` the price in dollars, peaking near 50c. Rounded up
-    because underestimating a cost that is subtracted from edge is the
-    direction that puts on trades which do not clear their own fees.
+    Kalshi's taker fee is ``ceil(fee_rate * C * P * (1 - P))`` in dollars,
+    rounded up once per ORDER. Callers here are gates and per-contract cost
+    estimates that run before sizing, so the count is not yet known and this
+    assumes the worst case, C=1, where the one-cent floor applies in full.
+    For a larger order the real per-contract cost is lower, so this is an
+    upper bound — the direction that refuses a marginal trade rather than
+    putting on one that does not clear its own fees.
+
+    Until 2026-08-29 this ceilinged to a *centicent* despite a docstring
+    claiming the cent, returning 1.75c where Kalshi charges 2c and 0.34c on a
+    5c contract where Kalshi charges 1c. It understated every fee by 12% to
+    66%, always in the direction that makes an edge look bigger than it is.
 
     FEE_RATE=0.07 comes from published summaries, not a verified schedule —
     see docs/SAFETY.md.
     """
-    p = min(max(price_cents / CONTRACT_PAYOUT_CENTS, 0.0), 1.0)
-    fee_cents = CONFIG.risk.fee_rate * p * (1.0 - p) * 100.0
-    # Round before the ceiling. p*(1-p) is symmetric about 50c, but 0.7 has no
-    # exact binary representation, so 0.7*(1-0.7) lands a few ulps above
-    # 0.3*(1-0.3) — and ceil() promotes that dust into a whole extra cent.
-    # Without this, a 70c contract is charged 1.48c and a 30c contract 1.47c
-    # for what is the same trade mirrored, which breaks the symmetry the fee
-    # policy is supposed to have between YES and NO.
-    return math.ceil(round(fee_cents * 100.0, 6)) / 100.0
+    return float(fee_cents_for_order(price_cents, 1))
 
 
 def fee_cents_for_order(price_cents: float, count: int) -> int:

@@ -191,9 +191,30 @@ def test_no_arb_when_the_book_is_priced_normally():
 
 def test_a_profit_below_the_floor_is_not_reported():
     CONFIG.arbitrage.min_profit_cents = 5.0
-    assert find_locked_arb("KXA-1", 48.0, 48.0) is None, "~1c profit, 5c floor"
+    assert find_locked_arb("KXA-1", 48.0, 48.0) is None, "no profit, 5c floor"
+    # A real one, well clear of fees: 40c + 40c locks 20c gross against 4c
+    # of fee.
     CONFIG.arbitrage.min_profit_cents = 0.5
-    assert find_locked_arb("KXA-1", 48.0, 48.0) is not None
+    assert find_locked_arb("KXA-1", 40.0, 40.0) is not None
+
+
+def test_the_48_48_lock_is_not_an_arbitrage_at_kalshi_fees():
+    """It was reported as one until 2026-08-29, and it never was.
+
+    Both legs at 48c lock 4c gross. The old fee estimate ceilinged to a
+    centicent and charged 1.75c a leg, leaving a 0.50c "profit" that cleared
+    the floor. Kalshi rounds each order up to a whole cent and charges 2c a
+    leg — exactly 4c, exactly the gross. The trade nets zero.
+
+    So the bot would have crossed two spreads and carried the execution risk
+    of a two-legged fill to make nothing, and the only reason it looked
+    worth doing was a rounding error in our own fee function. Pinned as its
+    own case because this is the cheapest possible demonstration that
+    understating fees does not merely mis-report profit, it manufactures
+    trades.
+    """
+    CONFIG.arbitrage.min_profit_cents = 0.01
+    assert find_locked_arb("KXA-1", 48.0, 48.0) is None
 
 
 def test_never_returns_a_zero_or_negative_opportunity():
