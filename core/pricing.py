@@ -39,6 +39,34 @@ def fee_cents_per_contract(price_cents: float) -> float:
     return math.ceil(round(fee_cents * 100.0, 6)) / 100.0
 
 
+def fee_cents_for_order(price_cents: float, count: int) -> int:
+    """Total fee in whole cents for an order of ``count`` contracts.
+
+    Kalshi's published formula rounds the whole order up to the next cent:
+    ``ceil(fee_rate * C * P * (1 - P))`` in dollars. Two consequences that a
+    per-contract rate cannot express, and that matter in opposite directions:
+
+    * At C=1 there is a one-cent floor. A 10c contract owes 0.63c by the
+      rate and is charged 1c — 37% more. ``fee_cents_per_contract`` ceilings
+      to a *centicent*, so it returns 0.63c and understates every small
+      order by up to 0.88c.
+    * The rounding is per order, not per contract, so it amortises as C
+      grows. Charging a whole cent per contract would overstate a 10-lot at
+      10c by 43%.
+
+    Both are wrong to ignore, which is why this takes the count instead of
+    returning a rate. Used for counterfactual grading, where C is exactly 1
+    and the one-cent floor is the whole story.
+    """
+    if count <= 0:
+        return 0
+    p = min(max(price_cents / CONTRACT_PAYOUT_CENTS, 0.0), 1.0)
+    # Rounded before the ceiling for the same reason as fee_cents_per_contract:
+    # p*(1-p) is symmetric about 50c, but binary dust would otherwise promote
+    # one side of a mirrored pair into an extra cent.
+    return math.ceil(round(CONFIG.risk.fee_rate * count * p * (1.0 - p) * 100.0, 6))
+
+
 def executable_price_cents(candidate, direction: str) -> float:
     """The price we would actually pay, not the midpoint.
 

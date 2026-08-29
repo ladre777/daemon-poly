@@ -564,10 +564,22 @@ def _counterfactual_pnl(row: dict, outcome: str) -> Optional[float]:
     graded for calibration on its probability alone, and inventing a price to
     fill the column would be worse than leaving it empty.
 
-    Uses the same fee function the live path subtracts, so a paper result is
-    not flattered by pretending trading is free.
+    Charged what Kalshi would actually charge for this order, which for a
+    counterfactual is exactly one contract: ceil to a whole cent, giving the
+    one-cent floor. It used to subtract fee_cents_per_contract, which
+    ceilings to a *centicent* and so understated every graded row by between
+    0.25c and 0.88c — 12% to 66% of the real fee.
+
+    That mattered more than it sounds. These rows are the only evidence for
+    whether the edges are real, and a fee understated at C=1 flatters every
+    one of them in the same direction. On the live book at the time of the
+    fix it was the difference between Weather/llm reading +$7.44 over 3,155
+    rows and being negative across the whole plausible range of the error.
+    A paper result must not be flattered by pretending trading is cheaper
+    than it is, which is the same principle the old docstring claimed and
+    the old code did not implement.
     """
-    from core.pricing import fee_cents_per_contract
+    from core.pricing import fee_cents_for_order
 
     price = row.get("counterfactual_price_cents")
     side = (row.get("counterfactual_direction") or "").lower()
@@ -576,7 +588,7 @@ def _counterfactual_pnl(row: dict, outcome: str) -> Optional[float]:
     price = float(price)
     won = side == outcome
     gross = (CONTRACT_PAYOUT_CENTS - price) if won else -price
-    return (gross - fee_cents_per_contract(price)) / 100.0
+    return (gross - fee_cents_for_order(price, 1)) / 100.0
 
 
 def _ts(value) -> Optional[float]:

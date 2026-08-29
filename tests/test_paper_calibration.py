@@ -153,16 +153,48 @@ def test_the_no_side_is_scored_against_the_no_outcome():
     assert win > 0 and lose < 0
 
 
-def test_fees_are_subtracted_using_the_live_formula():
-    """Paper results must not be flattered by pretending trading is free."""
-    from core.pricing import fee_cents_per_contract
+def test_fees_are_subtracted_at_what_kalshi_would_actually_charge():
+    """Paper results must not be flattered by pretending trading is cheap.
+
+    This asserted fee_cents_per_contract until 2026-08-29, which ceilings to
+    a centicent and charged 1.75c on a 50c contract. Kalshi rounds the order
+    up to a whole cent and charges 2c. A counterfactual is one contract, so
+    the one-cent floor applies in full and there is nothing for it to
+    amortise against.
+    """
+    from core.pricing import fee_cents_for_order
 
     gross = (100.0 - 50.0) / 100.0
     net = _counterfactual_pnl(
         {"counterfactual_price_cents": 50.0, "counterfactual_direction": "yes"}, "yes"
     )
 
-    assert net == pytest.approx(gross - fee_cents_per_contract(50.0) / 100.0)
+    assert fee_cents_for_order(50.0, 1) == 2, "the one-cent ceiling, not 1.75c"
+    assert net == pytest.approx(gross - 0.02)
+
+
+def test_the_cheapest_possible_contract_still_pays_a_whole_cent():
+    """The floor is the part a per-contract rate cannot express.
+
+    A 5c contract owes 0.34c by the rate. There is no such charge: the
+    smallest fee Kalshi levies is one cent, which is 3x the rate-implied
+    number and is why cheap contracts look far more profitable than they are.
+    """
+    from core.pricing import fee_cents_for_order
+
+    assert fee_cents_for_order(5.0, 1) == 1
+
+
+def test_the_rounding_amortises_across_a_multi_contract_order():
+    """Charging a whole cent per contract would be its own error.
+
+    Ten contracts at 10c owe 6.3c by the rate and are charged 7c, not 10c.
+    That is why this takes a count rather than returning a per-contract rate.
+    """
+    from core.pricing import fee_cents_for_order
+
+    assert fee_cents_for_order(10.0, 1) == 1
+    assert fee_cents_for_order(10.0, 10) == 7
 
 
 def test_a_row_with_no_captured_price_yields_no_pnl():
