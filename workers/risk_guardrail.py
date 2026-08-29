@@ -131,11 +131,27 @@ class RiskGuardrail:
         memory shows bad PnL or poor Brier-score calibration."""
         category = verdict.proposal.candidate.category
         source = verdict.proposal.source
+        # Keyed by mode as well, because calibration_by_category groups by it
+        # and says plainly that the three are not comparable. Keying on
+        # (category, source) alone silently kept whichever mode SQLite
+        # returned last, and that is the refused bucket — so a category
+        # losing money on the trades it TOOK was masked by the counterfactual
+        # results of the trades it DECLINED, and this gate did not fire. It
+        # only bites once a paper or live row exists, which is to say from
+        # the first pass after the account is funded.
         calibration = {
-            (row["category"], row["source"]): row
+            (row["category"], row["source"], row["mode"]): row
             for row in self.store.calibration_by_category()
         }
-        row = calibration.get((category, source))
+        # Judged on the trades we would actually have taken, best evidence
+        # first: real money, then paper, then — only when there is nothing
+        # else — what we refused. Never merged, and never averaged.
+        row = None
+        for mode in ("live", "paper", "refused"):
+            candidate_row = calibration.get((category, source, mode))
+            if candidate_row and candidate_row["n"] >= 10:
+                row = candidate_row
+                break
         if row and row["n"] >= 10:
             if row["avg_pnl"] is not None and row["avg_pnl"] < 0:
                 return RiskDecision(

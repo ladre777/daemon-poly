@@ -360,3 +360,101 @@ def test_max_open_positions_still_caps_attention(risk):
     decision = risk.evaluate(make_verdict(), snapshot(positions=positions))
     assert not decision.approved
     assert "max open positions" in decision.reason
+
+
+# ---------------------------------------------------------------------------
+# PF-09 reads one mode at a time
+# ---------------------------------------------------------------------------
+#
+# calibration_by_category groups by (category, source, mode) and its own
+# docstring says the three are not comparable. PF-09 keyed its lookup on
+# (category, source) alone, so the dict comprehension kept whichever mode
+# SQLite returned last — the refused bucket. A category losing money on the
+# trades it TOOK was masked by the counterfactual results of the trades it
+# DECLINED, and the gate did not fire.
+#
+# It was latent only because every row was refused while the balance was
+# zero. The first funded pass creates paper rows and arms it.
+
+from memory.edge_store import EdgeRecord  # noqa: E402
+
+
+def _graded(store, action, pnl, n, category="Crypto", source="quant",
+            outcome="yes", probability=0.70):
+    for _ in range(n):
+        edge_id = store.record_edge(EdgeRecord(
+            ticker="KXBTCD-1", category=category, source=source,
+            maker_probability=probability, market_implied_probability=0.40,
+            edge_size=0.30, action_taken=action,
+            counterfactual_price_cents=40.0, counterfactual_direction="yes",
+        ))
+        store.settle(edge_id, outcome, pnl)
+
+
+def _pf09(edge_store, order_store, source="quant", category="Crypto"):
+    risk = RiskGuardrail(1000.0, store=edge_store, order_store=order_store)
+    from tests.conftest import make_candidate, make_verdict
+    verdict = make_verdict(
+        candidate=make_candidate(category=category), source=source
+    )
+    return risk._pf09_category_calibration(verdict)
+
+
+def test_losing_paper_trades_are_not_masked_by_refused_winners(
+        edge_store, order_store):
+    """The regression. This is the state the first funded pass creates."""
+    _graded(edge_store, "dry_run", -5.0, 12)        # what we took: losing
+    _graded(edge_store, "skipped_risk", +1.0, 50)   # what we declined: winners
+
+    decision = _pf09(edge_store, order_store)
+
+    assert not decision.approved, (
+        "PF-09 must judge the trades taken, not the ones refused"
+    )
+    assert "12" in decision.reason, "it must cite the paper bucket, n=12"
+
+
+def test_real_money_outranks_paper(edge_store, order_store):
+    _graded(edge_store, "executed", -3.0, 15)
+    _graded(edge_store, "dry_run", +9.0, 40)
+
+    decision = _pf09(edge_store, order_store)
+
+    assert not decision.approved
+    assert "15" in decision.reason, "live is the best evidence available"
+
+
+def test_refused_is_still_used_when_it_is_the_only_evidence(
+        edge_store, order_store):
+    """Today's regime, and it must not change.
+
+    With a zero balance every row is refused. That is the only signal there
+    is, so the gate still reads it — the fix narrows which bucket is chosen,
+    it does not stop the gate working before the account is funded.
+    """
+    _graded(edge_store, "skipped_risk", -2.0, 30)
+
+    assert not _pf09(edge_store, order_store).approved
+
+
+def test_a_thin_bucket_does_not_displace_a_populated_one(
+        edge_store, order_store):
+    """Preference is by mode, but only among buckets with enough rows.
+
+    Three live trades must not silence a paper bucket of forty, or a single
+    lucky fill would switch the gate off.
+    """
+    _graded(edge_store, "executed", +50.0, 3)       # tiny, flattering
+    _graded(edge_store, "dry_run", -4.0, 40)        # substantial, losing
+
+    decision = _pf09(edge_store, order_store)
+
+    assert not decision.approved
+    assert "40" in decision.reason
+
+
+def test_a_profitable_category_still_passes(edge_store, order_store):
+    """The gate must not just always refuse."""
+    _graded(edge_store, "dry_run", +4.0, 40, probability=0.7, outcome="yes")
+
+    assert _pf09(edge_store, order_store).approved
