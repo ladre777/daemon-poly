@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import pytest
 
+from core.kalshi_client import KalshiAPIError
 from memory.edge_store import EdgeRecord, EdgeStore
 from workers.ledger import Ledger, _counterfactual_pnl
 
@@ -645,3 +646,90 @@ def test_the_shipped_boundary_parses_and_sits_after_the_prompt_rewrite():
 
     assert parsed is not None
     assert parsed > e4cade6_deployed_at
+
+
+# -- markets the exchange has dropped --------------------------------------
+#
+# This path is why the first version of the give-up did nothing in
+# production. _market_result has two callers; only the fill-based one was
+# guarded, and every live instance was a forecast row, so seven markets kept
+# 404ing once per pass for four hours after the "fix" deployed while the
+# fill-path tests stayed green.
+
+
+class GoneClient(ResolvedClient):
+    """A market the exchange has dropped: 404, forever."""
+
+    def get_market(self, ticker):
+        self.lookups.append(ticker)
+        raise KalshiAPIError(404, "market not found")
+
+
+def test_a_vanished_market_stops_being_graded(store, order_store):
+    record(store, action="skipped_risk", ticker="KXGONE-1")
+    client = GoneClient()
+    ledger = Ledger(client, store, order_store)
+
+    for _ in range(10):
+        assert ledger.reconcile_forecasts() == 0
+
+    assert len(client.lookups) == 3, "three strikes, then it stops asking"
+
+
+def test_the_forecast_row_stays_unsettled_rather_than_graded(store, order_store):
+    """Giving up must not invent an outcome to grade against.
+
+    A counterfactual Brier score computed from a guessed result is worse
+    than no score, because it looks like evidence.
+    """
+    record(store, action="skipped_risk", ticker="KXGONE-1")
+    ledger = Ledger(GoneClient(), store, order_store)
+
+    for _ in range(10):
+        ledger.reconcile_forecasts()
+
+    row = store.recent_edges()[0]
+    assert row["settled"] == 0
+    assert row["outcome"] is None
+
+
+def test_a_dropped_market_stops_consuming_a_grading_slot(store, order_store):
+    """The functional cost, not just the noise.
+
+    Ticker slots per pass are capped. Seven dead markets were taking seven
+    of them every pass, crowding out rows that could still be scored — so
+    the skip has to happen before the cap is counted, not after.
+    """
+    class PartlyGone(ResolvedClient):
+        """404s only the markets the exchange really dropped."""
+
+        def get_market(self, ticker):
+            self.lookups.append(ticker)
+            if ticker.startswith("KXGONE"):
+                raise KalshiAPIError(404, "market not found")
+            return {"market": {"ticker": ticker, "result": "yes",
+                               "close_time": "2026-08-17T00:00:00Z"}}
+
+    # The scan is ordered most-recently-closed first, so the dead markets
+    # are recorded last to put them at the head of the queue — which is the
+    # production shape: they sit permanently in front of gradeable rows.
+    record(store, action="skipped_risk", ticker="KXLIVE-1")
+    for i in range(2):
+        record(store, action="skipped_risk", ticker=f"KXGONE-{i}")
+
+    client = PartlyGone()
+    ledger = Ledger(client, store, order_store)
+
+    # Budget of exactly 2: while the dead markets still hold slots, the scan
+    # never reaches the live row.
+    assert ledger.reconcile_forecasts(max_tickers=2) == 0
+    assert "KXLIVE-1" not in client.lookups
+
+    ledger.reconcile_forecasts(max_tickers=2)
+    ledger.reconcile_forecasts(max_tickers=2)   # third strike lands here
+
+    # Same budget, same rows — but the dead ones now stand aside.
+    assert ledger.reconcile_forecasts(max_tickers=2) == 1
+    assert "KXLIVE-1" in client.lookups
+    live = [r for r in store.recent_edges() if r["ticker"] == "KXLIVE-1"][0]
+    assert live["settled"] == 1

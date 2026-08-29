@@ -254,6 +254,14 @@ class Ledger:
 
         by_ticker: dict[str, list[dict]] = {}
         for row in pending:
+            # Skipped before the cap is counted, not after. A market the
+            # exchange has dropped can never grade, and seven of them were
+            # consuming seven of the twenty-five ticker slots every pass —
+            # crowding out rows that could still have been scored.
+            if self._missing_market_strikes.get(
+                row["ticker"], 0
+            ) >= _MISSING_MARKET_LIMIT:
+                continue
             by_ticker.setdefault(row["ticker"], []).append(row)
             if len(by_ticker) >= cap:
                 break
@@ -429,24 +437,31 @@ class Ledger:
         alternative would be inventing a result for a market nobody can read
         any more. What stops is the asking.
 
-        The fills are named in the message rather than counted, because the
-        operator's next question is always which ones, and the whole reason
-        this state exists is that the answer was drowning in one 404 per
-        market per pass, forever.
+        Both kinds of stuck row are counted, because there are two callers
+        and the first version of this message named only fills. Every live
+        instance turned out to be a forecast edge, so it truthfully reported
+        "0 fill(s)" while seven markets kept 404ing — a number that was
+        correct, about the wrong thing, and read as though the give-up had
+        nothing to clean up.
         """
         strikes = self._missing_market_strikes.get(ticker, 0) + 1
         self._missing_market_strikes[ticker] = strikes
         if strikes < _MISSING_MARKET_LIMIT or ticker in self._missing_market_announced:
             return
         self._missing_market_announced.add(ticker)
-        open_fills = self.order_store.unsettled_fills(ticker)
+        fills = len(self.order_store.unsettled_fills(ticker))
+        forecasts = sum(
+            1 for row in self.store.unsettled_forecast_edges()
+            if row["ticker"] == ticker
+        )
         log.warning(
             "Giving up on settlement for %s after %d consecutive 404s — the "
-            "exchange no longer serves this market. %d fill(s) stay UNSETTLED "
-            "and are excluded from realized PnL and calibration; no outcome "
-            "has been assumed. Re-probed on restart, and still settled "
+            "exchange no longer serves this market. %d fill(s) and %d forecast "
+            "row(s) stay UNSETTLED and are excluded from realized PnL and "
+            "calibration; no outcome has been assumed. It also stops consuming "
+            "a forecast-grading slot. Re-probed on restart, and still settled "
             "immediately if it reappears in the settlements endpoint.",
-            ticker, strikes, len(open_fills),
+            ticker, strikes, fills, forecasts,
         )
 
     def _market_result(self, ticker: str) -> Optional[dict]:
