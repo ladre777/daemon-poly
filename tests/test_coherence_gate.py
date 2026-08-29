@@ -511,3 +511,127 @@ def test_priority_markets_are_rationed_per_event_like_everything_else(
     assert len(maker.seen) == 1, (
         f"the priority ladder took {len(maker.seen)} calls; the cap is 1"
     )
+
+
+# --------------------------------------------------------------------------
+# sampling a family the gate refuses on every pass
+# --------------------------------------------------------------------------
+#
+# is_tainted forgets at begin_pass, which is right for a ladder that
+# contradicts itself inside one pass and blind to the live case: KXHIGHCHI
+# and KXHIGHNY refused for implausibility on every pass for hours, the model
+# swinging 15%, 35%, 45%, 55% against a market pinned at 0.5%, each swing
+# paid for with a Maker call. This samples such a family instead of pricing
+# it every pass — and re-probes, so it is never written off.
+
+
+def _incoherent(gate, family="KXHIGHCHI", n=1):
+    """Refuse `family` n times, one pass each, as production does."""
+    for _ in range(n):
+        gate.begin_pass()
+        report = gate.check(proposal(
+            80, 0.50, market_p=0.005,
+            event=f"{family}-26AUG28", ticker=f"{family}-26AUG28-T80",
+        ))
+        assert not report.ok, "fixture expects this to be refused"
+
+
+def test_a_family_is_priced_normally_until_it_earns_the_strikes(gate):
+    cand = proposal(80, 0.5, ticker="KXHIGHCHI-26AUG28-T80").candidate
+    assert not gate.should_skip_maker(cand)
+
+    _incoherent(gate, n=CONFIG.risk.coherence_family_skip_after - 1)
+    assert not gate.should_skip_maker(cand), "one short of the threshold"
+
+
+def test_a_persistently_incoherent_family_stops_being_priced_every_pass(gate):
+    _incoherent(gate, n=CONFIG.risk.coherence_family_skip_after)
+    cand = proposal(80, 0.5, ticker="KXHIGHCHI-26AUG28-T80").candidate
+
+    skipped = 0
+    for _ in range(20):
+        gate.begin_pass()
+        if gate.should_skip_maker(cand):
+            skipped += 1
+    assert skipped >= 17, f"expected most passes skipped, got {skipped}/20"
+
+
+def test_the_family_is_still_re_probed(gate):
+    """The property that keeps this from being a permanent write-off."""
+    _incoherent(gate, n=CONFIG.risk.coherence_family_skip_after)
+    cand = proposal(80, 0.5, ticker="KXHIGHCHI-26AUG28-T80").candidate
+
+    probed = 0
+    for _ in range(CONFIG.risk.coherence_family_reprobe_every * 3):
+        gate.begin_pass()
+        if not gate.should_skip_maker(cand):
+            probed += 1
+    assert probed >= 2, "a sampled family must still be asked periodically"
+
+
+def test_one_coherent_answer_restores_full_rate_pricing(gate):
+    """Self-healing, and consecutive rather than cumulative."""
+    _incoherent(gate, n=CONFIG.risk.coherence_family_skip_after)
+    cand = proposal(80, 0.5, ticker="KXHIGHCHI-26AUG28-T80").candidate
+    assert "KXHIGHCHI" in gate.sampled_families(), "precondition: now sampled"
+
+    # A coherent proposal on the same family — model near the market.
+    gate.begin_pass()
+    ok = gate.check(proposal(
+        80, 0.30, market_p=0.28,
+        event="KXHIGHCHI-26AUG28", ticker="KXHIGHCHI-26AUG28-T80",
+    ))
+    assert ok.ok
+
+    for _ in range(5):
+        gate.begin_pass()
+        assert not gate.should_skip_maker(cand), (
+            "a family that answered coherently must go straight back to "
+            "full-rate pricing"
+        )
+
+
+def test_one_family_being_sampled_does_not_affect_another(gate):
+    _incoherent(gate, family="KXHIGHCHI",
+                n=CONFIG.risk.coherence_family_skip_after)
+    other = proposal(80, 0.5, ticker="KXHIGHNY-26AUG28-T80").candidate
+
+    for _ in range(10):
+        gate.begin_pass()
+        assert not gate.should_skip_maker(other), "strikes are per family"
+
+
+def test_sampling_is_disabled_by_zero(gate, monkeypatch):
+    monkeypatch.setattr(CONFIG.risk, "coherence_family_skip_after", 0)
+    _incoherent(gate, n=8)
+    cand = proposal(80, 0.5, ticker="KXHIGHCHI-26AUG28-T80").candidate
+
+    for _ in range(10):
+        gate.begin_pass()
+        assert not gate.should_skip_maker(cand)
+    assert gate.sampled_families() == {}
+
+
+def test_sampled_families_are_reportable(gate):
+    _incoherent(gate, family="KXHIGHCHI",
+                n=CONFIG.risk.coherence_family_skip_after)
+    assert "KXHIGHCHI" in gate.sampled_families()
+
+
+def test_skipping_never_admits_a_proposal_the_gate_would_refuse(gate):
+    """The safety property. This must only ever decline to ask.
+
+    should_skip_maker runs before the Maker, so nothing it does can put a
+    proposal in front of risk. check() is still the only way past the gate,
+    and it is unchanged for anything that reaches it.
+    """
+    _incoherent(gate, n=CONFIG.risk.coherence_family_skip_after)
+    gate.begin_pass()
+    still_refused = gate.check(proposal(
+        80, 0.50, market_p=0.005,
+        event="KXHIGHCHI-26AUG28", ticker="KXHIGHCHI-26AUG28-T80",
+    ))
+    assert not still_refused.ok, (
+        "sampling must not change what check() does to a proposal that "
+        "actually reaches it"
+    )

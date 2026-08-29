@@ -49,6 +49,7 @@ import math
 from dataclasses import dataclass, field
 
 from config import CONFIG
+from core.tickers import family_of
 
 log = logging.getLogger("daemon_kalshi.coherence")
 
@@ -111,9 +112,16 @@ class CoherenceGate:
         self._events: dict[str, _EventGroup] = {}
         self.rejected_monotonicity = 0
         self.rejected_implausible = 0
+        #: Consecutive implausibility refusals per family, ACROSS passes.
+        #: Deliberately not cleared by begin_pass: the whole point is that a
+        #: family which has been refused every pass for an hour should stop
+        #: costing a Maker call every pass to rediscover that.
+        self._family_strikes: dict[str, int] = {}
+        self._passes = 0
 
     def begin_pass(self) -> None:
         self._events.clear()
+        self._passes += 1
 
     def is_tainted(self, candidate) -> bool:
         """Has this candidate's event already contradicted itself this pass?
@@ -218,9 +226,54 @@ class CoherenceGate:
             return report
 
         report = self._check_plausible(proposal)
+        family = family_of(proposal.candidate.ticker)
         if not report.ok:
             self.rejected_implausible += 1
+            self._family_strikes[family] = self._family_strikes.get(family, 0) + 1
             log.warning("Refusing %s: %s", proposal.candidate.ticker, report.reason)
             return report
 
+        # Coherent answer: the family is behaving again, so it goes straight
+        # back to full-rate pricing. Consecutive, not cumulative — a family
+        # is never written off for a bad hour it has since recovered from.
+        self._family_strikes.pop(family, None)
         return CoherenceReport(True)
+
+    def sampled_families(self) -> dict[str, int]:
+        """Families currently being sampled rather than priced every pass.
+
+        Exposed so the pass can say out loud what it stopped buying. A
+        change that quietly reduces what gets proposed, and cannot be seen
+        in the logs, is indistinguishable from a bug that does the same.
+        """
+        after = CONFIG.risk.coherence_family_skip_after
+        if after <= 0:
+            return {}
+        return {f: n for f, n in self._family_strikes.items() if n >= after}
+
+    def should_skip_maker(self, candidate) -> bool:
+        """Is this family currently costing a Maker call for nothing?
+
+        Asked before the Maker runs, like is_tainted, and for the same
+        reason that method already gives: a proposal the gate is going to
+        refuse should not be paid for first. The difference is only the
+        timescale. is_tainted forgets everything at begin_pass, which is
+        correct for a ladder contradicting itself within one pass, but
+        blind to KXHIGHCHI and KXHIGHNY being refused on every pass for
+        hours — the model swinging 15%, 35%, 45%, 55% against a market
+        pinned at 0.5%, with no contract spec to anchor it.
+
+        Never a gate. This cannot let a proposal through; it can only
+        decline to buy one. The strictly worse outcome it risks is a
+        delayed discovery that a family has recovered, which is what the
+        re-probe bounds.
+        """
+        after = CONFIG.risk.coherence_family_skip_after
+        every = CONFIG.risk.coherence_family_reprobe_every
+        if after <= 0 or every <= 1:
+            return False
+        if self._family_strikes.get(family_of(candidate.ticker), 0) < after:
+            return False
+        # Probe on one pass in `every`, so a recovered family is picked back
+        # up within a bounded number of passes rather than never.
+        return self._passes % every != 0

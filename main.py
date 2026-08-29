@@ -389,6 +389,16 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 stats["llm_skipped_tainted"] += 1
                 continue
 
+            # Same idea as the line above, one timescale up. is_tainted
+            # forgets at begin_pass, so a family refused for incoherence on
+            # every pass for hours still cost a Maker call every pass to
+            # rediscover it. Sampled rather than dropped: the family is
+            # re-probed periodically and returns to full rate the moment it
+            # produces a coherent answer.
+            if coherence_gate.should_skip_maker(candidate):
+                stats["llm_skipped_incoherent_family"] += 1
+                continue
+
             event_key = candidate.event_ticker or candidate.ticker
             # The per-event cap binds on priority candidates too. It used to
             # be skipped for them, and PRIORITY_KEYWORDS matches essentially
@@ -601,6 +611,20 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         stats["approved"], filled_this_pass,
     )
     _log_checker_verdicts(stats, verdict_confidence, verdict_families)
+
+    # Said out loud, because this is the one change in the pass that makes
+    # the bot do LESS than it otherwise would. A silent reduction in what
+    # gets proposed is indistinguishable from a bug that does the same.
+    sampled = coherence_gate.sampled_families()
+    if sampled:
+        log.info(
+            "Sampling %d family(ies) refused for incoherence every pass "
+            "(skipped %d Maker call(s) this pass, re-probing 1 pass in %d): %s",
+            len(sampled), stats["llm_skipped_incoherent_family"],
+            CONFIG.risk.coherence_family_reprobe_every,
+            " ".join(f"{fam}x{n}" for fam, n in
+                     sorted(sampled.items(), key=lambda kv: (-kv[1], kv[0]))),
+        )
 
     # Same numbers as the line above, kept as rows so they can be aggregated
     # later instead of grepped out of a log with a retention window. A zero

@@ -162,6 +162,17 @@ class RiskConfig:
     coherence_checks_enabled: bool = _bool("COHERENCE_CHECKS_ENABLED", True)
     coherence_tolerance: float = _float("COHERENCE_TOLERANCE", 0.01)
     max_log_odds_disagreement: float = _float("MAX_LOG_ODDS_DISAGREEMENT", 3.0)
+    #: After this many CONSECUTIVE implausibility refusals on the same family,
+    #: stop paying for a Maker call on it every pass and sample instead. Zero
+    #: disables the sampling entirely. This is not a gate: it never lets a
+    #: proposal through, it only declines to buy one that the gate has refused
+    #: every time it was asked.
+    coherence_family_skip_after: int = _int("COHERENCE_FAMILY_SKIP_AFTER", 5)
+    #: While sampling, probe the family once every N passes. One means never
+    #: skip. The probe is what makes this self-healing: the moment the model
+    #: produces a coherent answer the counter resets and full-rate pricing
+    #: resumes, so a family is never permanently written off.
+    coherence_family_reprobe_every: int = _int("COHERENCE_FAMILY_REPROBE_EVERY", 10)
     count_unrealized_gains: bool = _bool("COUNT_UNREALIZED_GAINS", False)
     max_open_positions: int = _int("MAX_OPEN_POSITIONS", 15)
     min_edge_threshold: float = _float("MIN_EDGE_THRESHOLD", 0.04)
