@@ -53,6 +53,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.tickers import family_of  # noqa: E402  (needs the path above)
+
 #: Free-text columns that carry model prose. Never selected, never printed.
 #: Mirrors the same list in scripts/weekend_export.py — model output can
 #: contain anything, including text shaped like instructions to a reader.
@@ -86,18 +88,6 @@ def _iso(ts) -> str:
     if ts is None:
         return "unbounded"
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
-
-
-def family_of(ticker: str) -> str:
-    """The series/family code for a market ticker.
-
-    Kalshi tickers are ``SERIES-EVENT-STRIKE``; the family is everything
-    before the first hyphen. ``KXBTCD-26AUG2817-T80499.99`` -> ``KXBTCD``.
-    A ticker with no hyphen is already a family.
-    """
-    if not ticker:
-        return "(no ticker)"
-    return ticker.split("-", 1)[0].strip().upper() or "(no ticker)"
 
 
 def _stats(values: list) -> dict:

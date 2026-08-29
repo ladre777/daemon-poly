@@ -20,6 +20,7 @@ from core.llm_client import LLMRateLimited
 from core.kalshi_client import KalshiClient
 from core.telegram_commands import TelegramCommandListener
 from core.reasons import Reason, Stage, stats_to_events
+from core.tickers import family_of
 from memory.db import storage_status
 from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore, SignalAlertStore, signal_key
@@ -236,7 +237,7 @@ def _check_balance_change(snapshot, store, order_store, notifier) -> None:
     store.set_last_balance(current_cents)
 
 
-def _log_checker_verdicts(stats, verdict_confidence) -> None:
+def _log_checker_verdicts(stats, verdict_confidence, verdict_families=None) -> None:
     """One INFO line summarising what the Checker actually decided.
 
     The pass funnel says how many verdicts came back; it cannot say what
@@ -266,6 +267,21 @@ def _log_checker_verdicts(stats, verdict_confidence) -> None:
         approved, stats["checker_rejected"], checked,
         100.0 * approved / checked, _mean("approve"), _mean("reject"),
     )
+
+    # Which families the Checker is rejecting, which the aggregate above
+    # cannot say. A family rejected every pass is a different problem from
+    # one rejected occasionally: the first is a systematic disagreement
+    # between the model and that market's pricing, and it costs a Checker
+    # call every pass to rediscover. Sorted by rejection count so the
+    # worst offender is first rather than whichever ticker sorted first.
+    if verdict_families:
+        parts = [
+            f"{fam} {a}/{a + r}"
+            for fam, (a, r) in sorted(
+                verdict_families.items(), key=lambda kv: (-kv[1][1], kv[0])
+            )
+        ]
+        log.info("Checker verdicts by family (approved/checked): %s", " ".join(parts))
 
 
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
@@ -329,6 +345,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     #: between `checked` and `approved` unreadable from the log stream even
     #: though the numbers were sitting in `stats`.
     verdict_confidence: dict[str, list[float]] = {"approve": [], "reject": []}
+    verdict_families: dict[str, list[int]] = {}
     priced: list = []
     llm_calls_this_pass = 0
     llm_calls_by_event: dict[str, int] = defaultdict(int)
@@ -479,6 +496,11 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         bucket = "approve" if verdict.approved else "reject"
         if verdict.confidence is not None:
             verdict_confidence[bucket].append(float(verdict.confidence))
+        # Recorded for every verdict, not only the ones carrying a
+        # confidence, so the family counts total to `checked` rather than to
+        # some smaller number whose shortfall has no visible explanation.
+        seen = verdict_families.setdefault(family_of(candidate.ticker), [0, 0])
+        seen[0 if verdict.approved else 1] += 1
 
         if account.snapshot is None or account.snapshot.is_stale(
             CONFIG.risk.max_reconciliation_age_seconds * 0.5
@@ -578,7 +600,7 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         stats["checked"], stats["checker_rejected"], stats["risk_refused"],
         stats["approved"], filled_this_pass,
     )
-    _log_checker_verdicts(stats, verdict_confidence)
+    _log_checker_verdicts(stats, verdict_confidence, verdict_families)
 
     # Same numbers as the line above, kept as rows so they can be aggregated
     # later instead of grepped out of a log with a retention window. A zero
