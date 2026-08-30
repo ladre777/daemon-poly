@@ -26,6 +26,14 @@ from memory.edge_store import EdgeStore
 from memory.order_store import OrderStore, SignalAlertStore, signal_key
 from memory.price_store import PriceStore
 from memory.telemetry_store import TelemetryStore
+try:
+    from scripts.ledger_answers import emit as emit_ledger_answers
+except Exception:  # pragma: no cover - the report is never worth a crash loop
+    # An observer that cannot be imported must degrade to nothing. The call
+    # site below already swallows exceptions, but an unguarded import runs
+    # before any of that and would take the process down at boot.
+    def emit_ledger_answers(*_a, **_k):
+        pass
 from workers.scout import Scout
 from workers.maker import Maker
 from workers.checker import Checker
@@ -732,6 +740,14 @@ def main():
 
     log.info("DÆMON-KALSHI starting | env=%s dry_run=%s",
              CONFIG.kalshi.env, CONFIG.risk.dry_run)
+
+    # One-shot, read-only report over the edge ledger, answering questions the
+    # review environment cannot reach the volume to ask. Opens the database
+    # with mode=ro so SQLite refuses a write regardless of what it issues, and
+    # swallows every exception — same posture as TelemetryStore above, and for
+    # the same reason: an observer must never be able to stop the bot. Placed
+    # before reconciliation deliberately, so a failed startup still produces it.
+    emit_ledger_answers()
 
     try:
         snapshot = account.reconcile()

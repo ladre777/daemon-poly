@@ -38,6 +38,13 @@ COPY main.py config.py ./
 COPY core/ ./core/
 COPY workers/ ./workers/
 COPY memory/ ./memory/
+# scripts/ IS reachable from main.py — ledger_answers runs once at startup.
+# Omitting it does not fail the build; it fails the import at boot, which on a
+# restart-on-failure policy is a crash loop rather than a visible error.
+#
+# Named files rather than the directory, to keep the rule above true: the rest
+# of scripts/ is operator tooling that nothing at runtime imports.
+COPY scripts/__init__.py scripts/ledger_answers.py ./scripts/
 
 # Default location for the SQLite ledger. Attach a Railway Volume mounted at
 # /data, or the database is ephemeral and every redeploy wipes order, fill
