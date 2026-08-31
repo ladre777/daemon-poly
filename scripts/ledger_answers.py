@@ -285,6 +285,12 @@ def build_report(db_path: str) -> str:
         w("-" * 78)
         w("DIRECTION x EVENT x PRICE BAND  (settled rows)")
         w("-" * 78)
+        w("NOTE: this table is a search over roughly 3 categories x 2 directions")
+        w("x 7 bands = 42 cells. At alpha=0.05 about two will look good by chance")
+        w("alone. A Bonferroni-corrected two-sided 5% threshold over 42 cells is")
+        w("|t| >= 3.16. Treat anything below that as hypothesis-generating only,")
+        w("and note that a band selected from THIS table has already used up its")
+        w("evidence - it needs new events, not a re-read of the same ones.")
         for cat in sorted({(r["category"] or "?") for r in settled}):
             rs = [r for r in settled
                   if (r["category"] or "?") == cat and r["pnl"] is not None]
@@ -340,8 +346,13 @@ def build_report(db_path: str) -> str:
                 # does any band pay after fees, and on how many EVENTS.
                 bands = [(0, 10), (10, 20), (20, 35), (35, 50),
                          (50, 65), (65, 80), (80, 101)]
+                # t_clustered per band, because that is the only number that
+                # separates a real band from one of forty-two cells that had
+                # to produce a best one. A band's row count can be four
+                # figures while its EVENT count is three, and it is the event
+                # count that carries the information.
                 w(f"    {'band(c)':<10}{'rows':>7}{'events':>8}{'wins':>7}"
-                  f"{'total PnL':>12}{'mean':>10}")
+                  f"{'total PnL':>12}{'mean':>10}{'t_clust':>10}")
                 for lo, hi in bands:
                     bb = [r for r in sub
                           if r["counterfactual_price_cents"] is not None
@@ -351,9 +362,13 @@ def build_report(db_path: str) -> str:
                     wins = sum(1 for r in bb
                                if (r["outcome"] or "").lower() == side)
                     t = sum(float(r["pnl"]) for r in bb)
-                    ne = len({event_of(r["ticker"]) for r in bb})
-                    w(f"    {f'{lo}-{hi - 1}':<10}{len(bb):>7}{ne:>8}{wins:>7}"
-                      f"{t:>12.2f}{t/len(bb):>10.4f}")
+                    by_ev: dict[str, list[float]] = defaultdict(list)
+                    for r in bb:
+                        by_ev[event_of(r["ticker"])].append(float(r["pnl"]))
+                    st = _clustered(by_ev)
+                    w(f"    {f'{lo}-{hi - 1}':<10}{len(bb):>7}{len(by_ev):>8}"
+                      f"{wins:>7}{t:>12.2f}{t/len(bb):>10.4f}"
+                      f"{_fmt(st.get('t_clustered'), '%.2f'):>10}")
     finally:
         conn.close()
 
