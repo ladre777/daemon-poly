@@ -103,15 +103,31 @@ MAKER_PREREQUISITES = [
     "no GTC order has ever been created for it to act on.)",
     "Exchange-state reconciliation for resting orders, including recovery of "
     "unknown states without operator intervention.",
-    "A quote generator. The quant path currently produces a fair value, not a "
-    "two-sided quote, so there is nothing to rest.",
+    # BUILT. workers/quoting.QuoteGenerator turns a fair value into a
+    # two-sided quote or a named refusal, and refuses any spread that cannot
+    # clear the round-trip fee. It holds no client and no execution path, so
+    # it still cannot rest anything; the GTC gap below is what stands between
+    # a generated quote and a resting one.
+    "A quote generator. (BUILT in workers/quoting.py: two-sided quotes with a "
+    "fee-clearing spread floor, zone asymmetry and inventory skew. It produces "
+    "quotes and cannot place them, so the GTC gap below still stands.)",
     "A GTC path in build_intent. Only IOC taker intents are built today. "
     "expires_at IS set for GTC in Execution._submit, but no GTC intent is "
     "ever constructed, so the sweep runs every pass over an empty set.",
     "Inventory-aware sizing. Risk sizes for a taker fill; a resting quote must "
     "skew as the position builds.",
+    # BUILT, not yet answered. workers/quote_observer runs every pass: it
+    # records the quote it would have rested on each candidate, checks at a
+    # later pass whether the market traded through it, and marks the fill at a
+    # later reading still. It stays on this list because the instrument
+    # existing is not the same as the number existing — no observation has
+    # completed both stages in production yet, and the answer it produces is a
+    # bounded estimate (sampling understates fills, queue position overstates
+    # them) rather than a fill simulator.
     "Fill and adverse-selection measurement: what fraction of resting fills "
-    "occur immediately before an unfavourable move.",
+    "occur immediately before an unfavourable move. (BUILT + TESTED in "
+    "workers/quote_observer.py and workers/adverse_selection.py; NOT yet "
+    "answered, because no production observation has completed both stages.)",
     "Cancel/replace latency measurement, with a timeout policy for cancels "
     "that do not confirm.",
     "Per-order exposure reservation, already present, re-verified under "

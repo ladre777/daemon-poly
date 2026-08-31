@@ -57,6 +57,7 @@ from core.spot_price_client import SpotPriceClient
 from core.telegram_client import TelegramClient
 from workers.quant_maker import QuantMaker
 from workers.arbitrage import ArbitrageScanner
+from workers.quote_observer import QuoteObserver
 from workers.coherence import CoherenceGate
 from workers.ladder_dedup import select_for_checker
 
@@ -309,6 +310,7 @@ def _frozen_probe_pass(pass_index: int) -> bool:
 
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
              notifier=None, health=None, alert_store=None, arb_scanner=None,
+             quote_observer=None,
              coherence_gate=None, store=None, order_store=None, telemetry=None,
              pass_index: int = 0):
     try:
@@ -385,6 +387,14 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         # not for arbs — and for ten days every pass was that pass.
         stats["arb_real_no_ask"] += arb_scanner.real_no_ask
         stats["arb_derived_no_ask"] += arb_scanner.derived_no_ask
+
+    # The quoting probe. Records the quote it would have rested on each
+    # candidate and resolves quotes recorded on earlier passes against the
+    # book as it stands now. Placed beside the arb scan because both are
+    # read-only passes over the same books, and neither can place an order.
+    if quote_observer is not None:
+        for k, v in quote_observer.run(candidates, now=pass_started).items():
+            stats[f"quote_{k}"] += v
 
     model_breaker = CircuitBreaker(
         name="model-calls", threshold=CONFIG.model_failure_threshold, cooldown_seconds=0
@@ -717,6 +727,22 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 gap["raw_median"], gap["through_parity"],
             )
 
+    # The quoting probe's own pass counters, then the standing per-zone
+    # picture. Both, because they answer different questions: the counters say
+    # whether the probe ran, the report says what it has found so far, and a
+    # probe that silently stopped recording looks identical to one finding
+    # nothing.
+    if quote_observer is not None and (stats["quote_quoted"]
+                                       or stats["quote_refused"]):
+        log.info(
+            "Quote probe: %d quoted, %d refused | %d fill check(s), %d mark(s)"
+            ", %d left open (market not in this pass)",
+            stats["quote_quoted"], stats["quote_refused"],
+            stats["quote_filled_checked"], stats["quote_marked"],
+            stats["quote_unreadable"],
+        )
+        quote_observer.report()
+
     # A path that has been switched off and cannot be seen in the logs is
     # indistinguishable from a bug that switched it off.
     if frozen_seen:
@@ -824,6 +850,14 @@ def main():
         rti_runner.start()
     quant_maker = QuantMaker(spot_client)
     arb_scanner = ArbitrageScanner(notifier=notifier)
+    try:
+        quote_observer = QuoteObserver()
+    except Exception:
+        # Same posture as the telemetry store and the ledger report: an
+        # observer that cannot open its table must not be the reason the bot
+        # refuses to boot. run_once skips the probe when this is None.
+        log.exception("Quote observer unavailable; the probe will not run")
+        quote_observer = None
     coherence_gate = CoherenceGate()
     checker = Checker()
     risk = RiskGuardrail(bankroll_usd=args.bankroll, store=store,
@@ -902,6 +936,7 @@ def main():
                 run_once(scout, maker, quant_maker, checker, risk, execution,
                          ledger, account, notifier=notifier, health=health,
                          alert_store=alert_store, arb_scanner=arb_scanner,
+                         quote_observer=quote_observer,
                          coherence_gate=coherence_gate,
                          store=store, order_store=order_store,
                          telemetry=telemetry, pass_index=pass_count)

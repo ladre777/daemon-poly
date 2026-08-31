@@ -314,8 +314,21 @@ class QuotingConfig:
     max_inventory: int = _int("QUOTE_MAX_INVENTORY", 10)
     #: Stop quoting entirely this many seconds before expiry.
     stop_quote_seconds: float = _float("QUOTE_STOP_SECONDS", 300)
+    #: How long a recorded quote must sit before it is resolved. A quote read
+    #: back in the same instant it was written has had no chance to be traded
+    #: through, and resolving it would record a fill rate of zero for a reason
+    #: that has nothing to do with the market.
+    observation_min_age_seconds: float = _float("QUOTE_OBSERVATION_MIN_AGE_SECONDS", 120)
+    #: How long after the fill check to read the market again for the mark.
+    #: Must be a separate, later reading: marking a fill against the snapshot
+    #: that established it is degenerate — see workers/adverse_selection.py.
+    mark_horizon_seconds: float = _float("QUOTE_MARK_HORIZON_SECONDS", 300)
     #: Skip mid-range entirely and quote only the two asymmetric zones.
     skip_mid_range: bool = _bool("QUOTE_SKIP_MID_RANGE", False)
+    #: Record hypothetical quotes each pass and measure what the book did.
+    #: Writes to the ledger and places nothing; the kill switch exists so a
+    #: measurement can never be the reason the trading loop is unwell.
+    observation_enabled: bool = _bool("QUOTE_OBSERVATION_ENABLED", True)
 
 
 @dataclass
