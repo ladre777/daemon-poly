@@ -144,6 +144,8 @@ class ArbitrageScanner:
     def __init__(self, notifier=None):
         self.notifier = notifier
         self._reported: set[str] = set()
+        self.real_no_ask = 0
+        self.derived_no_ask = 0
 
     def scan(self, candidates) -> list[LockedArb]:
         """Return every locked arb among these candidates, best first."""
@@ -155,10 +157,19 @@ class ArbitrageScanner:
             quote = getattr(c, "quote", None)
             if quote is None:
                 continue
-            # The NO ask derived from the YES bid. Kalshi quotes a real NO
-            # book too; when the Scout starts carrying it, prefer that and
-            # pass it straight through — see find_locked_arb's docstring.
-            no_ask = CONTRACT_PAYOUT_CENTS - quote.yes_bid
+            # Kalshi's own NO ask when the payload carried one. The derived
+            # `100 - yes_bid` is kept only as a fallback and is counted
+            # separately, because it cannot detect a real arb: substituting
+            # it makes the test `yes_ask - yes_bid + fees < 0`, i.e. a book
+            # crossed by more than the fees. That is why this scanner logged
+            # nothing at all in its first ten days of production.
+            real_no_ask = getattr(quote, "no_ask", None)
+            if real_no_ask is None:
+                self.derived_no_ask += 1
+                no_ask = CONTRACT_PAYOUT_CENTS - quote.yes_bid
+            else:
+                self.real_no_ask += 1
+                no_ask = real_no_ask
             arb = find_locked_arb(c.ticker, quote.yes_ask, no_ask)
             if arb is not None:
                 found.append(arb)
@@ -184,3 +195,9 @@ class ArbitrageScanner:
     def begin_pass(self) -> None:
         """Clear per-pass dedupe. Called once per scan, like QuantMaker."""
         self._reported.clear()
+        # Counted per pass so the log can say how much of the book this
+        # scanner can actually see. A scan that priced every market off a
+        # derived NO ask has not looked for arbs, it has looked for crossed
+        # books, and the two are not the same search.
+        self.real_no_ask = 0
+        self.derived_no_ask = 0

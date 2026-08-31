@@ -63,6 +63,20 @@ class Quote:
     yes_bid: float
     yes_ask: float
     captured_at: float
+    #: Kalshi's own NO book, when the payload carries one.
+    #:
+    #: Not derivable from the YES side. ``100 - yes_bid`` is the price at
+    #: which a YES holder could SELL, which is only the NO ask on a book with
+    #: no spread — and every real book has one. The locked-arb scanner was
+    #: built on that derivation and could therefore only fire on a crossed
+    #: book, which is to say never: it logged zero opportunities in ten days
+    #: of production, not because none existed but because the test it was
+    #: applying reduces to `spread < -fees`.
+    #:
+    #: None means the payload quoted no NO side, which is a real state on a
+    #: thin market and must stay distinguishable from "quoted at zero".
+    no_bid: Optional[float] = None
+    no_ask: Optional[float] = None
     #: Where captured_at came from: "exchange" if the market payload carried a
     #: quote timestamp, "scan" if we fell back to our own read time. A "scan"
     #: timestamp bounds how stale the quote can be by our clock, but says
@@ -197,9 +211,9 @@ _QUOTE_TIME_FIELDS: tuple[str, ...] = ()
 PRICE_FIELDS = {
     "yes_bid": (("yes_bid", 1.0), ("yes_bid_dollars", 100.0)),
     "yes_ask": (("yes_ask", 1.0), ("yes_ask_dollars", 100.0)),
-    # Read only by mark_price_cents below. Kalshi quotes the NO book
-    # directly, so a NO position is marked against Kalshi's own number
-    # rather than one derived from the YES side.
+    # Kalshi quotes the NO book directly, so a NO position is marked — and a
+    # locked arb is priced — against Kalshi's own number rather than one
+    # derived from the YES side.
     "no_bid": (("no_bid", 1.0), ("no_bid_dollars", 100.0)),
     "no_ask": (("no_ask", 1.0), ("no_ask_dollars", 100.0)),
 }
@@ -439,8 +453,14 @@ def validate_market(raw: dict, event: dict = None, now: float = None) -> Validat
             f"{ticker}: quote timestamp is {quote_ts - now:.0f}s in the future"
         )
 
+    # The NO book is optional: absent means the market quoted no NO side,
+    # which is a real state on a thin market. It is never derived here — a
+    # derived NO ask is what made the arb scanner unfireable.
+    no_bid_cents, _ = _price_cents(raw, "no_bid")
+    no_ask_cents, _ = _price_cents(raw, "no_ask")
     quote = Quote(yes_bid=yes_bid, yes_ask=yes_ask, captured_at=quote_ts,
-                  source=quote_source)
+                  source=quote_source,
+                  no_bid=no_bid_cents, no_ask=no_ask_cents)
     if quote.is_stale():
         raise MarketDataInvalid(
             f"{ticker}: quote is {quote.age_seconds:.0f}s old, limit "

@@ -379,6 +379,11 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     if arb_scanner is not None:
         arb_scanner.begin_pass()
         stats["locked_arbs"] += len(arb_scanner.scan(candidates))
+        # How much of the book the arb scanner could actually see. A pass that
+        # priced every market off a derived NO ask searched for crossed books,
+        # not for arbs — and for ten days every pass was that pass.
+        stats["arb_real_no_ask"] += arb_scanner.real_no_ask
+        stats["arb_derived_no_ask"] += arb_scanner.derived_no_ask
 
     model_breaker = CircuitBreaker(
         name="model-calls", threshold=CONFIG.model_failure_threshold, cooldown_seconds=0
@@ -680,6 +685,17 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # Said out loud, because this is the one change in the pass that makes
     # the bot do LESS than it otherwise would. A silent reduction in what
     # gets proposed is indistinguishable from a bug that does the same.
+    if arb_scanner is not None and (stats["arb_real_no_ask"]
+                                    or stats["arb_derived_no_ask"]):
+        total = stats["arb_real_no_ask"] + stats["arb_derived_no_ask"]
+        log.info(
+            "Arb scan: %d/%d candidates had a real NO ask (%.0f%%); %d priced "
+            "off a derived 100-yes_bid, which cannot detect an arb",
+            stats["arb_real_no_ask"], total,
+            100.0 * stats["arb_real_no_ask"] / total,
+            stats["arb_derived_no_ask"],
+        )
+
     # A path that has been switched off and cannot be seen in the logs is
     # indistinguishable from a bug that switched it off.
     if frozen_seen:
