@@ -224,3 +224,47 @@ def test_gaps_reset_each_pass():
     s.scan([_cand("KXT-1", 40.0, 45.0, no_ask=52.0)])
     s.begin_pass()
     assert s.gap_summary() is None
+
+
+# -- raw versus fee-inclusive ---------------------------------------------
+
+
+def test_a_book_through_parity_that_fees_make_unprofitable_is_visible_as_both():
+    """The distinction the whole arb decision turns on.
+
+    Two asks summing to 98c is a 2c lock before fees and a loss after them.
+    Reporting only the fee-inclusive number would show this as "no arb" and
+    hide that the exchange book was through parity — which is the difference
+    between "a maker could take this" and "this trade does not exist".
+    """
+    s = ArbitrageScanner()
+    s.begin_pass()
+    s.scan([_cand("KXT-1", 40.0, 48.0, no_ask=50.0)])
+
+    g = s.gap_summary()
+    assert g["raw_best"] == pytest.approx(-2.0), "98c of asks is 2c through parity"
+    assert g["through_parity"] == 1
+    fees = fee_cents_per_contract(48.0) + fee_cents_per_contract(50.0)
+    assert g["best"] == pytest.approx(-2.0 + fees)
+    assert g["best"] > 0, "fees turn this lock into a loss"
+    assert g["raw_best_fees"] == pytest.approx(fees)
+
+
+def test_a_book_above_parity_is_not_counted_as_through_it():
+    """raw >= 0 means no arb exists at any fee. That is a different verdict
+    from 'the fee ate it' and must not be blurred into one."""
+    s = ArbitrageScanner()
+    s.begin_pass()
+    s.scan([_cand("KXT-1", 40.0, 52.0, no_ask=52.0)])
+
+    g = s.gap_summary()
+    assert g["raw_best"] == pytest.approx(4.0)
+    assert g["through_parity"] == 0
+
+
+def test_raw_gaps_reset_each_pass():
+    s = ArbitrageScanner()
+    s.begin_pass()
+    s.scan([_cand("KXT-1", 40.0, 48.0, no_ask=50.0)])
+    s.begin_pass()
+    assert s.raw_gaps == []

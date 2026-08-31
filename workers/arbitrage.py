@@ -150,6 +150,8 @@ class ArbitrageScanner:
         #: cents. Negative is a lock. Kept per pass so the distribution can be
         #: reported rather than just its sign.
         self.gaps: list[tuple[float, str]] = []
+        #: The same markets before fees: (raw_gap_cents, ticker, fees_cents).
+        self.raw_gaps: list[tuple[float, str, float]] = []
 
     def scan(self, candidates) -> list[LockedArb]:
         """Return every locked arb among these candidates, best first."""
@@ -203,10 +205,21 @@ class ArbitrageScanner:
             return
         if not (0 < no_ask < CONTRACT_PAYOUT_CENTS):
             return
-        cost = (yes_ask + no_ask
-                + fee_cents_per_contract(yes_ask)
+        fees = (fee_cents_per_contract(yes_ask)
                 + fee_cents_per_contract(no_ask))
+        cost = yes_ask + no_ask + fees
+        # Raw and fee-inclusive kept apart, because they answer different
+        # questions and only together say whether this trade can ever exist:
+        #
+        #   raw <  100  the exchange book is THROUGH parity and the fee is
+        #               what makes the arb unprofitable. A taker can never
+        #               have it; a maker earning the spread might.
+        #   raw >= 100  no arb exists at any fee. The scanner is dead weight.
+        #
+        # The fee-inclusive number alone cannot separate those, and they lead
+        # to opposite decisions about whether to build order lifecycle.
         self.gaps.append((cost - CONTRACT_PAYOUT_CENTS, ticker))
+        self.raw_gaps.append((yes_ask + no_ask - CONTRACT_PAYOUT_CENTS, ticker, fees))
 
     def gap_summary(self) -> Optional[dict]:
         """Per-pass shape of how close the book came to a lock.
@@ -222,6 +235,12 @@ class ArbitrageScanner:
         def q(f):
             return cents[min(len(cents) - 1, int(f * len(cents)))]
 
+        raw_ordered = sorted(self.raw_gaps)
+        raw_cents = [g for g, _, _ in raw_ordered]
+
+        def rq(f):
+            return raw_cents[min(len(raw_cents) - 1, int(f * len(raw_cents)))]
+
         return {
             "n": len(cents),
             "best": ordered[0][0],
@@ -231,6 +250,13 @@ class ArbitrageScanner:
             "within_1c": sum(1 for c in cents if c < 1.0),
             "within_3c": sum(1 for c in cents if c < 3.0),
             "within_10c": sum(1 for c in cents if c < 10.0),
+            # Pre-fee. through_parity counts books a maker could in principle
+            # lock and a taker never can.
+            "raw_best": raw_ordered[0][0],
+            "raw_best_ticker": raw_ordered[0][1],
+            "raw_best_fees": raw_ordered[0][2],
+            "raw_median": rq(0.50),
+            "through_parity": sum(1 for c in raw_cents if c < 0.0),
         }
 
     def _report(self, arb: LockedArb) -> None:
@@ -259,3 +285,5 @@ class ArbitrageScanner:
         #: cents. Negative is a lock. Kept per pass so the distribution can be
         #: reported rather than just its sign.
         self.gaps: list[tuple[float, str]] = []
+        #: The same markets before fees: (raw_gap_cents, ticker, fees_cents).
+        self.raw_gaps: list[tuple[float, str, float]] = []

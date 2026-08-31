@@ -708,6 +708,13 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
                 gap["p10"], gap["median"],
                 gap["within_1c"], gap["within_3c"], gap["within_10c"],
             )
+            log.info(
+                "Arb gap BEFORE fees: best=%+.2fc on %s (fees would be %.2fc) "
+                "median=%+.2fc | %d book(s) through parity — those are locks a "
+                "maker could take and a taker never can",
+                gap["raw_best"], gap["raw_best_ticker"], gap["raw_best_fees"],
+                gap["raw_median"], gap["through_parity"],
+            )
 
     # A path that has been switched off and cannot be seen in the logs is
     # indistinguishable from a bug that switched it off.
