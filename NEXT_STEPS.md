@@ -23,7 +23,10 @@ price. Collapsed to the 975 events that actually resolve:
 **Nothing in this bot has a demonstrated positive edge.** Across 19,988 settled rows the
 only result clearing 2 sigma in either direction is Weather/llm **losing money**.
 
-- **Weather/llm demonstrated loss t=-2.11; path frozen.** See "Frozen categories" below.
+- **Weather/llm demonstrated loss t=-2.11; path frozen.**
+- **Finance/llm frozen too, for a different reason: it cannot be measured.** Six settled
+  events in the whole ledger, cluster t=-0.05. A promotion rule needs 15-30 events; at six
+  in ten days on multi-day contracts that is most of a year away.
 - Finance's apparent +$86.67 was **one contract**: `KXWTI-26AUG2514`, 136 rows (8.4% of
   Finance) supplying 63% of the PnL. Four of the six Finance events lost money and the
   event-weighted mean is **negative**.
@@ -49,6 +52,27 @@ layer or execution. It is **sampled, not deleted**: `FROZEN_CATEGORY_SAMPLE_RATE
 `action_taken='skipped_frozen'`, so the counterfactual grading continues and a future
 weather model can be seen flipping the sign. Removing a category from the set restores it
 with no code change.
+
+### The 42-cell search: nothing survives
+
+Every (category, direction, price band) cell was scored cluster-robustly. **Not one cell
+clears 2 sigma with a credible event count**, let alone the Bonferroni threshold of
+|t|>=3.16 that 42 cells demand:
+
+| Cell | Rows | Events | Mean PnL | t |
+|---|---:|---:|---:|---:|
+| Crypto NO 20-34c | 1,012 | 283 | +$0.0140 | **+1.59** |
+| Crypto YES 35-49c | 215 | 109 | +$0.0703 | +1.17 |
+| Crypto NO 10-19c | 1,375 | 228 | +$0.0302 | -0.66 |
+
+Everything with a spectacular t has 2-4 events. Finance NO 50-64c reads **t=+22.69 on
+three events** with 211/211 wins — three settlements that all went one way leave almost no
+between-event variance, so the denominator collapses. The report now suppresses any t
+computed on fewer than 10 clusters and prints `3ev<10` instead, because anyone scanning
+for the largest t would otherwise land on the least evidence in the table.
+
+**A band chosen from that table has already spent its evidence.** It needs new events, not
+a re-read of the same ones.
 
 ### Open, and blocking any Finance work
 

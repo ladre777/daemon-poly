@@ -340,10 +340,26 @@ class AppConfig:
     #: still written and graded, so if a future weather model flips the sign
     #: the ledger will show it. What a frozen category can never do is reach
     #: the risk layer or execution.
+    #: Finance is frozen for a different reason from Weather, and the
+    #: distinction matters. Weather is frozen because it is measured to lose
+    #: (t = -2.11 over 18 events). Finance is frozen because it CANNOT BE
+    #: MEASURED: six settled events in the entire history of the ledger, and
+    #: its cluster-robust t is -0.05, which demonstrates nothing either way.
+    #:
+    #: A promotion rule needs 15 to 30 independent events. At six events over
+    #: roughly ten days, and with KXWTI contracts running multi-day, this path
+    #: would take most of a year to produce enough evidence to be judged on —
+    #: while its long-YES side is 0 wins in 1,144 settled bets and its
+    #: apparent short-side profit is two contracts supplying 101% of the
+    #: total. Paying a Maker and a Checker every pass for a path that cannot
+    #: reach a verdict is paying for nothing.
+    #:
+    #: Sampling keeps a trickle landing, so the six becomes seven and eight
+    #: and the decision stays reversible.
     frozen_categories: set = field(
         default_factory=lambda: {
             c.strip().lower() for c in os.getenv(
-                "FROZEN_CATEGORIES", "weather"
+                "FROZEN_CATEGORIES", "weather,finance"
             ).split(",") if c.strip()
         }
     )

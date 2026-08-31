@@ -199,3 +199,35 @@ def test_nothing_is_frozen_when_the_set_is_empty(run_pass, client, monkeypatch):
     assert maker.priced == ["KXHIGHNY-26AUG30-T80"]
     assert filled == 1
     assert len(client.place_order_calls) == 1
+
+
+def test_finance_is_frozen_by_default_too(run_pass, client, monkeypatch):
+    """Frozen for a different reason from Weather, and worth pinning separately.
+
+    Weather is frozen because it is measured to lose. Finance is frozen
+    because six settled events in the whole ledger cannot be measured at all:
+    its cluster-robust t is -0.05, and a promotion rule needs 15 to 30 events.
+    """
+    monkeypatch.setattr(CONFIG, "frozen_categories", {"weather", "finance"})
+    wti = make_candidate(ticker="KXWTI-26AUG3114-T86.99", category="Finance",
+                         event_ticker="KXWTI-26AUG3114")
+    filled, maker = run_pass([wti], pass_index=0)
+
+    assert maker.priced == ["KXWTI-26AUG3114-T86.99"], "still sampled for grading"
+    assert filled == 0
+    assert client.place_order_calls == []
+
+
+def test_the_shipped_default_freezes_both(monkeypatch):
+    """Pins the shipped default, not a monkeypatched one.
+
+    Builds a fresh AppConfig rather than reloading the config module:
+    reloading swaps the CONFIG singleton that every already-imported module is
+    holding a reference to, which leaves the rest of the suite reading a
+    different object than the code under test. That is a destructive test, and
+    it broke test_paper_calibration when it was written that way.
+    """
+    from config import AppConfig
+
+    monkeypatch.delenv("FROZEN_CATEGORIES", raising=False)
+    assert AppConfig().frozen_categories == {"weather", "finance"}

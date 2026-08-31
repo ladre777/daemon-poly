@@ -52,6 +52,15 @@ log = logging.getLogger("daemon_kalshi.ledger_answers")
 #: log pipeline the report is read through truncates at roughly 500 lines.
 _EVENT_LIST_CAP = 12
 
+#: Below this many clusters a t-statistic is not reportable, and printing one
+#: is actively dangerous. The Finance buy-NO 50-64c band scored t = +22.69 on
+#: THREE events with 211/211 wins: three settlements that all went one way
+#: leave almost no between-event variance, so the denominator collapses and t
+#: explodes. Anyone scanning the table for the largest t lands on the least
+#: evidence in it. The number is suppressed rather than footnoted, because a
+#: footnote does not survive being skim-read.
+_MIN_EVENTS_FOR_T = 10
+
 #: Written as well as logged. The log is what the review session can actually
 #: read today; the file is for whoever has a container-file tool tomorrow.
 REPORT_PATH = "/data/reports/ledger_answers.txt"
@@ -92,7 +101,7 @@ def _clustered(pnls_by_event: dict[str, list[float]]) -> dict:
         out["se_naive"] = se
         out["t_naive"] = mean / se if se else None
     ev_means = [sum(v) / len(v) for v in pnls_by_event.values()]
-    if n_ev > 1:
+    if n_ev >= _MIN_EVENTS_FOR_T:
         em = sum(ev_means) / n_ev
         evar = sum((m - em) ** 2 for m in ev_means) / (n_ev - 1)
         ese = math.sqrt(evar / n_ev)
@@ -101,6 +110,18 @@ def _clustered(pnls_by_event: dict[str, list[float]]) -> dict:
         out["se_clustered"] = ese
         out["t_clustered"] = em / ese if ese else None
     return out
+
+
+def _t_or_why(stats: dict, n_events: int) -> str:
+    """The clustered t, or the reason there isn't one.
+
+    Never a bare number when the cluster count cannot support it: "3ev<10"
+    says more than "22.69" and cannot be misread as a strong result.
+    """
+    if n_events < _MIN_EVENTS_FOR_T:
+        return f"{n_events}ev<{_MIN_EVENTS_FOR_T}"
+    t = stats.get("t_clustered")
+    return "n/a" if t is None else "%.2f" % t
 
 
 def _q(sorted_values: list[float], fraction: float) -> float:
@@ -221,7 +242,7 @@ def build_report(db_path: str) -> str:
             w(f"{c:<16}{s['n_rows']:>7}{s['n_events']:>8}{s['rows_per_event']:>7.1f}"
               f"{s['mean_pnl']:>10.4f}{_fmt(s.get('sd_row')):>9}"
               f"{_fmt(s.get('t_naive'), '%.2f'):>9}{_fmt(s.get('sd_event')):>10}"
-              f"{_fmt(s.get('t_clustered'), '%.2f'):>13}")
+              f"{_t_or_why(s, s['n_events']):>13}")
 
         w("")
         w("YES / NO resolution counts on settled rows")
@@ -315,7 +336,7 @@ def build_report(db_path: str) -> str:
                                  for k in per})
                 w(f"  buy {side.upper()}: {len(sub)} rows, {len(per)} events, "
                   f"total ${tot:+.2f}, mean ${tot/len(sub):+.4f}, "
-                  f"t_clustered={_fmt(s_.get('t_clustered'), '%.2f')}")
+                  f"t_clustered={_t_or_why(s_, len(per))}")
                 # Listing capped, statistics never. Crypto has 769 events on
                 # the NO side alone, and the log pipeline this is read through
                 # drops everything past roughly 500 lines — an uncapped dump
@@ -368,7 +389,7 @@ def build_report(db_path: str) -> str:
                     st = _clustered(by_ev)
                     w(f"    {f'{lo}-{hi - 1}':<10}{len(bb):>7}{len(by_ev):>8}"
                       f"{wins:>7}{t:>12.2f}{t/len(bb):>10.4f}"
-                      f"{_fmt(st.get('t_clustered'), '%.2f'):>10}")
+                      f"{_t_or_why(st, len(by_ev)):>10}")
     finally:
         conn.close()
 
