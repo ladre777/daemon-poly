@@ -47,6 +47,11 @@ from collections import defaultdict
 
 log = logging.getLogger("daemon_kalshi.ledger_answers")
 
+#: How many events to LIST per (category, direction). The statistics are always
+#: computed over every event; this bounds only the printed table, because the
+#: log pipeline the report is read through truncates at roughly 500 lines.
+_EVENT_LIST_CAP = 12
+
 #: Written as well as logged. The log is what the review session can actually
 #: read today; the file is for whoever has a container-file tool tomorrow.
 REPORT_PATH = "/data/reports/ledger_answers.txt"
@@ -305,9 +310,22 @@ def build_report(db_path: str) -> str:
                 w(f"  buy {side.upper()}: {len(sub)} rows, {len(per)} events, "
                   f"total ${tot:+.2f}, mean ${tot/len(sub):+.4f}, "
                   f"t_clustered={_fmt(s_.get('t_clustered'), '%.2f')}")
-                w(f"    {'event':<28}{'rows':>6}{'YES':>6}{'total PnL':>12}{'mean':>10}")
-                for k, b in sorted(per.items(), key=lambda kv: -abs(kv[1][2])):
+                # Listing capped, statistics never. Crypto has 769 events on
+                # the NO side alone, and the log pipeline this is read through
+                # drops everything past roughly 500 lines — an uncapped dump
+                # pushed the Finance section, the only one anyone is waiting
+                # on, off the end of the report entirely.
+                w(f"    {'event':<28}{'rows':>6}{'YES':>6}{'total PnL':>12}{'mean':>10}"
+                  f"   (top {_EVENT_LIST_CAP} of {len(per)} by |PnL|)")
+                ranked = sorted(per.items(), key=lambda kv: -abs(kv[1][2]))
+                for k, b in ranked[:_EVENT_LIST_CAP]:
                     w(f"    {k:<28}{b[0]:>6}{b[1]:>6}{b[2]:>12.2f}{b[2]/b[0]:>10.4f}")
+                if len(ranked) > _EVENT_LIST_CAP:
+                    rest = ranked[_EVENT_LIST_CAP:]
+                    rp = sum(b[2] for _, b in rest)
+                    rr = sum(b[0] for _, b in rest)
+                    w(f"    {'... and %d more events' % len(rest):<28}{rr:>6}"
+                      f"{sum(b[1] for _, b in rest):>6}{rp:>12.2f}{rp / rr:>10.4f}")
                 # Price quantiles per side. The band a strategy would trade is
                 # chosen from these, not from a mean — a mean over a bimodal
                 # book describes neither mode.
