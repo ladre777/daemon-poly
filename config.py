@@ -179,6 +179,18 @@ class RiskConfig:
     min_liquidity_usd: float = _float("MIN_LIQUIDITY_USD", 500.0)
     checker_min_confidence: float = _float("CHECKER_MIN_CONFIDENCE", 0.65)
     dry_run: bool = _bool("DRY_RUN", True)
+    #: Cancel a resting order this many seconds before its market closes.
+    #: A resting order on a closing market cannot be repriced or withdrawn
+    #: once trading halts, so whatever it holds becomes a position opened by
+    #: a clock rather than a view. 0 disables close-cancellation entirely.
+    order_close_cancel_buffer_seconds: float = _float(
+        "ORDER_CLOSE_CANCEL_BUFFER_SECONDS", 300)
+    #: How long a requested cancel may go unconfirmed before it is logged as
+    #: an error. The order stays live and stays reserving exposure either
+    #: way — this only controls when a human is told. 0 disables the alarm,
+    #: never the safety.
+    cancel_confirm_timeout_seconds: float = _float(
+        "CANCEL_CONFIRM_TIMEOUT_SECONDS", 30)
     longshot_price_threshold_cents: float = _float("LONGSHOT_PRICE_THRESHOLD_CENTS", 20)
     longshot_edge_multiplier: float = _float("LONGSHOT_EDGE_MULTIPLIER", 1.5)
     order_strategy: str = os.getenv("ORDER_STRATEGY", "taker")

@@ -91,14 +91,23 @@ def _plain(obj):
 #: Listed here rather than in prose so the report can render it as a checklist
 #: and nothing gets quietly dropped from it.
 MAKER_PREREQUISITES = [
+    # BUILT, not yet observed. workers/order_lifecycle.OrderLifecycle is swept
+    # once per pass from main and covers TTL expiry, market-close
+    # cancellation, cancel confirmation and reprice-after-confirmed-cancel.
+    # It stays on this list because no GTC order has ever existed to sweep:
+    # build_intent is IOC-only, so the sweep has run in production against an
+    # empty set every pass. Built and tested is not observed.
     "Verified order lifecycle: TTL expiry, market-close cancellation and "
-    "reprice-after-confirmed-cancel, running in production and observed.",
+    "reprice-after-confirmed-cancel, running in production and observed. "
+    "(BUILT + TESTED in workers/order_lifecycle.py; NOT yet observed, because "
+    "no GTC order has ever been created for it to act on.)",
     "Exchange-state reconciliation for resting orders, including recovery of "
     "unknown states without operator intervention.",
     "A quote generator. The quant path currently produces a fair value, not a "
     "two-sided quote, so there is nothing to rest.",
-    "A GTC path in build_intent. Only IOC taker intents are built today and "
-    "expires_at is never set, so the TTL sweep has nothing to act on.",
+    "A GTC path in build_intent. Only IOC taker intents are built today. "
+    "expires_at IS set for GTC in Execution._submit, but no GTC intent is "
+    "ever constructed, so the sweep runs every pass over an empty set.",
     "Inventory-aware sizing. Risk sizes for a taker fill; a resting quote must "
     "skew as the position builds.",
     "Fill and adverse-selection measurement: what fraction of resting fills "

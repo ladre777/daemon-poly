@@ -313,28 +313,7 @@ class Execution:
         )
 
     # -- resting-order maintenance -----------------------------------------
-
-    def expire_stale_orders(self) -> int:
-        """Cancel resting orders past their TTL.
-
-        Only reachable in maker mode, which is refused today; kept because an
-        IOC-only bot that later grows a GTC path should find the TTL sweep
-        already wired rather than bolted on afterwards.
-        """
-        cancelled = 0
-        now = time.time()
-        for record in self.store.live_orders():
-            if record.dry_run or not record.expires_at or record.expires_at > now:
-                continue
-            if not record.exchange_order_id:
-                continue
-            try:
-                self.client.cancel_order(record.exchange_order_id)
-            except KalshiAPIError as e:
-                log.error("Could not cancel expired order %s: %s", record.client_order_id, e)
-                continue
-            # Re-read rather than assuming the cancel won: it may have filled
-            # in the moment between the TTL check and the cancel landing.
-            self.account.refresh_order(record)
-            cancelled += 1
-        return cancelled
+    #
+    # Owned by workers/order_lifecycle.OrderLifecycle, which is swept once per
+    # pass from main. The version that lived here was never called by anything
+    # — dead code in a safety path, which reads as covered and is not.

@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS orders (
     last_reconciled_at  REAL,
     terminal_at         REAL,
     expires_at          REAL,
+    close_time          REAL,
+    cancel_requested_at REAL,
     last_error          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_orders_state ON orders(state);
@@ -156,11 +158,27 @@ class OrderStore:
         self.db_path = db_path or CONFIG.ledger_db_path
         with connect(self.db_path) as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
             c.execute(
                 "INSERT INTO schema_version (id, version) VALUES (1, ?) "
                 "ON CONFLICT(id) DO UPDATE SET version = excluded.version",
                 (SCHEMA_VERSION,),
             )
+
+    @staticmethod
+    def _migrate(conn) -> None:
+        """Add columns that SCHEMA gained after this database was created.
+
+        CREATE TABLE IF NOT EXISTS silently does nothing on an existing table,
+        so a new column never reaches a database that predates it — and the
+        queries then fail at runtime on exactly the machine holding the real
+        order history. Same reasoning, and same shape, as EdgeStore._migrate.
+        """
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(orders)")}
+        if "close_time" not in have:
+            conn.execute("ALTER TABLE orders ADD COLUMN close_time REAL")
+        if "cancel_requested_at" not in have:
+            conn.execute("ALTER TABLE orders ADD COLUMN cancel_requested_at REAL")
 
     # -- orders ------------------------------------------------------------
 
@@ -217,14 +235,16 @@ class OrderStore:
                      remaining_count = ?, cancelled_count = ?, expired_count = ?,
                      avg_fill_price_cents = ?, fees_cents = ?, dry_run = ?,
                      submitted_at = ?, last_reconciled_at = ?, terminal_at = ?,
-                     expires_at = ?, last_error = ?, edge_id = ?
+                     expires_at = ?, close_time = ?, cancel_requested_at = ?,
+                     last_error = ?, edge_id = ?
                    WHERE client_order_id = ?""",
                 (
                     record.exchange_order_id, record.state.value, record.filled_count,
                     record.remaining_count, record.cancelled_count, record.expired_count,
                     record.avg_fill_price_cents, record.fees_cents, int(record.dry_run),
                     record.submitted_at, record.last_reconciled_at, record.terminal_at,
-                    record.expires_at, record.last_error, record.edge_id,
+                    record.expires_at, record.close_time,
+                    record.cancel_requested_at, record.last_error, record.edge_id,
                     record.client_order_id,
                 ),
             )
@@ -443,6 +463,20 @@ class OrderStore:
         }
 
 
+def _opt(row, key):
+    """A column that may not exist on this row.
+
+    Rows come from `SELECT *`, so after _migrate every column is present —
+    but a caller selecting an explicit subset, or a row read mid-migration on
+    another connection, would otherwise raise IndexError deep inside a
+    reconciliation loop rather than returning "not known yet".
+    """
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 def _row_to_order(row) -> OrderRecord:
     return OrderRecord(
         client_order_id=row["client_order_id"],
@@ -471,6 +505,8 @@ def _row_to_order(row) -> OrderRecord:
         last_reconciled_at=row["last_reconciled_at"],
         terminal_at=row["terminal_at"],
         expires_at=row["expires_at"],
+        close_time=_opt(row, "close_time"),
+        cancel_requested_at=_opt(row, "cancel_requested_at"),
         last_error=row["last_error"],
     )
 

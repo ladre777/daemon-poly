@@ -38,6 +38,7 @@ from workers.scout import Scout
 from workers.maker import Maker
 from workers.checker import Checker
 from workers.risk_guardrail import RiskGuardrail, KillSwitchTripped
+from workers.order_lifecycle import OrderLifecycle
 from workers.execution import (
     DuplicateOrderBlocked,
     Execution,
@@ -828,6 +829,7 @@ def main():
     risk = RiskGuardrail(bankroll_usd=args.bankroll, store=store,
                          order_store=order_store, notifier=notifier)
     execution = Execution(client, order_store, account)
+    order_lifecycle = OrderLifecycle(client, order_store, account)
     ledger = Ledger(client, store, order_store)
     reflector = Reflector(store)
 
@@ -893,6 +895,10 @@ def main():
     try:
         while True:
             try:
+                # Before the scan, not after. Resting orders are the
+                # largest live risk in the process, and a TTL or a market
+                # close does not wait for a pass to finish proposing.
+                order_lifecycle.sweep()
                 run_once(scout, maker, quant_maker, checker, risk, execution,
                          ledger, account, notifier=notifier, health=health,
                          alert_store=alert_store, arb_scanner=arb_scanner,

@@ -188,6 +188,15 @@ class OrderRecord:
     last_reconciled_at: Optional[float] = None
     terminal_at: Optional[float] = None
     expires_at: Optional[float] = None
+    #: When the market closes, epoch seconds. Carried on the order so the
+    #: close sweep is a local comparison rather than a network read per
+    #: resting order — at maker cadence that difference is the whole
+    #: rate-limit budget.
+    close_time: Optional[float] = None
+    #: When a cancel was requested but has not yet been confirmed by the
+    #: exchange. Until it clears, the order still reserves exposure and must
+    #: not be repriced: an unconfirmed cancel is not a cancel.
+    cancel_requested_at: Optional[float] = None
     last_error: Optional[str] = None
     fills: list = field(default_factory=list)
 
