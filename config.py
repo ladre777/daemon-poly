@@ -263,6 +263,62 @@ class RiskConfig:
 
 
 @dataclass
+class QuotingConfig:
+    """Two-sided quoting. Generates quotes; cannot place them.
+
+    Zone thresholds follow Becker's prediction-market microstructure finding,
+    the same source _longshot_bias_guard already cites: at longshot YES prices
+    (roughly 1-15c) YES contracts carry an expected value near -41% while NO at
+    those same prices carries about +23%, because taker flow is
+    disproportionately optimistic YES buying. The edge belongs to whoever is
+    the counterparty, which is the maker.
+
+    This bot's own ledger reproduces both halves independently: its long-YES
+    book under 20c is 1,144 settled rows with zero wins, and the taker version
+    of the other side measures -$0.0102 a row over 174 events because a taker
+    pays the spread that a maker would earn.
+    """
+
+    #: Below this YES price (cents) we are in the longshot zone.
+    longshot_threshold_cents: float = _float("QUOTE_LONGSHOT_THRESHOLD_CENTS", 15)
+    #: Above this YES price (cents) we are in the near-certainty zone.
+    near_certain_threshold_cents: float = _float("QUOTE_NEAR_CERTAIN_THRESHOLD_CENTS", 85)
+    #: How far inside fair value to quote, in cents, in the asymmetric zones.
+    zone_edge_cents: float = _float("QUOTE_ZONE_EDGE_CENTS", 2)
+    #: How far inside fair value to quote in mid-range.
+    mid_edge_cents: float = _float("QUOTE_MID_EDGE_CENTS", 1)
+    #: Never quote a spread tighter than this.
+    #:
+    #: 6c, not 4c, and the difference is the whole strategy. A filled round
+    #: trip captures the spread and pays a fee on BOTH legs. Kalshi's fee is
+    #: ceil(0.07 * P * (1-P)) per contract, which peaks near 50c — exactly
+    #: where a two-sided quote sits. At a 4c spread the arithmetic is:
+    #:
+    #:     buy 48c, sell 52c   gross capture  4c
+    #:     fee(48) + fee(52)   fees          -4c
+    #:                         net            0c
+    #:
+    #: Zero, at every fair value from 25c to 75c. A 4c floor is not a thin
+    #: edge, it is no edge, and it would have had the bot quoting all day to
+    #: break even before adverse selection is even considered. 6c nets +2c at
+    #: the worst point on the curve and more towards the tails, where the fee
+    #: falls away. Verified across the range by test_the_spread_floor_is_
+    #: profitable_at_every_fair_value.
+    min_spread_cents: float = _float("QUOTE_MIN_SPREAD_CENTS", 6)
+    #: Refuse to quote a market whose own spread is wider than this. A wide
+    #: book is wide because nobody knows the price.
+    max_market_spread_cents: float = _float("QUOTE_MAX_MARKET_SPREAD_CENTS", 20)
+    #: Contracts per side before inventory skew.
+    size_per_side: int = _int("QUOTE_SIZE_PER_SIDE", 1)
+    #: Net inventory (contracts) at which the adding side is suppressed.
+    max_inventory: int = _int("QUOTE_MAX_INVENTORY", 10)
+    #: Stop quoting entirely this many seconds before expiry.
+    stop_quote_seconds: float = _float("QUOTE_STOP_SECONDS", 300)
+    #: Skip mid-range entirely and quote only the two asymmetric zones.
+    skip_mid_range: bool = _bool("QUOTE_SKIP_MID_RANGE", False)
+
+
+@dataclass
 class ArbitrageConfig:
     enabled: bool = _bool("ARB_ENABLED", True)
     min_profit_cents: float = _float("ARB_MIN_PROFIT_CENTS", 1.0)
@@ -305,6 +361,7 @@ class AppConfig:
     models: ModelConfig = field(default_factory=ModelConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
+    quoting: QuotingConfig = field(default_factory=QuotingConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     scout_categories: list = field(
         default_factory=lambda: os.getenv(
