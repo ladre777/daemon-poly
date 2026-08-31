@@ -292,9 +292,24 @@ def _log_checker_verdicts(stats, verdict_confidence, verdict_families=None) -> N
         log.info("Checker verdicts by family (approved/checked): %s", " ".join(parts))
 
 
+def _frozen_probe_pass(pass_index: int) -> bool:
+    """Is this a pass on which frozen categories get priced at all?
+
+    Deterministic on the pass index rather than random, so the behaviour is
+    reproducible in a test and predictable in a log. A rate of 0 or 1 means
+    every pass is a probe — which still never trades the category, it only
+    stops saving the model calls.
+    """
+    rate = CONFIG.frozen_category_sample_rate
+    if rate <= 1:
+        return True
+    return pass_index % rate == 0
+
+
 def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, account,
              notifier=None, health=None, alert_store=None, arb_scanner=None,
-             coherence_gate=None, store=None, order_store=None, telemetry=None):
+             coherence_gate=None, store=None, order_store=None, telemetry=None,
+             pass_index: int = 0):
     try:
         snapshot = account.reconcile()
         if health is not None:
@@ -371,8 +386,21 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # No key / broken provider → skip LLM quietly; quant still runs.
     llm_disabled = not getattr(maker, "available", True)
 
+    frozen_probe = _frozen_probe_pass(pass_index)
+    frozen_seen: dict[str, int] = defaultdict(int)
+
     for candidate in candidates:
         proposal = None
+        # A frozen category never reaches risk or execution. It is sampled
+        # rather than dropped so a trickle of counterfactual rows keeps
+        # landing — that is the only way a future model on this path can be
+        # seen flipping the sign that froze it.
+        is_frozen = candidate.category.lower() in CONFIG.frozen_categories
+        if is_frozen:
+            frozen_seen[candidate.category.lower()] += 1
+            if not frozen_probe:
+                stats["frozen_not_probed"] += 1
+                continue
         if quant_maker.can_handle(candidate):
             stats["quant_attempted"] += 1
             quant_result = quant_maker.propose(candidate)
@@ -460,6 +488,23 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
         if not proposal:
             continue
         stats["proposed"] += 1
+
+        # Before the coherence gate on purpose. A frozen proposal is not being
+        # judged, it is being recorded, so it must not touch CoherenceGate's
+        # per-family counters — letting it do so would let a path we have
+        # stopped trading still change the sampling of one we have not.
+        if is_frozen:
+            stats["frozen_refused"] += 1
+            ledger.log_refused_proposal(
+                proposal,
+                action="skipped_frozen",
+                reason=(
+                    f"{candidate.category} is frozen: demonstrated loss "
+                    f"(cluster-robust t=-2.11 over 18 events). Priced for "
+                    f"counterfactual grading only, never traded."
+                ),
+            )
+            continue
 
         coherence = coherence_gate.check(proposal)
         if not coherence.ok:
@@ -635,6 +680,18 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
     # Said out loud, because this is the one change in the pass that makes
     # the bot do LESS than it otherwise would. A silent reduction in what
     # gets proposed is indistinguishable from a bug that does the same.
+    # A path that has been switched off and cannot be seen in the logs is
+    # indistinguishable from a bug that switched it off.
+    if frozen_seen:
+        log.info(
+            "Frozen categories (never reach risk): %s | probed this pass: %s "
+            "(1 pass in %d) | priced+recorded=%d skipped=%d",
+            " ".join(f"{k}x{v}" for k, v in sorted(frozen_seen.items())),
+            "yes" if frozen_probe else "no",
+            max(1, CONFIG.frozen_category_sample_rate),
+            stats["frozen_refused"], stats["frozen_not_probed"],
+        )
+
     sampled = coherence_gate.sampled_families()
     if sampled:
         log.info(
@@ -805,7 +862,7 @@ def main():
                          alert_store=alert_store, arb_scanner=arb_scanner,
                          coherence_gate=coherence_gate,
                          store=store, order_store=order_store,
-                         telemetry=telemetry)
+                         telemetry=telemetry, pass_index=pass_count)
                 ledger.reconcile_settlements()
                 ledger.reconcile_forecasts()
                 spot_client.persist_history()

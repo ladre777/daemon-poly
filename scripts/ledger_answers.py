@@ -98,6 +98,17 @@ def _clustered(pnls_by_event: dict[str, list[float]]) -> dict:
     return out
 
 
+def _q(sorted_values: list[float], fraction: float) -> float:
+    """Nearest-rank quantile of an already-sorted list.
+
+    A band worth trading is chosen from quantiles, never from a mean: the
+    Finance book is bimodal — a long side clustered near 8c and a short side
+    near 42c — and a single mean over the two describes neither.
+    """
+    return sorted_values[min(len(sorted_values) - 1,
+                             int(fraction * len(sorted_values)))]
+
+
 def _fmt(v, spec="%.4f"):
     return "n/a" if v is None else (spec % v)
 
@@ -257,6 +268,74 @@ def build_report(db_path: str) -> str:
             w(f"   {'event':<31}{'rows':>7}{'YES':>6}{'total PnL':>12}{'mean':>10}")
             for e, (n, y, p) in sorted(fev.items(), key=lambda kv: -kv[1][0]):
                 w(f"   {e:<31}{n:>7}{y:>6}{p:>12.2f}{p/n:>10.4f}")
+
+        # -- direction x event, the decomposition Phase 1 hinges on ---------
+        #
+        # The report has always given direction and event separately, never
+        # crossed, and that is precisely the cell that decides whether the
+        # short book is a repeatable effect or one contract. Finance's naive
+        # +$86.67 was already shown to be one event; if the +$188.23 NO half
+        # is also one event, a strategy built on it has a prior of zero.
+        w("")
+        w("-" * 78)
+        w("DIRECTION x EVENT x PRICE BAND  (settled rows)")
+        w("-" * 78)
+        for cat in sorted({(r["category"] or "?") for r in settled}):
+            rs = [r for r in settled
+                  if (r["category"] or "?") == cat and r["pnl"] is not None]
+            if not rs:
+                continue
+            w(f"\n[{cat}]")
+            for side in ("no", "yes"):
+                sub = [r for r in rs
+                       if (r["counterfactual_direction"] or "").lower() == side]
+                if not sub:
+                    continue
+                per = defaultdict(lambda: [0, 0, 0.0])
+                for r in sub:
+                    b = per[event_of(r["ticker"])]
+                    b[0] += 1
+                    if (r["outcome"] or "").lower() == "yes":
+                        b[1] += 1
+                    b[2] += float(r["pnl"])
+                tot = sum(b[2] for b in per.values())
+                s_ = _clustered({k: [float(r["pnl"]) for r in sub
+                                     if event_of(r["ticker"]) == k]
+                                 for k in per})
+                w(f"  buy {side.upper()}: {len(sub)} rows, {len(per)} events, "
+                  f"total ${tot:+.2f}, mean ${tot/len(sub):+.4f}, "
+                  f"t_clustered={_fmt(s_.get('t_clustered'), '%.2f')}")
+                w(f"    {'event':<28}{'rows':>6}{'YES':>6}{'total PnL':>12}{'mean':>10}")
+                for k, b in sorted(per.items(), key=lambda kv: -abs(kv[1][2])):
+                    w(f"    {k:<28}{b[0]:>6}{b[1]:>6}{b[2]:>12.2f}{b[2]/b[0]:>10.4f}")
+                # Price quantiles per side. The band a strategy would trade is
+                # chosen from these, not from a mean — a mean over a bimodal
+                # book describes neither mode.
+                pr = sorted(float(r["counterfactual_price_cents"]) for r in sub
+                            if r["counterfactual_price_cents"] is not None)
+                if pr:
+                    w(f"    entry {side} price c: n={len(pr)} min={pr[0]:.0f} "
+                      f"p10={_q(pr, .10):.0f} p25={_q(pr, .25):.0f} "
+                      f"med={_q(pr, .50):.0f} p75={_q(pr, .75):.0f} "
+                      f"p90={_q(pr, .90):.0f} max={pr[-1]:.0f}")
+                # PnL by entry-price band, which is the actual Phase 1 question:
+                # does any band pay after fees, and on how many EVENTS.
+                bands = [(0, 10), (10, 20), (20, 35), (35, 50),
+                         (50, 65), (65, 80), (80, 101)]
+                w(f"    {'band(c)':<10}{'rows':>7}{'events':>8}{'wins':>7}"
+                  f"{'total PnL':>12}{'mean':>10}")
+                for lo, hi in bands:
+                    bb = [r for r in sub
+                          if r["counterfactual_price_cents"] is not None
+                          and lo <= float(r["counterfactual_price_cents"]) < hi]
+                    if not bb:
+                        continue
+                    wins = sum(1 for r in bb
+                               if (r["outcome"] or "").lower() == side)
+                    t = sum(float(r["pnl"]) for r in bb)
+                    ne = len({event_of(r["ticker"]) for r in bb})
+                    w(f"    {f'{lo}-{hi - 1}':<10}{len(bb):>7}{ne:>8}{wins:>7}"
+                      f"{t:>12.2f}{t/len(bb):>10.4f}")
     finally:
         conn.close()
 

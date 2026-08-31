@@ -326,6 +326,33 @@ class AppConfig:
             "KXHIGHNY,KXHIGHCHI,KXWTI",
         ).split(",")
     )
+    #: Categories frozen out of the trading path entirely.
+    #:
+    #: Weather/llm is the only statistically demonstrated result in the whole
+    #: ledger and it is a LOSS: cluster-robust t = -2.11 over 18 distinct
+    #: settlement events, 4,663 settled rows, mean -$0.0368 per row. Every
+    #: other category's apparent signal dissolves once rows are collapsed to
+    #: the events that actually resolve. Continuing to pay a Maker and a
+    #: Checker to produce that path's proposals is buying a measured loss.
+    #:
+    #: Frozen is not the same as deleted. A frozen category is still priced
+    #: occasionally (see frozen_category_sample_rate) and its proposals are
+    #: still written and graded, so if a future weather model flips the sign
+    #: the ledger will show it. What a frozen category can never do is reach
+    #: the risk layer or execution.
+    frozen_categories: set = field(
+        default_factory=lambda: {
+            c.strip().lower() for c in os.getenv(
+                "FROZEN_CATEGORIES", "weather"
+            ).split(",") if c.strip()
+        }
+    )
+    #: Price a frozen category on one pass in N, purely to keep a trickle of
+    #: counterfactual rows landing. 0 or 1 means "price every pass" (still
+    #: never traded); a large value means "almost never ask". At the default
+    #: 20 and roughly 5-minute passes this is about three probes an hour.
+    frozen_category_sample_rate: int = _int("FROZEN_CATEGORY_SAMPLE_RATE", 20)
+
     llm_reasoning_categories: set = field(
         default_factory=lambda: {
             c.strip().lower() for c in os.getenv(
