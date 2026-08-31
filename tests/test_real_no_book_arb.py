@@ -168,3 +168,59 @@ def test_an_arb_below_the_configured_floor_is_refused():
     floor = CONFIG.arbitrage.min_profit_cents
     # 47 + 50 + 2 + 2 = 101c against a 100c payout: a loss, whatever the floor.
     assert find_locked_arb("KXT-1", 47.0, 50.0) is None or floor <= 0
+
+
+# -- the gap distribution -------------------------------------------------
+
+
+def test_the_gap_is_recorded_even_when_no_arb_exists():
+    """"Found zero" cannot distinguish a book 1c from a lock from one 20c
+    away, and those call for opposite decisions."""
+    s = ArbitrageScanner()
+    s.begin_pass()
+    s.scan([_cand("KXT-1", 40.0, 45.0, no_ask=52.0)])
+
+    g = s.gap_summary()
+    assert g["n"] == 1
+    # 45 + 52 + fee(45) + fee(52) - 100
+    expected = (45.0 + 52.0 + fee_cents_per_contract(45.0)
+                + fee_cents_per_contract(52.0)) - 100.0
+    assert g["best"] == pytest.approx(expected)
+    assert g["best"] > 0, "this book is not a lock"
+    assert g["best_ticker"] == "KXT-1"
+
+
+def test_a_lock_shows_as_a_negative_gap():
+    s = ArbitrageScanner()
+    s.begin_pass()
+    s.scan([_cand("KXT-1", 40.0, 45.0, no_ask=50.0)])
+
+    g = s.gap_summary()
+    assert g["best"] < 0
+    assert g["within_1c"] == 1
+
+
+def test_the_summary_is_none_rather_than_zero_when_nothing_was_priced():
+    """None and 'everything was far away' are different facts."""
+    s = ArbitrageScanner()
+    s.begin_pass()
+    assert s.gap_summary() is None
+
+
+def test_unpriceable_books_are_excluded_not_counted_as_distant():
+    """A market quoting 0 or 100 was never a candidate. Including it would
+    dilute the distribution with books that were never evaluated."""
+    s = ArbitrageScanner()
+    s.begin_pass()
+    s.scan([_cand("KXT-1", 0.0, 0.0, no_ask=100.0),
+            _cand("KXT-2", 40.0, 45.0, no_ask=52.0)])
+
+    assert s.gap_summary()["n"] == 1
+
+
+def test_gaps_reset_each_pass():
+    s = ArbitrageScanner()
+    s.begin_pass()
+    s.scan([_cand("KXT-1", 40.0, 45.0, no_ask=52.0)])
+    s.begin_pass()
+    assert s.gap_summary() is None

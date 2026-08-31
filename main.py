@@ -695,6 +695,19 @@ def run_once(scout, maker, quant_maker, checker, risk, execution, ledger, accoun
             100.0 * stats["arb_real_no_ask"] / total,
             stats["arb_derived_no_ask"],
         )
+        # The distribution, not just the count. Zero arbs found says nothing
+        # about whether this venue offers the trade at all; the distance to
+        # the nearest lock does.
+        gap = arb_scanner.gap_summary()
+        if gap is not None:
+            log.info(
+                "Arb gap (cost of a YES+NO pair minus 100c, fees in): "
+                "n=%d best=%+.2fc on %s p10=%+.2fc median=%+.2fc | "
+                "within 1c=%d 3c=%d 10c=%d",
+                gap["n"], gap["best"], gap["best_ticker"],
+                gap["p10"], gap["median"],
+                gap["within_1c"], gap["within_3c"], gap["within_10c"],
+            )
 
     # A path that has been switched off and cannot be seen in the logs is
     # indistinguishable from a bug that switched it off.

@@ -146,6 +146,10 @@ class ArbitrageScanner:
         self._reported: set[str] = set()
         self.real_no_ask = 0
         self.derived_no_ask = 0
+        #: Net cost of a YES+NO pair minus the 100c payout, per market, in
+        #: cents. Negative is a lock. Kept per pass so the distribution can be
+        #: reported rather than just its sign.
+        self.gaps: list[tuple[float, str]] = []
 
     def scan(self, candidates) -> list[LockedArb]:
         """Return every locked arb among these candidates, best first."""
@@ -173,11 +177,61 @@ class ArbitrageScanner:
             arb = find_locked_arb(c.ticker, quote.yes_ask, no_ask)
             if arb is not None:
                 found.append(arb)
+            # How far the book is from a lock, whether or not one exists.
+            #
+            # "Found zero" is a binary that cannot distinguish a market one
+            # fee-tick away from a lock from one twenty cents away, and those
+            # call for opposite decisions: the first says keep watching at a
+            # finer cadence, the second says this venue does not offer the
+            # trade and the scanner is dead weight. Ten days of silence was
+            # uninformative for exactly this reason.
+            self._record_gap(c.ticker, quote.yes_ask, no_ask)
 
         found.sort(key=lambda a: a.profit_cents, reverse=True)
         for arb in found:
             self._report(arb)
         return found
+
+    def _record_gap(self, ticker: str, yes_ask: float, no_ask: float) -> None:
+        """Distance from a lock, in cents, fees included.
+
+        Skips books this scanner could not price either way, so the
+        distribution describes markets that were genuinely evaluated rather
+        than being diluted by ones that were never candidates.
+        """
+        if not (0 < yes_ask < CONTRACT_PAYOUT_CENTS):
+            return
+        if not (0 < no_ask < CONTRACT_PAYOUT_CENTS):
+            return
+        cost = (yes_ask + no_ask
+                + fee_cents_per_contract(yes_ask)
+                + fee_cents_per_contract(no_ask))
+        self.gaps.append((cost - CONTRACT_PAYOUT_CENTS, ticker))
+
+    def gap_summary(self) -> Optional[dict]:
+        """Per-pass shape of how close the book came to a lock.
+
+        Returns None when nothing was priced, which is not the same as
+        "everything was far away" and must not be reported as a number.
+        """
+        if not self.gaps:
+            return None
+        ordered = sorted(self.gaps)
+        cents = [g for g, _ in ordered]
+
+        def q(f):
+            return cents[min(len(cents) - 1, int(f * len(cents)))]
+
+        return {
+            "n": len(cents),
+            "best": ordered[0][0],
+            "best_ticker": ordered[0][1],
+            "p10": q(0.10),
+            "median": q(0.50),
+            "within_1c": sum(1 for c in cents if c < 1.0),
+            "within_3c": sum(1 for c in cents if c < 3.0),
+            "within_10c": sum(1 for c in cents if c < 10.0),
+        }
 
     def _report(self, arb: LockedArb) -> None:
         if arb.ticker in self._reported:
@@ -201,3 +255,7 @@ class ArbitrageScanner:
         # books, and the two are not the same search.
         self.real_no_ask = 0
         self.derived_no_ask = 0
+        #: Net cost of a YES+NO pair minus the 100c payout, per market, in
+        #: cents. Negative is a lock. Kept per pass so the distribution can be
+        #: reported rather than just its sign.
+        self.gaps: list[tuple[float, str]] = []
