@@ -107,6 +107,10 @@ It does **not** certify which data stream the venue's settlement prices track. T
 | 5 | 491/491 Kalshi at $0.00 | Kalshi `expiration_value` vs venue settlement ref; max diff $0.000000; plus 8 no_markets, 1 JSON error | `p1_kalshi_expirations.json` + `p1_fingerprint_report_20261013.md`; pulled by `p1_kalshi_pull.py` | 491 of 500 | 2026-10-02 10:30Z – 2026-10-13 07:15Z | VERIFIED as computed (Claude independent recompute). Certification status: UNSIGNED MONITOR per §5. |
 | 6 | −$30.78 point P&L | Σ over 37 Sleeve B trades of round(per-trade point P&L, 2); sig 9a20c2fd5000cac5 | `p0_point_rule_ledger.py:82`; `pnl_restate.py::recompute_pnl`; inputs `blotter.jsonl` + `venue_truth.jsonl` | 37 trades | 2026-10-02 – 2026-10-13 | VERIFIED (Claude independent recompute). Unrounded Σ = −$30.8169 → −$30.82. The $0.04 is per-trade cent rounding, not an error. Convention stated here. |
 | 7 | −$64.72 recorded | Σ `pnl_after_fees` as booked | `blotter.jsonl` | 37 trades | same | VERIFIED (unchanged) |
+| 8 | 544/544 start-price agreement | stored start price equals the captured price-to-beat(T) to the cent | Claude independent recompute on venue_truth.jsonl + captures.jsonl as pushed | 544 | store state at push (2026-10-13 ~14:30 EDT) | VERIFIED (Claude independent recompute) |
+| 9 | 543/543 point-rule consistency | stored outcome equals end ≥ start at 2 decimals (tie → up) | Claude independent recompute on venue_truth.jsonl as pushed | 543 | store state at push | VERIFIED (Claude independent recompute) |
+
+**Erratum E1 (Claude, 2026-10-13 14:45 EDT):** rows 8–9 above were omitted from the §6 table in Revision 4 though §1 references both figures. They are appended here verbatim as written by the signer. No other changes.
 
 **Superseded figure:** the earlier +$20.28 was the restated P&L for a 23-trade subset (the ledger was stale with only 23 of 37 B trades at that time). It is **superseded** by the 37-trade −$30.78 figure above — the two cover different trade sets and must not be compared directly.
 
@@ -145,9 +149,9 @@ It does **not** certify which data stream the venue's settlement prices track. T
 
 **Claude's decision:**
 
-- [ ] **SIGNED** — I accept the outcome rule as certified above, with the §4 void condition and the §5 scope limit.
+- [x] **SIGNED** — I accept the outcome rule as certified in Revision 4 plus erratum E1 (§6 rows 8–9 above), with the §4 automatic-void condition and the §5 scope limit.
 - [ ] **RETURNED WITH EDITS** — edits attached; the draft stands unsigned.
 
-Signed: ___________________________ Date: ___________
+Signed: Claude (independent reviewer, Satoshi paper stack) Date: 2026-10-13, 14:45 EDT
 
-Edits (if returned): ____________________________________________________
+**Terms recorded at signing:** Tier K stays an unsigned monitor until LaDre makes the terms call. The shadow's primary verdict stays on s_avg labels, as pre-registered. The end_price_src schema fix still comes as a diff with a test for review. Paper only.
