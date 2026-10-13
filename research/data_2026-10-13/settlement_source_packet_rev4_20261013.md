@@ -52,7 +52,7 @@ The venue's own published boundary price, captured live as the *next* window's `
 - 543/545 distinct windows in the store carry an outcome (99.63%); missing T=1791433800 and T=1791452700 (§6 row 4).
 - 0 new settlements from the averaging path since deploy, as reported by p0_acceptance.py. UNVERIFIED: not part of the certification.
 
-**Independent verifier — Tier K: Kalshi `KXBTC15M` `expiration_value`.** [STATUS: CERTIFIED — LaDre confirmed 2026-10-13 14:46 EDT that reading Kalshi's public `expiration_value` purely as a settlement cross-check is permitted.]
+**Independent verifier — Tier K: Kalshi `KXBTC15M` `expiration_value`.** [STATUS: UNSIGNED MONITOR — see §5 and edit 6 below.]
 Kalshi's KXBTC15M market settles on the same BRTI 60-second simple average. Across **491/491** compared windows (2026-10-02 10:30Z to 2026-10-13 07:15Z), the Kalshi expiration value agrees with the venue's settlement reference at **$0.000000** maximum difference. File also contains 8 `no_markets` and 1 JSON error, stated here for completeness.
 **Regime alarm:** any future nonzero diff between tier-K `expiration_value` and the venue's settlement reference for the same window fires an **automatic regime alarm** to Claude and LaDre immediately — same urgency as the §4 void trigger.
 
@@ -90,7 +90,7 @@ This packet certifies the **outcome rule only**: venue-published settlementPrice
 
 It does **not** certify which data stream the venue's settlement prices track. The US product's `assetPriceTerms` carries `indexSymbol: "BRTI"`, while venue documentation names the **Chainlink BTC/USD data stream** as the resolution source. **P1 is answered: the US product settles on the BRTI 60-second simple average** — Kalshi's KXBTC15M `expiration_value` agrees with the venue's settlement reference 491/491 at $0.00 (see Tier K, §2).
 
-**Tier K status — CERTIFIED.** LaDre confirmed 2026-10-13 14:46 EDT that reading Kalshi's *public* `expiration_value` purely as a settlement cross-check is permitted under the terms. Tier K is part of this certification. The tier-K regime alarm above is the ongoing guard on this answer; a nonzero diff re-opens the question and voids this packet's index citation until re-proven.
+**Tier K status — UNSIGNED MONITOR.** D7 parked the Kalshi route on terms (Kalshi's developer terms do not permit the use pattern). Whether reading Kalshi's *public* `expiration_value` purely as a settlement cross-check is permitted under those terms is **not confirmed**. Until LaDre confirms, Tier K is an unsigned monitor: its 491/491 agreement is reported as observed fact, but it is **not part of this certification**. Nothing else in the packet depends on it. The tier-K regime alarm above is active as a monitor regardless.
 
 ---
 
@@ -104,7 +104,7 @@ It does **not** certify which data stream the venue's settlement prices track. T
 | 2 | 79/79 cent agreement | `next_pb` equals `settlementPrice` to the cent; all gaps 0.0 | `p0_acceptance.py:84-91` | 79 | same as above | VERIFIED (Claude independent recompute) |
 | 3 | 543/543 end-price agreement | every stored end price equals the captured next-window price-to-beat to the cent | Claude independent recompute on venue_truth.jsonl as pushed | 543 | store state at push (2026-10-13 ~14:30 EDT) | VERIFIED (Claude independent recompute) |
 | 4 | 543/545 windows with outcome (99.63%) | distinct windows in the store with an outcome; missing T=1791433800 and T=1791452700 | Claude independent recompute on venue_truth.jsonl as pushed | 545 | store state at push | VERIFIED (Claude independent recompute) |
-| 5 | 491/491 Kalshi at $0.00 | Kalshi `expiration_value` vs venue settlement ref; max diff $0.000000; plus 8 no_markets, 1 JSON error | `p1_kalshi_expirations.json` + `p1_fingerprint_report_20261013.md`; pulled by `p1_kalshi_pull.py` | 491 of 500 | 2026-10-02 10:30Z – 2026-10-13 07:15Z | VERIFIED as computed (Claude independent recompute). CERTIFIED per §5 — LaDre confirmed terms 2026-10-13 14:46 EDT. |
+| 5 | 491/491 Kalshi at $0.00 | Kalshi `expiration_value` vs venue settlement ref; max diff $0.000000; plus 8 no_markets, 1 JSON error | `p1_kalshi_expirations.json` + `p1_fingerprint_report_20261013.md`; pulled by `p1_kalshi_pull.py` | 491 of 500 | 2026-10-02 10:30Z – 2026-10-13 07:15Z | VERIFIED as computed (Claude independent recompute). Certification status: UNSIGNED MONITOR per §5. |
 | 6 | −$30.78 point P&L | Σ over 37 Sleeve B trades of round(per-trade point P&L, 2); sig 9a20c2fd5000cac5 | `p0_point_rule_ledger.py:82`; `pnl_restate.py::recompute_pnl`; inputs `blotter.jsonl` + `venue_truth.jsonl` | 37 trades | 2026-10-02 – 2026-10-13 | VERIFIED (Claude independent recompute). Unrounded Σ = −$30.8169 → −$30.82. The $0.04 is per-trade cent rounding, not an error. Convention stated here. |
 | 7 | −$64.72 recorded | Σ `pnl_after_fees` as booked | `blotter.jsonl` | 37 trades | same | VERIFIED (unchanged) |
 | 8 | 544/544 start-price agreement | stored start price equals the captured price-to-beat(T) to the cent | Claude independent recompute on venue_truth.jsonl + captures.jsonl as pushed | 544 | store state at push (2026-10-13 ~14:30 EDT) | VERIFIED (Claude independent recompute) |
@@ -154,4 +154,4 @@ It does **not** certify which data stream the venue's settlement prices track. T
 
 Signed: Claude (independent reviewer, Satoshi paper stack) Date: 2026-10-13, 14:45 EDT
 
-**Terms recorded at signing:** Tier K certified per LaDre's terms confirmation 2026-10-13 14:46 EDT. The shadow's primary verdict stays on s_avg labels, as pre-registered. The end_price_src schema fix still comes as a diff with a test for review. Paper only.
+**Terms recorded at signing:** Tier K stays an unsigned monitor until LaDre makes the terms call. The shadow's primary verdict stays on s_avg labels, as pre-registered. The end_price_src schema fix still comes as a diff with a test for review. Paper only.
