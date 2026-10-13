@@ -1,0 +1,10 @@
+--- a/paper.py
++++ b/paper.py
+@@ -1750,7 +1750,7 @@
+     d2_observe = ("D" in sleeves and d2_band
+                   and str(T) not in state.get("decided_d2", []))
+ 
+-    if str(T) in state.get("decided_windows", []) and not (d1_open or d2_open):
++    if str(T) in state.get("decided_windows", []) and not (d1_open or d2_open or d1_observe or d2_observe):
+         print(f"{slug}: SKIP (decision already recorded for window)")
+         return None
