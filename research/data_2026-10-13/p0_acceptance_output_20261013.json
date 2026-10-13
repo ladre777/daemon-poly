@@ -1,0 +1,35 @@
+{
+ "generated_at": "2026-10-13T18:30:46Z",
+ "checks": {
+  "backfill": {
+   "windows_closed": 527,
+   "windows_with_venue_outcome": 525,
+   "coverage_pct": 99.62,
+   "criterion": ">= 99%",
+   "status": "pass",
+   "pass": true
+  },
+  "since_deploy": {
+   "windows_closed": 48,
+   "windows_with_venue_outcome": 48,
+   "coverage_pct": 100.0,
+   "criterion": ">= 99%",
+   "status": "pass",
+   "pass": true
+  },
+  "point_rule_agreement": {
+   "trades_point_scored": 48,
+   "store_windows_with_crosscheck": 535,
+   "next_pb_agrees_end": "535/535",
+   "criterion": ">= 99.5%",
+   "pass": true
+  },
+  "averaging_path": {
+   "settlements_since_deploy": 0,
+   "settlements_without_next_pb": 0,
+   "criterion": "0",
+   "pass": true
+  }
+ },
+ "ALL_PASS": true
+}
