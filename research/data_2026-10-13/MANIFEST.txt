@@ -10,3 +10,6 @@ de681d1cec50a1e5d2c23a0be90390049a4daf28a9b288a3ded5f14390121a0b  688  research/
 96c6c4b88fa4c3c8487ddf72c5d1c9475811cf7a2bdb607fbc22fed1fb7fff84  4672  research/p2_preregistration_20261013.md
 3ef70094912d4d38e2068e4f3eb12e8cc2c7aafd7a4af30f31c6d15842b89c0e  9776  research/p3_prereg_20261013.md
 03e64c75fef463d71b2397e92df2975b941a2b8d018fb66789bf3c0b3dbc35bb  6760  research/p3alt_prereg_20261013.md
+86c15afb1375c40cddd0c8ea010831a9ffca6b7ef69cd125aa016bdd8ce7954e  8584340  research/data_2026-10-13/p3/book_snapshots_2026-10-13.jsonl.gz (gzipped 282844 bytes)
+7a04ebf1d00506e8b6095625314583218288d8f5ad82c217035b1852e8a4f767  1323513  research/data_2026-10-13/p3/trade_prints_2026-10-13.jsonl.gz (gzipped 83583 bytes)
+93a9b70a4cbe801069ef5de030335ba6e8df04817603ecc09ffa926abee8fc3a  14846560  research/data_2026-10-13/p3/chainlink_stream_log.jsonl.gz (gzipped 1695576 bytes)
