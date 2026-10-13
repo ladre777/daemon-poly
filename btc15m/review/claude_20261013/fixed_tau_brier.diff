@@ -1,0 +1,224 @@
+--- new/paper.py	2026-10-13 18:20:09.406554280 +0000
++++ new2/paper.py	2026-10-13 18:22:20.144300552 +0000
+@@ -131,6 +131,14 @@
+ # Firing halts B/C/D and reports; re-enabling needs LaDre's word.
+ KILL_BRIER_MIN_N = 100
+ KILL_BRIER_CI_Z = 1.96
++# Fixed-tau measurement (Claude 2026-10-13, LaDre-approved): kill(c) and
++# gate [3] compare model vs market at ONE grid point, not at each window's
++# last evaluated tick. The last-tick tau drifts with which sleeves keep
++# windows alive (after D was disabled on 2026-10-10 it jumped from mostly
++# <=150 s to mostly >600 s), so a mixed-tau mean can move -- and fire a
++# kill -- on scoring changes alone. In the risk hash on purpose: a change to
++# how a kill measures is a risk-domain change and must be visible.
++KILL_BRIER_TAU = 300
+ # Rolling / drawdown kill switches (review 2026-10-06). DEFAULT thresholds --
+ # LaDre sets the final numbers before any run that matters; these are sane
+ # starting points, not his word.
+@@ -227,6 +235,7 @@
+                          "KILL_CONSEC_LOSSES": KILL_CONSEC_LOSSES,
+                          "KILL_BRIER_MIN_N": KILL_BRIER_MIN_N,
+                          "KILL_BRIER_CI_Z": KILL_BRIER_CI_Z,
++                         "KILL_BRIER_TAU": KILL_BRIER_TAU,
+                          "KILL_ROLL20_PCT": KILL_ROLL20_PCT,
+                          "KILL_DRAWDOWN_PCT": KILL_DRAWDOWN_PCT})
+ 
+@@ -311,6 +320,30 @@
+     return out
+ 
+ 
++def _brier_grid_diffs(state):
++    """Paired (model - market) Brier at the fixed grid point KILL_BRIER_TAU.
++
++    Same window set as _brier_windows_current (current model version, one
++    record per window), restricted to windows that carry a grid score at
++    KILL_BRIER_TAU (stamped at scoring time, or backfilled once by
++    --stamp-grid-brier). Malformed values are skipped, never coerced.
++    One helper for kill(c), gate [3] and the report.
++    """
++    out = []
++    for w in _brier_windows_current(state):
++        if w.get("g_tau") != KILL_BRIER_TAU:
++            continue
++        bm, bk = w.get("g_brier_model"), w.get("g_brier_mkt")
++        if isinstance(bm, bool) or isinstance(bk, bool):
++            continue
++        if not isinstance(bm, (int, float)) or not isinstance(bk, (int, float)):
++            continue
++        if not (math.isfinite(bm) and math.isfinite(bk)):
++            continue
++        out.append(bm - bk)
++    return out
++
++
+ def _trim_brier_windows(state):
+     """Enforce the single retention cap (in place)."""
+     state["brier_windows"] = state["brier_windows"][-BRIER_WINDOWS_MAX:]
+@@ -931,6 +964,14 @@
+             "sigma_f3": gs.get("sigma_f3"),
+             "S": gs.get("S"),
+         }
++    # Fixed-tau kill/gate input (2026-10-13): carry the grid score at
++    # KILL_BRIER_TAU on the minimal brier_windows entry, same labels.
++    _gk = grid_scores.get(str(KILL_BRIER_TAU))
++    if _gk is not None:
++        bw_entry["g_tau"] = KILL_BRIER_TAU
++        bw_entry["g_brier_model"] = _gk["brier_model"]
++        bw_entry["g_brier_mkt"] = _gk["brier_mkt"]
++        bw_entry["g_tau_actual"] = _gk.get("tau_actual")
+     # 72h shadow: window-level shadow values + Briers beside live/market.
+     sh = pb.get("shadow") or {}
+     shadow_rec = {
+@@ -1161,6 +1202,60 @@
+     return n
+ 
+ 
++def _stamp_grid_brier():
++    """One-time backfill: copy the KILL_BRIER_TAU grid score from
++    scored_windows*.jsonl into brier_windows entries that lack it.
++
++    Same labels as the entries (both written by the same scorer). Windows
++    without that grid point stay unstamped -- never estimated. Safety as
++    _stamp_legacy_model_v: refuses on a kill_check_error flag or a held tick
++    lock; backs up STATE first; idempotent (second run stamps 0).
++    Returns the stamped count. Raises SystemExit on refusal.
++    """
++    flag = _kc_flag_read()
++    if flag is not None:
++        print(f"REFUSED: kill_check_error flag set "
++              f"({flag.get('type')}: {flag.get('message')}) -- clear it first")
++        raise SystemExit(1)
++    if _tick_lock_held():
++        print("REFUSED: tick lock held -- run between ticks")
++        raise SystemExit(1)
++    raw = _kc_load_raw()
++    if raw is None:
++        print("REFUSED: STATE unreadable")
++        raise SystemExit(1)
++    by_t = {r["T"]: r for r in _read_scored_windows()}
++    ts = int(time.time())
++    bak = f"{STATE}.pre_grid_stamp.{ts}"
++    shutil.copy2(STATE, bak)
++    n = 0
++    for w in raw.get("brier_windows", []):
++        if w.get("g_tau") == KILL_BRIER_TAU:
++            continue
++        g = ((by_t.get(w.get("T")) or {}).get("tau_grid_scores") or {}) \
++            .get(str(KILL_BRIER_TAU))
++        if not g:
++            continue
++        bm, bk = g.get("brier_model"), g.get("brier_mkt")
++        if not all(isinstance(x, (int, float)) and not isinstance(x, bool)
++                   and math.isfinite(x) for x in (bm, bk)):
++            continue
++        w["g_tau"] = KILL_BRIER_TAU
++        w["g_brier_model"] = bm
++        w["g_brier_mkt"] = bk
++        w["g_tau_actual"] = g.get("tau_actual")
++        w["g_stamped_from"] = "scored_windows"
++        n += 1
++    _atomic_json_write(STATE, raw)
++    with open(STATE + ".model_v_audit.log", "a") as f:
++        f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
++                f"grid_brier_stamped={n} tau={KILL_BRIER_TAU} "
++                f"source=scored_windows backup={bak}\n")
++    print(f"stamped {n} windows with tau={KILL_BRIER_TAU} grid Brier "
++          f"(backup: {bak})")
++    return n
++
++
+ def d_lead_vol(O, Te, state=None):
+     """BRTI inputs for Sleeve D. Returns (lead_bp, vol_bp), Nones on failure.
+ 
+@@ -1505,18 +1600,19 @@
+         for s in ("B", "C", "D"):
+             if s not in state["disabled"]:
+                 state["disabled"].append(s)
+-    _bw = _brier_windows_current(state)  # one record per distinct window,
+-    # current model version only (legacy labels relabeled by migration)
+-    if arm and len(_bw) >= KILL_BRIER_MIN_N:
+-        _diffs = [w["brier_model"] - w["brier_mkt"] for w in _bw]
++    # Fixed-tau (2026-10-13): paired diffs at grid point KILL_BRIER_TAU only,
++    # one per distinct window, current model version only.
++    _diffs = _brier_grid_diffs(state)
++    if arm and len(_diffs) >= KILL_BRIER_MIN_N:
+         _n = len(_diffs)
+         _m = sum(_diffs) / _n
+         _sd = math.sqrt(sum((x - _m) ** 2 for x in _diffs) / (_n - 1)) if _n > 1 else 0.0
+         _lb = _m - KILL_BRIER_CI_Z * _sd / math.sqrt(_n) if _n else 0.0
+         if _lb > 0:
+             reasons.append(f"Brier 95% CI lower bound {_lb:+.4f} > 0 "
+-                           f"(model significantly worse) over {len(_bw)} "
+-                           f"distinct windows, model {FAIRVALUE_MODEL_V[:8]}")
++                           f"(model significantly worse) at tau="
++                           f"{KILL_BRIER_TAU}s over {_n} distinct windows, "
++                           f"model {FAIRVALUE_MODEL_V[:8]}")
+             for _s in ("B", "C", "D"):
+                 if _s not in state["disabled"]:
+                     state["disabled"].append(_s)
+@@ -2874,11 +2970,13 @@
+                 bk = sum(w["brier_mkt"] for w in lst) / len(lst)
+                 print(f"  tau {lo}-{hi}s: n={len(lst)} model={bm:.4f} "
+                       f"market={bk:.4f} {'MODEL WINS' if bm < bk else 'MARKET WINS'}")
+-        # paired interval on (model - market), review 2026-10-06.
+-        # Same window set as kill(c) and gate [3] (2026-10-08).
+-        _bwc = _brier_windows_current(state)
+-        diffs = [w["brier_model"] - w["brier_mkt"] for w in _bwc]
++        # paired interval on (model - market), review 2026-10-06. Fixed tau
++        # (2026-10-13): the same series kill(c) and gate [3] read. The
++        # window-level (last-tick, mixed-tau) figure is NOT decision-bearing.
++        diffs = _brier_grid_diffs(state)
+         n = len(diffs)
++        print(f"  [kill(c)/gate[3] series] fixed tau={KILL_BRIER_TAU}s, "
++              f"positive = model worse:")
+         if n > 1:
+             m = sum(diffs) / n
+             sd = math.sqrt(sum((x - m) ** 2 for x in diffs) / (n - 1))
+@@ -3010,9 +3108,8 @@
+               f"with shadow p_h60/p_f3 (since {_sh_since})")
+     except Exception:
+         print("  SHADOW (report-only, non-gating): n/a (read failed)")
+-    # Gate [3] uses the same window set as kill(c) (2026-10-08).
+-    diffs90 = [w["brier_model"] - w["brier_mkt"]
+-               for w in _brier_windows_current(state)]
++    # Gate [3] uses the same window set as kill(c): fixed tau (2026-10-13).
++    diffs90 = _brier_grid_diffs(state)
+     n90 = len(diffs90)
+     if n90 >= 100:
+         m90 = sum(diffs90) / n90
+@@ -3020,11 +3117,13 @@
+         se90 = sd90 / math.sqrt(n90)
+         ub90 = m90 + 1.645 * se90  # one-sided 90% upper bound
+         g3 = (m90 <= 0) and (ub90 < GATE_BRIER_TOL)
+-        print(f"  [3] Brier: point {m90:+.4f}<=0 and 90% upper {ub90:+.4f} "
++        print(f"  [3] Brier @tau={KILL_BRIER_TAU}s (model-market; positive = "
++              f"model worse): point {m90:+.4f}<=0 and 90% upper {ub90:+.4f} "
+               f"< {GATE_BRIER_TOL} (n={n90}): {'PASS' if g3 else '...'}")
+     else:
+         g3 = False
+-        print(f"  [3] Brier: n={n90}/100 scored windows ...")
++        print(f"  [3] Brier @tau={KILL_BRIER_TAU}s: n={n90}/100 scored "
++              f"windows ...")
+     # Fixed-grid tau 300-600 slice (NON-GATING, 2026-10-08): paired
+     # model-minus-market Brier on the by-tau snapshots, since that is
+     # where B trades. Report-only; the gate still uses the logged
+@@ -3092,6 +3191,9 @@
+     ap.add_argument("--stamp-legacy-model-v", action="store_true",
+                     help="one-time: relabel legacy model_v Brier windows to "
+                          "the current label and exit")
++    ap.add_argument("--stamp-grid-brier", action="store_true",
++                    help="one-time: backfill the fixed-tau grid Brier into "
++                         "brier_windows from scored_windows and exit")
+     ap.add_argument("--restore-from-snapshot", action="store_true",
+                     help="with --clear-kc-error: rebuild broken ledger keys "
+                          "from the last-good snapshot (explicit consent)")
+@@ -3100,6 +3202,9 @@
+     if a.stamp_legacy_model_v:
+         _stamp_legacy_model_v()
+         return
++    if a.stamp_grid_brier:
++        _stamp_grid_brier()
++        return
+     if a.clear_kc_error:
+         flag = _kc_flag_read()
+         if flag is None:

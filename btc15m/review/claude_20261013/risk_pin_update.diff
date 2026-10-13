@@ -1,0 +1,30 @@
+--- orig/test_shadow_20261008.py	2026-10-13 18:20:09.388392886 +0000
++++ new2/test_shadow_20261008.py	2026-10-13 18:23:23.819207158 +0000
+@@ -255,7 +255,7 @@
+     # The shadow must not move signal, sizing, or risk inputs.
+     assert pm.SIG == {"A": "4acf18e6bd198af9", "B": "9a20c2fd5000cac5",
+                       "C": "3a633e3ce6ea21b6", "D": "3c549728a8166b88"}
+-    assert pm.RISK == "e2af68a6407c920d"
++    assert pm.RISK == "6951f00a2acaaebe"
+     assert pm.FAIRVALUE_MODEL_V.startswith("fv1:sha256:8f403a0e")
+     # shadow_sigma is not part of any hash input
+     import hashlib, json
+--- orig/test_research_20261008.py	2026-10-13 18:20:09.388320327 +0000
++++ new2/test_research_20261008.py	2026-10-13 18:23:23.817044409 +0000
+@@ -306,7 +306,7 @@
+     # signal, sizing, or risk input changed -- the era accounting moved.
+     assert pm.SIG == {"A": "4acf18e6bd198af9", "B": "9a20c2fd5000cac5",
+                       "C": "3a633e3ce6ea21b6", "D": "3c549728a8166b88"}
+-    assert pm.RISK == "e2af68a6407c920d"
++    assert pm.RISK == "6951f00a2acaaebe"
+     assert pm.FAIRVALUE_MODEL_V.startswith("fv1:sha256:8f403a0e")
+ 
+ 
+--- orig/test_surgical_20261008.py	2026-10-13 18:20:09.388427749 +0000
++++ new2/test_surgical_20261008.py	2026-10-13 18:23:23.822451367 +0000
+@@ -212,4 +212,4 @@
+ def test_sig_risk_hashes_still_pinned():
+     assert pm.SIG == {'A': '4acf18e6bd198af9', 'B': '9a20c2fd5000cac5',
+                       'C': '3a633e3ce6ea21b6', 'D': '3c549728a8166b88'}
+-    assert pm.RISK == 'e2af68a6407c920d'
++    assert pm.RISK == '6951f00a2acaaebe'

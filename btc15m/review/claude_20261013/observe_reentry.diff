@@ -1,0 +1,47 @@
+--- orig/paper.py	2026-10-13 18:20:09.387880723 +0000
++++ new/paper.py	2026-10-13 18:20:09.406554280 +0000
+@@ -1750,7 +1750,20 @@
+     d2_observe = ("D" in sleeves and d2_band
+                   and str(T) not in state.get("decided_d2", []))
+ 
+-    if str(T) in state.get("decided_windows", []) and not (d1_open or d2_open):
++    # Observation re-entry (Claude 2026-10-13, LaDre-approved): a window
++    # already decided for ABC is revisited while a D band is open for
++    # OBSERVATION, even when D is disabled. Disabling D used to stop this
++    # (only d1_open/d2_open kept windows alive), which silently halted the
++    # tau-grid fill, the sigma shadow and D-shadow observation from
++    # 2026-10-10 -- breaking LaDre's 2026-10-06 rule "observation must not
++    # stop". Re-entry is observation-only: every trade branch below is
++    # gated on observe_only, which re-entry sets. When D is enabled,
++    # d1_open/d2_open take precedence and behaviour is exactly as before.
++    observe_reentry = (str(T) in state.get("decided_windows", [])
++                       and not (d1_open or d2_open)
++                       and (d1_observe or d2_observe))
++    if str(T) in state.get("decided_windows", []) \
++            and not (d1_open or d2_open or observe_reentry):
+         print(f"{slug}: SKIP (decision already recorded for window)")
+         return None
+ 
+@@ -1760,9 +1773,11 @@
+     # the tick still fetches the book, logs asks, queues the Brier intake and
+     # runs D shadow observation. Every trade-taking branch below is gated on
+     # not observe_only.
+-    observe_only = bool(halt)
++    observe_only = bool(halt) or observe_reentry
+     halt_reason = ("kill switch (observation only): " + "; ".join(reasons)
+                    if halt else None)
++    if halt_reason is None and observe_reentry:
++        halt_reason = "observation re-entry (window decided; D band open)"
+     if tau <= 0:
+         return abstain("window closed")
+ 
+@@ -2085,7 +2100,8 @@
+         # B branch not reached: record why, for the funnel (replaces the
+         # generic default set at record creation).
+         if observe_only:
+-            rec["b_waterfall"]["reason"] = "halted"
++            rec["b_waterfall"]["reason"] = ("halted" if halt
++                                            else "observe_reentry")
+         elif "B" in state["disabled"]:
+             rec["b_waterfall"]["reason"] = "b_disabled"
+         elif "B" not in sleeves:
